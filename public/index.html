@@ -264,6 +264,80 @@
             </div>
         </footer>
 
+        <!-- Screen Share Configuration Modal (App Audio Isolation) -->
+        <div class="modal-overlay" id="shareConfigModal" style="display: none;" hidden>
+            <div class="modal-card modal-sm">
+                <div class="modal-header">
+                    <h3><i class="fa-solid fa-sliders"></i> Iniciar Transmissão</h3>
+                    <button class="btn-close" id="btnCloseShareConfig" title="Fechar (ESC)"><i class="fa-solid fa-xmark"></i></button>
+                </div>
+                <div class="modal-body">
+                    <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 16px;">
+                        Selecione a fonte de áudio antes de escolher a janela ou tela de vídeo:
+                    </p>
+
+                    <div class="audio-source-options" style="display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px;">
+                        <label class="audio-option-card" style="display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--primary); background: var(--bg-surface-hover); cursor: pointer;">
+                            <div style="display: flex; align-items: center; justify-content: space-between;">
+                                <div style="display: flex; align-items: center; gap: 10px;">
+                                    <input type="radio" name="audioSourceType" value="exclude_discord" id="audioSourceExcludeDiscord" checked>
+                                    <strong><i class="fa-brands fa-discord" style="color: #5865F2;"></i> Transmitir PC Sem Discord (Recomendado)</strong>
+                                </div>
+                            </div>
+                            <span style="font-size: 0.8rem; color: var(--text-muted); padding-left: 24px;">
+                                Captura todo o som do computador (jogos, YouTube, Spotify) e <strong>exclui a chamada do Discord</strong> automaticamente via WASAPI. Zero configuração!
+                            </span>
+                            <div style="padding-left: 24px; font-size: 0.78rem;" id="discordStatusContainer">
+                                <span id="discordStatusBadge" style="color: var(--text-muted);"><i class="fa-solid fa-circle-notch fa-spin"></i> Verificando Discord...</span>
+                            </div>
+                        </label>
+
+                        <label class="audio-option-card" style="display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--border); background: var(--bg-surface); cursor: pointer;">
+                            <div style="display: flex; align-items: center; gap: 10px;">
+                                <input type="radio" name="audioSourceType" value="app" id="audioSourceApp">
+                                <strong><i class="fa-solid fa-gamepad" style="color: var(--primary);"></i> Apenas Um Aplicativo Específico</strong>
+                            </div>
+                            <span style="font-size: 0.8rem; color: var(--text-muted); padding-left: 24px;">
+                                Captura isolada de um único jogo ou janela.
+                            </span>
+                            <div id="appSelectorContainer" style="display: none; gap: 8px; margin-top: 6px; padding-left: 24px;">
+                                <select id="selectAudioApp" class="form-input" style="flex: 1; padding: 8px; font-size: 0.85rem;">
+                                    <option value="">Carregando aplicativos abertos...</option>
+                                </select>
+                                <button type="button" class="btn btn-secondary btn-sm" id="btnRefreshAudioApps" title="Atualizar lista de janelas">
+                                    <i class="fa-solid fa-rotate-right"></i>
+                                </button>
+                            </div>
+                        </label>
+
+                        <label class="audio-option-card" style="display: flex; flex-direction: column; gap: 4px; padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--border); background: var(--bg-surface); cursor: pointer;">
+                            <div style="display: flex; align-items: center; gap: 10px;">
+                                <input type="radio" name="audioSourceType" value="system" id="audioSourceSystem">
+                                <strong><i class="fa-solid fa-volume-high"></i> Áudio Geral do Sistema / VB-Cable</strong>
+                            </div>
+                            <span style="font-size: 0.8rem; color: var(--text-muted); padding-left: 24px;">
+                                Captura o áudio nativo do Windows ou cabo virtual.
+                            </span>
+                        </label>
+
+                        <label class="audio-option-card" style="display: flex; flex-direction: column; gap: 4px; padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--border); background: var(--bg-surface); cursor: pointer;">
+                            <div style="display: flex; align-items: center; gap: 10px;">
+                                <input type="radio" name="audioSourceType" value="none" id="audioSourceNone">
+                                <strong><i class="fa-solid fa-volume-xmark"></i> Sem Áudio</strong>
+                            </div>
+                            <span style="font-size: 0.8rem; color: var(--text-muted); padding-left: 24px;">
+                                Transmitir apenas vídeo (mudo).
+                            </span>
+                        </label>
+                    </div>
+
+                    <button class="btn btn-primary btn-block" id="btnConfirmStartShare">
+                        <i class="fa-solid fa-display"></i> Continuar e Escolher Janela
+                    </button>
+                </div>
+            </div>
+        </div>
+
         <!-- Audio Guide Modal (VB-Audio & Discord Guide) -->
         <div class="modal-overlay" id="audioGuideModal" style="display: none;" hidden>
             <div class="modal-card modal-guide">

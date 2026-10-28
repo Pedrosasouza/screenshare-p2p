@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "build-windows": "npx @neutralinojs/neu build && powershell -Command \"Get-ChildItem -Path dist\\StreamGrid -Include *linux*, *mac* | Remove-Item -Force; Compress-Archive -Path dist\\StreamGrid -DestinationPath dist\\StreamGrid-Windows.zip -Force\""
+    "build-helper": "cargo build --release --manifest-path tools/audio-helper/Cargo.toml && powershell -Command \"Copy-Item tools\\audio-helper\\target\\release\\streamgrid-audio-helper.exe -Destination bin\\streamgrid-audio-helper.exe -Force\"",
+    "build-windows": "npm run build-helper && npx @neutralinojs/neu build && powershell -Command \"Copy-Item bin\\streamgrid-audio-helper.exe -Destination dist\\StreamGrid -Force; Get-ChildItem -Path dist\\StreamGrid -Include *linux*, *mac* | Remove-Item -Force; Compress-Archive -Path dist\\StreamGrid -DestinationPath dist\\StreamGrid-Windows.zip -Force\""
   },
   "dependencies": {
     "express": "^4.19.2",

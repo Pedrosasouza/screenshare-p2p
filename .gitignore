@@ -1,5 +1,6 @@
 node_modules/
 dist/
 bin/
+tools/audio-helper/target/
 .env
 *.log

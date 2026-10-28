@@ -1,6 +1,204 @@
-if (typeof Neutralino !== 'undefined') {
-    try { Neutralino.init(); } catch(e) {}
+// ==========================================
+// Rust Audio Helper (WASAPI Application Loopback)
+// ==========================================
+let helperWs = null;
+let helperConnected = false;
+let availableWindows = [];
+let helperAudioContext = null;
+let activeAudioWorkletNode = null;
+let helperAudioDestination = null;
+
+async function spawnAudioHelperIfNeutralino() {
+    if (typeof Neutralino !== 'undefined' && Neutralino.os) {
+        try {
+            const appPath = (typeof NL_PATH !== 'undefined' && NL_PATH) ? NL_PATH : '.';
+            const parentPid = (typeof NL_PID !== 'undefined' && NL_PID) ? NL_PID : 0;
+            console.log('[AudioHelper] Spawning helper process (parent PID:', parentPid, ')...');
+            await Neutralino.os.spawnProcess(`"${appPath}/bin/streamgrid-audio-helper.exe" --port 45454 --parent-pid ${parentPid}`);
+        } catch(err) {
+            console.log('[AudioHelper] Spawn attempt note:', err.message || err);
+        }
+    }
 }
+
+function connectAudioHelper() {
+    if (helperWs && (helperWs.readyState === WebSocket.OPEN || helperWs.readyState === WebSocket.CONNECTING)) {
+        return;
+    }
+    try {
+        helperWs = new WebSocket('ws://127.0.0.1:45454');
+        helperWs.binaryType = 'arraybuffer';
+
+        helperWs.onopen = () => {
+            console.log('[AudioHelper] ✅ Conectado ao Helper WASAPI de Áudio (Rust)');
+            helperConnected = true;
+            checkDiscordStatus();
+            fetchWindowList();
+        };
+
+        helperWs.onmessage = (event) => {
+            if (event.data instanceof ArrayBuffer) {
+                if (activeAudioWorkletNode) {
+                    const float32Data = new Float32Array(event.data);
+                    activeAudioWorkletNode.port.postMessage(float32Data);
+                }
+                return;
+            }
+
+            try {
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'windows_list') {
+                    availableWindows = msg.windows || [];
+                    updateAudioAppSelect(availableWindows);
+                } else if (msg.type === 'discord_status') {
+                    const badge = document.getElementById('discordStatusBadge');
+                    if (badge) {
+                        if (msg.detected) {
+                            badge.style.color = '#3ba55d';
+                            badge.innerHTML = `<i class="fa-solid fa-circle-check"></i> Discord detectado (PID ${msg.pid}) — Chamadas serão excluídas do stream`;
+                        } else {
+                            badge.style.color = '#faa81a';
+                            badge.innerHTML = `<i class="fa-solid fa-circle-exclamation"></i> Discord Desktop não detectado (inicie-o para isolar a chamada)`;
+                        }
+                    }
+                } else if (msg.type === 'capture_started') {
+                    const modeDesc = msg.mode === 'exclude' ? 'Exclusão do Discord' : 'Aplicativo Isolado';
+                    console.log(`[AudioHelper] ✅ Captura iniciada no modo [${modeDesc}] para PID ${msg.pid} (${msg.sample_rate}Hz, ${msg.channels} canais)`);
+                } else if (msg.type === 'error') {
+                    console.error('[AudioHelper] Erro relatado pelo helper:', msg.message);
+                    alert('Aviso de Áudio: ' + msg.message);
+                }
+            } catch(e) {}
+        };
+
+        helperWs.onclose = () => {
+            helperConnected = false;
+            setTimeout(connectAudioHelper, 3000);
+        };
+        helperWs.onerror = () => {
+            helperConnected = false;
+        };
+    } catch(e) {
+        console.warn('[AudioHelper] Erro ao conectar ao WebSocket do helper:', e);
+    }
+}
+
+function checkDiscordStatus() {
+    if (helperWs && helperWs.readyState === WebSocket.OPEN) {
+        helperWs.send(JSON.stringify({ type: 'get_discord_status' }));
+    }
+}
+
+function fetchWindowList() {
+    if (helperWs && helperWs.readyState === WebSocket.OPEN) {
+        helperWs.send(JSON.stringify({ type: 'list_windows' }));
+    }
+}
+
+function updateAudioAppSelect(windows) {
+    const select = document.getElementById('selectAudioApp');
+    if (!select) return;
+
+    select.innerHTML = '';
+    if (!windows || windows.length === 0) {
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = 'Nenhuma janela compatível encontrada';
+        select.appendChild(opt);
+        return;
+    }
+
+    windows.forEach(w => {
+        const opt = document.createElement('option');
+        opt.value = w.pid;
+        const exeInfo = w.exe ? ` [${w.exe}]` : '';
+        const titleTrimmed = w.title.length > 40 ? w.title.substring(0, 37) + '...' : w.title;
+        opt.textContent = `${titleTrimmed}${exeInfo}`;
+        select.appendChild(opt);
+    });
+}
+
+async function startAppAudioCapture(pid) {
+    if (!helperConnected || !helperWs) {
+        throw new Error('Helper de áudio não conectado. Inicie o streamgrid-audio-helper.exe.');
+    }
+
+    if (!helperAudioContext || helperAudioContext.state === 'closed') {
+        helperAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+    } else if (helperAudioContext.state === 'suspended') {
+        await helperAudioContext.resume();
+    }
+
+    try {
+        await helperAudioContext.audioWorklet.addModule('js/audio-worklet-processor.js');
+    } catch(e) {
+        console.log('[AudioWorklet] Módulo já carregado ou pronto');
+    }
+
+    if (activeAudioWorkletNode) {
+        try { activeAudioWorkletNode.disconnect(); } catch(e) {}
+    }
+
+    activeAudioWorkletNode = new AudioWorkletNode(helperAudioContext, 'pcm-ring-buffer-processor');
+    helperAudioDestination = helperAudioContext.createMediaStreamDestination();
+    activeAudioWorkletNode.connect(helperAudioDestination);
+
+    helperWs.send(JSON.stringify({ type: 'start_capture', pid: Number(pid) }));
+    return helperAudioDestination.stream.getAudioTracks()[0];
+}
+
+async function startExcludeDiscordCapture() {
+    if (!helperConnected || !helperWs) {
+        throw new Error('Helper de áudio não conectado. Inicie o streamgrid-audio-helper.exe.');
+    }
+
+    if (!helperAudioContext || helperAudioContext.state === 'closed') {
+        helperAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+    } else if (helperAudioContext.state === 'suspended') {
+        await helperAudioContext.resume();
+    }
+
+    try {
+        await helperAudioContext.audioWorklet.addModule('js/audio-worklet-processor.js');
+    } catch(e) {
+        console.log('[AudioWorklet] Módulo já carregado ou pronto');
+    }
+
+    if (activeAudioWorkletNode) {
+        try { activeAudioWorkletNode.disconnect(); } catch(e) {}
+    }
+
+    activeAudioWorkletNode = new AudioWorkletNode(helperAudioContext, 'pcm-ring-buffer-processor');
+    helperAudioDestination = helperAudioContext.createMediaStreamDestination();
+    activeAudioWorkletNode.connect(helperAudioDestination);
+
+    helperWs.send(JSON.stringify({ type: 'start_exclude_discord' }));
+    return helperAudioDestination.stream.getAudioTracks()[0];
+}
+
+function stopAppAudioCapture() {
+    if (helperWs && helperWs.readyState === WebSocket.OPEN) {
+        helperWs.send(JSON.stringify({ type: 'stop_capture' }));
+    }
+    if (activeAudioWorkletNode) {
+        try {
+            activeAudioWorkletNode.port.postMessage({ type: 'flush' });
+            activeAudioWorkletNode.disconnect();
+        } catch(e) {}
+        activeAudioWorkletNode = null;
+    }
+    if (helperAudioContext && helperAudioContext.state !== 'closed') {
+        helperAudioContext.suspend().catch(() => {});
+    }
+}
+
+if (typeof Neutralino !== 'undefined') {
+    try {
+        Neutralino.init();
+        spawnAudioHelperIfNeutralino();
+    } catch(e) {}
+}
+connectAudioHelper();
 
 const SERVER_URL = (window.location.protocol.startsWith('http') && !window.location.hostname.includes('localhost') && window.location.hostname !== '127.0.0.1')
     ? window.location.origin
@@ -1213,11 +1411,68 @@ function toggleQualityMode() {
     }
 }
 
-// Start Screen Capture
-btnStartShare.addEventListener('click', startScreenShare);
-btnStartShareBig.addEventListener('click', startScreenShare);
+// Screen Share Configuration Modal & Triggers
+const shareConfigModal = document.getElementById('shareConfigModal');
+const btnCloseShareConfig = document.getElementById('btnCloseShareConfig');
+const btnConfirmStartShare = document.getElementById('btnConfirmStartShare');
+const btnRefreshAudioApps = document.getElementById('btnRefreshAudioApps');
+const selectAudioApp = document.getElementById('selectAudioApp');
+const audioSourceExcludeDiscord = document.getElementById('audioSourceExcludeDiscord');
+const audioSourceApp = document.getElementById('audioSourceApp');
+const audioSourceSystem = document.getElementById('audioSourceSystem');
+const audioSourceNone = document.getElementById('audioSourceNone');
+const appSelectorContainer = document.getElementById('appSelectorContainer');
 
-async function startScreenShare() {
+if (btnCloseShareConfig) {
+    btnCloseShareConfig.addEventListener('click', closeShareConfigModal);
+}
+
+if (btnRefreshAudioApps) {
+    btnRefreshAudioApps.addEventListener('click', () => {
+        fetchWindowList();
+    });
+}
+
+// Toggle app selector visibility based on radio choice
+[audioSourceExcludeDiscord, audioSourceApp, audioSourceSystem, audioSourceNone].forEach(radio => {
+    if (radio) {
+        radio.addEventListener('change', () => {
+            if (appSelectorContainer) {
+                appSelectorContainer.style.display = (audioSourceApp && audioSourceApp.checked) ? 'flex' : 'none';
+            }
+        });
+    }
+});
+
+function openShareConfigModal() {
+    checkDiscordStatus();
+    fetchWindowList();
+    if (shareConfigModal) {
+        shareConfigModal.removeAttribute('hidden');
+        shareConfigModal.style.display = 'flex';
+    }
+}
+
+function closeShareConfigModal() {
+    if (shareConfigModal) {
+        shareConfigModal.setAttribute('hidden', '');
+        shareConfigModal.style.display = 'none';
+    }
+}
+
+btnStartShare.addEventListener('click', openShareConfigModal);
+btnStartShareBig.addEventListener('click', openShareConfigModal);
+
+if (btnConfirmStartShare) {
+    btnConfirmStartShare.addEventListener('click', async () => {
+        closeShareConfigModal();
+        const mode = document.querySelector('input[name="audioSourceType"]:checked')?.value || 'exclude_discord';
+        const targetPid = selectAudioApp ? selectAudioApp.value : null;
+        await startScreenShare(mode, targetPid);
+    });
+}
+
+async function startScreenShare(audioMode = 'exclude_discord', targetPid = null) {
     try {
         let idealFps = 60;
         let idealWidth = 1920;
@@ -1240,61 +1495,11 @@ async function startScreenShare() {
             frameRate: { ideal: idealFps, max: 60 }
         };
 
-        // --- Step 1: Detect VB-Audio CABLE Output ---
-        let cableOutputId = null;
-        try {
-            let devices = await navigator.mediaDevices.enumerateDevices();
-
-            // If labels are empty, request mic permission to reveal device names
-            const hasEmptyLabels = devices.some(d => d.deviceId && d.label === '');
-            if (hasEmptyLabels) {
-                console.log('[Audio] Device labels hidden, requesting mic permission...');
-                try {
-                    const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                    tempStream.getTracks().forEach(t => t.stop());
-                    devices = await navigator.mediaDevices.enumerateDevices();
-                } catch (permErr) {
-                    console.warn('[Audio] Mic permission denied:', permErr.message);
-                }
-            }
-
-            // Search for VB-Cable Output with multiple name patterns
-            const cableOutput = devices.find(d => {
-                if (d.kind !== 'audioinput') return false;
-                const label = d.label.toLowerCase();
-                return label.includes('cable output') ||
-                       (label.includes('vb-audio') && label.includes('cable')) ||
-                       (label.includes('virtual cable') && !label.includes('16ch'));
-            });
-
-            if (cableOutput) {
-                cableOutputId = cableOutput.deviceId;
-                console.log('[Audio] ✅ VB-Cable detected:', cableOutput.label);
-            } else {
-                // Log all audio inputs for debugging
-                const audioInputs = devices.filter(d => d.kind === 'audioinput');
-                console.log('[Audio] VB-Cable not found. Available audio inputs:', 
-                    audioInputs.map(d => d.label || d.deviceId).join(', '));
-            }
-        } catch (e) {
-            console.warn('[Audio] Device enumeration failed:', e);
-        }
-
-        // Also check localStorage for a saved preference
-        if (!cableOutputId) {
-            const savedId = localStorage.getItem('streamgrid_cable_device');
-            if (savedId) {
-                cableOutputId = savedId;
-                console.log('[Audio] Using saved CABLE device from localStorage');
-            }
-        }
-
-        // --- Step 2: Capture screen & audio in a single prompt ---
-        let screenStream;
+        let screenStream = null;
         let audioTrack = null;
 
-        if (cableOutputId) {
-            // VB-Cable mode: screen video (1 single prompt) + separate virtual cable audio
+        if (audioMode === 'exclude_discord') {
+            // Mode 1: Full PC Audio with Discord call filtered out (WASAPI Exclusion Loopback)
             try {
                 screenStream = await navigator.mediaDevices.getDisplayMedia({
                     video: videoConstraints,
@@ -1306,44 +1511,115 @@ async function startScreenShare() {
             }
 
             try {
-                const audioStream = await navigator.mediaDevices.getUserMedia({
-                    audio: {
-                        deviceId: { exact: cableOutputId },
-                        echoCancellation: false,
-                        noiseSuppression: false,
-                        autoGainControl: false,
-                        channelCount: 2,
-                        sampleRate: 48000
-                    }
-                });
-                audioTrack = audioStream.getAudioTracks()[0];
-                localStorage.setItem('streamgrid_cable_device', cableOutputId);
-                console.log('[Audio] ✅ Capturing isolated audio from VB-Cable');
-            } catch (audioErr) {
-                console.warn('[Audio] VB-Cable capture failed:', audioErr.message);
-                localStorage.removeItem('streamgrid_cable_device');
+                audioTrack = await startExcludeDiscordCapture();
+                console.log('[Audio] ✅ Capturando áudio de todo o sistema excluindo o Discord (WASAPI Exclusion Loopback)');
+            } catch (appErr) {
+                console.warn('[Audio] Falha ao capturar no modo excluir Discord:', appErr.message);
+                alert('Aviso de Áudio: ' + appErr.message + '\nContinuando transmissão apenas com vídeo.');
             }
-        } else {
-            // Standard mode: single prompt with native system audio option
+        } else if (audioMode === 'app' && targetPid) {
+            // Mode 2: Isolated Application Audio Capture (WASAPI Process Loopback)
             try {
                 screenStream = await navigator.mediaDevices.getDisplayMedia({
                     video: videoConstraints,
-                    audio: {
-                        echoCancellation: false,
-                        noiseSuppression: false,
-                        autoGainControl: false
-                    }
+                    audio: false
                 });
             } catch (err) {
                 if (err.name === 'NotAllowedError') return;
                 throw err;
             }
 
-            if (screenStream.getAudioTracks().length > 0) {
-                audioTrack = screenStream.getAudioTracks()[0];
-                console.log('[Audio] ✅ System audio captured directly via getDisplayMedia');
+            try {
+                audioTrack = await startAppAudioCapture(targetPid);
+                console.log('[Audio] ✅ Capturing isolated application audio via WASAPI Loopback for PID:', targetPid);
+            } catch (appErr) {
+                console.warn('[Audio] Failed to capture app audio:', appErr.message);
+                alert('Aviso de Áudio: ' + appErr.message + '\nContinuando transmissão apenas com vídeo.');
+            }
+        } else if (audioMode === 'system') {
+            // Mode 2: System / VB-Cable Audio
+            let cableOutputId = null;
+            try {
+                let devices = await navigator.mediaDevices.enumerateDevices();
+                const hasEmptyLabels = devices.some(d => d.deviceId && d.label === '');
+                if (hasEmptyLabels) {
+                    try {
+                        const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                        tempStream.getTracks().forEach(t => t.stop());
+                        devices = await navigator.mediaDevices.enumerateDevices();
+                    } catch (permErr) {}
+                }
+
+                const cableOutput = devices.find(d => {
+                    if (d.kind !== 'audioinput') return false;
+                    const label = d.label.toLowerCase();
+                    return label.includes('cable output') ||
+                           (label.includes('vb-audio') && label.includes('cable')) ||
+                           (label.includes('virtual cable') && !label.includes('16ch'));
+                });
+
+                if (cableOutput) {
+                    cableOutputId = cableOutput.deviceId;
+                }
+            } catch (e) {}
+
+            if (cableOutputId) {
+                try {
+                    screenStream = await navigator.mediaDevices.getDisplayMedia({
+                        video: videoConstraints,
+                        audio: false
+                    });
+                } catch (err) {
+                    if (err.name === 'NotAllowedError') return;
+                    throw err;
+                }
+
+                try {
+                    const audioStream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            deviceId: { exact: cableOutputId },
+                            echoCancellation: false,
+                            noiseSuppression: false,
+                            autoGainControl: false,
+                            channelCount: 2,
+                            sampleRate: 48000
+                        }
+                    });
+                    audioTrack = audioStream.getAudioTracks()[0];
+                    console.log('[Audio] ✅ Capturing isolated audio from VB-Cable');
+                } catch (audioErr) {
+                    console.warn('[Audio] VB-Cable capture failed:', audioErr.message);
+                }
             } else {
-                console.log('[Audio] ℹ️ Screen shared without system audio');
+                try {
+                    screenStream = await navigator.mediaDevices.getDisplayMedia({
+                        video: videoConstraints,
+                        audio: {
+                            echoCancellation: false,
+                            noiseSuppression: false,
+                            autoGainControl: false
+                        }
+                    });
+                } catch (err) {
+                    if (err.name === 'NotAllowedError') return;
+                    throw err;
+                }
+
+                if (screenStream.getAudioTracks().length > 0) {
+                    audioTrack = screenStream.getAudioTracks()[0];
+                    console.log('[Audio] ✅ System audio captured directly via getDisplayMedia');
+                }
+            }
+        } else {
+            // Mode 3: Video Only (Muted)
+            try {
+                screenStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: videoConstraints,
+                    audio: false
+                });
+            } catch (err) {
+                if (err.name === 'NotAllowedError') return;
+                throw err;
             }
         }
 
@@ -1403,6 +1679,7 @@ btnStopShare.addEventListener('click', stopScreenShare);
 
 function stopScreenShare() {
     stopQualityMonitor();
+    stopAppAudioCapture();
 
     if (localStream) {
         localStream.getTracks().forEach(track => track.stop());
