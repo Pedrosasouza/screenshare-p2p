@@ -139,7 +139,11 @@ async function startAppAudioCapture(pid) {
         try { activeAudioWorkletNode.disconnect(); } catch(e) {}
     }
 
-    activeAudioWorkletNode = new AudioWorkletNode(helperAudioContext, 'pcm-ring-buffer-processor');
+    activeAudioWorkletNode = new AudioWorkletNode(helperAudioContext, 'pcm-ring-buffer-processor', {
+        numberOfInputs: 0,
+        numberOfOutputs: 1,
+        outputChannelCount: [2]
+    });
     helperAudioDestination = helperAudioContext.createMediaStreamDestination();
     activeAudioWorkletNode.connect(helperAudioDestination);
 
@@ -168,7 +172,11 @@ async function startExcludeDiscordCapture() {
         try { activeAudioWorkletNode.disconnect(); } catch(e) {}
     }
 
-    activeAudioWorkletNode = new AudioWorkletNode(helperAudioContext, 'pcm-ring-buffer-processor');
+    activeAudioWorkletNode = new AudioWorkletNode(helperAudioContext, 'pcm-ring-buffer-processor', {
+        numberOfInputs: 0,
+        numberOfOutputs: 1,
+        outputChannelCount: [2]
+    });
     helperAudioDestination = helperAudioContext.createMediaStreamDestination();
     activeAudioWorkletNode.connect(helperAudioDestination);
 
@@ -796,6 +804,11 @@ socket.on('join-error', ({ error, message }) => {
 socket.on('room-users', async ({ users, activeStreams, socketId, memberCount, hasPassword }) => {
     myId = socketId;
     console.log('[Socket] Joined room. My ID:', myId, 'Other users:', users, 'Active streams:', activeStreams);
+    remoteActiveStreams.clear();
+    if (Array.isArray(activeStreams)) {
+        activeStreams.forEach(id => { if (id !== myId) remoteActiveStreams.add(id); });
+    }
+    updateEchoWarningVisibility();
 
     // Sync member count immediately for the joiner
     updateMemberCount(memberCount || (users.length + 1));
@@ -834,6 +847,8 @@ socket.on('user-joined', async ({ socketId, memberCount }) => {
 });
 
 socket.on('user-left', ({ socketId, memberCount }) => {
+    remoteActiveStreams.delete(socketId);
+    updateEchoWarningVisibility();
     console.log('[Socket] User left:', socketId);
     removePeerConnection(socketId);
     updateMemberCount(memberCount);
@@ -953,11 +968,18 @@ socket.on('signal', async ({ senderId, signal }) => {
     }
 });
 
+// Track active remote screen streams for anti-echo detection
+const remoteActiveStreams = new Set();
+
 // Broadcast Stream State Changes
 socket.on('stream-state', ({ senderId, state }) => {
-    if (state === 'stopped') {
+    if (state === 'started') {
+        remoteActiveStreams.add(senderId);
+    } else {
+        remoteActiveStreams.delete(senderId);
         removeStreamTile(senderId);
     }
+    updateEchoWarningVisibility();
 });
 
 // PeerConnection Factory
@@ -1450,7 +1472,15 @@ if (btnRefreshAudioApps) {
     }
 });
 
+function updateEchoWarningVisibility() {
+    const warningEl = document.getElementById('dualStreamEchoWarning');
+    if (!warningEl) return;
+    const hasOtherStream = remoteActiveStreams.size > 0;
+    warningEl.style.display = hasOtherStream ? 'block' : 'none';
+}
+
 function openShareConfigModal() {
+    updateEchoWarningVisibility();
     checkDiscordStatus();
     fetchWindowList();
     if (shareConfigModal) {
