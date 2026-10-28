@@ -1,4 +1,4 @@
-// ==========================================
+﻿// ==========================================
 // Rust Audio Helper (WASAPI Application Loopback)
 // ==========================================
 let helperWs = null;
@@ -852,6 +852,12 @@ async function sendOffer(peerId) {
     const peerObj = peers.get(peerId);
     if (!peerObj || !peerObj.pc) return;
     const pc = peerObj.pc;
+
+    // Guard: Prevent concurrent offer collisions (glare) and offers during unstable signaling states
+    if (peerObj.makingOffer || pc.signalingState !== 'stable') {
+        console.warn(`[WebRTC] Skipping offer dispatch to ${peerId} (makingOffer: ${peerObj.makingOffer}, signalingState: ${pc.signalingState})`);
+        return;
+    }
 
     try {
         peerObj.makingOffer = true;

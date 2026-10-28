@@ -437,16 +437,16 @@ async fn start_wasapi_capture(
                         .saturating_sub(sample_queue.capacity() - sample_queue.len());
                     sample_queue.reserve(additional);
 
-                    if let Err(e) = capture_client.read_from_device_to_deque(&mut sample_queue) {
-                        eprintln!("[WASAPI] Erro ao ler dados do dispositivo: {:?}", e);
+                    if let Err(_) = capture_client.read_from_device_to_deque(&mut sample_queue) {
+                        eprintln!("[WASAPI] Read device error");
                         break;
                     }
                 }
                 Ok(_) => {
                     // Packet size was 0 or None (waiting for data)
                 }
-                Err(e) => {
-                    eprintln!("[WASAPI] get_next_packet_size error: {:?}", e);
+                Err(_) => {
+                    eprintln!("[WASAPI] get_next_packet_size error");
                     break;
                 }
             }
@@ -478,13 +478,22 @@ async fn start_wasapi_capture(
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
     let args = Args::parse();
     spawn_parent_watcher(args.parent_pid);
 
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", args.port)).await?;
-    let local_addr = listener.local_addr()?;
-    println!("STREAMGRID_AUDIO_HELPER_PORT={}", local_addr.port());
+    let listener = match TcpListener::bind(format!("127.0.0.1:{}", args.port)).await {
+        Ok(l) => l,
+        Err(_) => {
+            // Exit cleanly with pure ASCII so Neutralino's JSON parser never crashes on Windows localized CP850 stderr
+            println!("STREAMGRID_AUDIO_HELPER_ALREADY_RUNNING");
+            return;
+        }
+    };
+
+    if let Ok(local_addr) = listener.local_addr() {
+        println!("STREAMGRID_AUDIO_HELPER_PORT={}", local_addr.port());
+    }
     println!("STREAMGRID_AUDIO_HELPER_READY");
 
     let required_token = Arc::new(args.token);
@@ -493,13 +502,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Ok((stream, _)) = listener.accept().await {
         let token = required_token.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_client(stream, token, parent_pid).await {
-                eprintln!("[Helper] Client error: {:?}", e);
-            }
+            let _ = handle_client(stream, token, parent_pid).await;
         });
     }
-
-    Ok(())
 }
 
 async fn handle_client(
