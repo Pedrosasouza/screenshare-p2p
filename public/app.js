@@ -451,6 +451,47 @@ function showToast(message, type = 'info', durationMs = 4000) {
     container.appendChild(toast);
 }
 
+// ==========================================
+// Subtle Audio Chime for Presence (Web Audio API)
+// ==========================================
+function playPresenceChime(type = 'join') {
+    try {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtx) return;
+        if (!window._presenceAudioCtx) {
+            window._presenceAudioCtx = new AudioCtx();
+        }
+        const ctx = window._presenceAudioCtx;
+        if (ctx.state === 'suspended') {
+            ctx.resume().catch(() => {});
+        }
+        const now = ctx.currentTime;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+
+        osc.type = 'sine';
+        if (type === 'join') {
+            // Dois tons ascendentes suaves (440Hz -> 587.33Hz)
+            osc.frequency.setValueAtTime(440, now);
+            osc.frequency.exponentialRampToValueAtTime(587.33, now + 0.12);
+        } else {
+            // Dois tons descendentes suaves (587.33Hz -> 392Hz)
+            osc.frequency.setValueAtTime(587.33, now);
+            osc.frequency.exponentialRampToValueAtTime(392, now + 0.12);
+        }
+
+        gain.gain.setValueAtTime(0.001, now);
+        gain.gain.exponentialRampToValueAtTime(0.05, now + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.22);
+
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+
+        osc.start(now);
+        osc.stop(now + 0.23);
+    } catch (_) {}
+}
+
 const btnThemeToggle = document.getElementById('btnThemeToggle');
 const THEME_KEY = 'streamgrid_theme';
 
@@ -1013,6 +1054,8 @@ socket.on('room-users', async ({ users, activeStreams, socketId, memberCount, ha
 
 socket.on('user-joined', async ({ socketId, memberCount }) => {
     console.log('[Socket] User joined:', socketId);
+    showToast('Um participante entrou na sala.', 'info');
+    playPresenceChime('join');
     const pc = getOrCreatePeerConnection(socketId);
     updateMemberCount(memberCount);
 
@@ -1028,6 +1071,8 @@ socket.on('user-left', ({ socketId, memberCount }) => {
     remoteActiveStreams.delete(socketId);
     updateEchoWarningVisibility();
     console.log('[Socket] User left:', socketId);
+    showToast('Um participante saiu da sala.', 'info');
+    playPresenceChime('leave');
     removePeerConnection(socketId);
     updateMemberCount(memberCount);
 });
