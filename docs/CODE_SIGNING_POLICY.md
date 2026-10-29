@@ -2,6 +2,8 @@
 
 Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
 
+> **Status:** The project has applied to the SignPath Foundation code signing program. Approval and signing integration are pending. Current Windows releases are not signed with a SignPath Foundation certificate.
+
 ---
 
 ## 1. Overview & Objectives

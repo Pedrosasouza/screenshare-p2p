@@ -24,7 +24,6 @@
   <img src="https://img.shields.io/badge/Rust-WASAPI%20Loopback-DEA584?style=flat-square&logo=rust" alt="Rust">
   <img src="https://img.shields.io/badge/Desktop-Neutralinojs%20v5.6-9b59b6?style=flat-square" alt="Neutralinojs">
   <img src="https://img.shields.io/badge/Signaling-Node.js%20%2F%20Socket.io-339933?style=flat-square&logo=node.js" alt="Node.js">
-  <img src="https://img.shields.io/badge/SignPath-Code_Signed-388e3c?style=flat-square" alt="SignPath Foundation">
   <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License">
 </p>
 
@@ -181,7 +180,10 @@ npm run test:helper
 
 ## 🔒 Segurança, Políticas & Assinatura de Código
 
-* **Assinatura de Código:** Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+> **Status:** The project has applied to the SignPath Foundation code signing program. Approval and signing integration are pending. Current Windows releases are not signed with a SignPath Foundation certificate.
+
 * **Política de Assinatura:** Consulte [docs/CODE_SIGNING_POLICY.md](docs/CODE_SIGNING_POLICY.md) para diretrizes de segurança, governança de chaves e builds auditáveis via GitHub Actions.
 * **Política de Privacidade:** Consulte [PRIVACY.md](PRIVACY.md) para detalhes sobre a transmissão peer-to-peer criptografada (WebRTC DTLS/SRTP) e armazenamento de senhas com salt.
 
