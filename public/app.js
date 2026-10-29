@@ -108,7 +108,7 @@ function connectAudioHelper() {
                     console.log(`[AudioHelper] ✅ Captura iniciada no modo [${modeDesc}] para PID ${msg.pid} (${msg.sample_rate}Hz, ${msg.channels} canais)`);
                 } else if (msg.type === 'error') {
                     console.error('[AudioHelper] Erro relatado pelo helper:', msg.message);
-                    alert('Aviso de Áudio: ' + msg.message);
+                    showToast('Aviso de Áudio: ' + msg.message, 'warning');
                 }
             } catch(e) {}
         };
@@ -392,6 +392,64 @@ const qualityModeLabel = document.getElementById('qualityModeLabel');
 
 // Quality mode: 'motion' = fluid 60fps (gaming), 'detail' = sharp text/UI (Tibia, documents)
 let contentHintMode = 'motion';
+
+// ==========================================
+// Toast Notification System
+// ==========================================
+function getOrCreateToastContainer() {
+    let container = document.getElementById('toastContainer');
+    if (!container) {
+        container = document.createElement('div');
+        container.id = 'toastContainer';
+        container.className = 'toast-container';
+        document.body.appendChild(container);
+    }
+    return container;
+}
+
+function showToast(message, type = 'info', durationMs = 4000) {
+    if (!message) return;
+    const container = getOrCreateToastContainer();
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type}`;
+
+    let iconClass = 'fa-solid fa-circle-info';
+    if (type === 'error') iconClass = 'fa-solid fa-circle-xmark';
+    else if (type === 'warning') iconClass = 'fa-solid fa-triangle-exclamation';
+    else if (type === 'success') iconClass = 'fa-solid fa-circle-check';
+
+    const iconEl = document.createElement('i');
+    iconEl.className = `${iconClass} toast-icon`;
+
+    const messageEl = document.createElement('span');
+    messageEl.className = 'toast-message';
+    messageEl.textContent = message;
+
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'toast-close';
+    closeBtn.type = 'button';
+    closeBtn.title = 'Fechar notificação';
+    closeBtn.innerHTML = '<i class="fa-solid fa-xmark"></i>';
+
+    let timeoutId = null;
+    const dismiss = () => {
+        if (timeoutId) clearTimeout(timeoutId);
+        toast.classList.add('hiding');
+        setTimeout(() => {
+            if (toast.parentNode) toast.parentNode.removeChild(toast);
+        }, 250);
+    };
+
+    closeBtn.addEventListener('click', dismiss);
+    if (durationMs > 0) {
+        timeoutId = setTimeout(dismiss, durationMs);
+    }
+
+    toast.appendChild(iconEl);
+    toast.appendChild(messageEl);
+    toast.appendChild(closeBtn);
+    container.appendChild(toast);
+}
 
 const btnThemeToggle = document.getElementById('btnThemeToggle');
 const THEME_KEY = 'streamgrid_theme';
@@ -1503,23 +1561,55 @@ function addLocalTracksToPC(pc) {
     });
 }
 
-function getMaxBitrateForPeerCount() {
-    // Escala dinâmica de acordo com o número de conexões ativas assistindo
-    const count = peers.size;
-    if (count <= 1) return 6000000;      // 1 espectador: 6.0 Mbps (teto máximo)
-    if (count === 2) return 4500000;     // 2 espectadores: 4.5 Mbps cada (9.0 Mbps total)
-    return 3500000;                      // 3+ espectadores: 3.5 Mbps cada (10.5 Mbps total) - 1080p nítido sem saturação
+const VIDEO_RES_KEY = 'streamgrid_video_resolution';
+const VIDEO_FPS_KEY = 'streamgrid_video_fps';
+let selectedVideoResolution = '1080p';
+let selectedVideoFps = 60;
+try {
+    const savedRes = localStorage.getItem(VIDEO_RES_KEY);
+    if (savedRes === '720p' || savedRes === '1080p') selectedVideoResolution = savedRes;
+    const savedFps = Number(localStorage.getItem(VIDEO_FPS_KEY));
+    if (savedFps === 30 || savedFps === 60) selectedVideoFps = savedFps;
+} catch (_) {}
+
+function getVideoConstraints(resolution = '1080p', fps = 60) {
+    const is720p = resolution === '720p';
+    const targetFps = Number(fps) === 30 ? 30 : 60;
+    const targetWidth = is720p ? 1280 : 1920;
+    const targetHeight = is720p ? 720 : 1080;
+
+    return {
+        width: { ideal: targetWidth, max: targetWidth },
+        height: { ideal: targetHeight, max: targetHeight },
+        frameRate: { ideal: targetFps, max: targetFps }
+    };
+}
+
+function getMaxBitrateForPeerCount(count = (typeof peers !== 'undefined' ? peers.size : 1), resolution = selectedVideoResolution, fps = selectedVideoFps) {
+    const is720p = resolution === '720p';
+    const is30fps = Number(fps) === 30;
+
+    let baseBitrate;
+    if (is720p) {
+        baseBitrate = is30fps ? 1800000 : 2800000;
+    } else {
+        baseBitrate = is30fps ? 4000000 : 6000000;
+    }
+
+    const peerCount = typeof count === 'number' ? count : 1;
+    if (peerCount <= 1) return baseBitrate;
+    if (peerCount === 2) return Math.round(baseBitrate * 0.75);
+    return Math.round(baseBitrate * 0.58);
 }
 
 function configureSenderParams(sender, kind) {
     if (kind === 'video' && sender && typeof sender.getParameters === 'function') {
         try {
             const params = sender.getParameters();
-            // NEVER sacrifice 1080p resolution - keep text and game pixels razor-sharp
             params.degradationPreference = 'maintain-resolution';
             if (params.encodings && params.encodings[0]) {
-                params.encodings[0].maxBitrate = getMaxBitrateForPeerCount();
-                params.encodings[0].maxFramerate = 60;
+                params.encodings[0].maxBitrate = getMaxBitrateForPeerCount(typeof peers !== 'undefined' ? peers.size : 1, selectedVideoResolution, selectedVideoFps);
+                params.encodings[0].maxFramerate = Number(selectedVideoFps);
             }
             sender.setParameters(params).catch(() => {});
         } catch (e) {}
@@ -1852,7 +1942,7 @@ async function startScreenShare(audioMode = 'exclude_discord', targetPid = null)
                 console.log('[Audio] ✅ Capturando áudio de todo o sistema excluindo o Discord (WASAPI Exclusion Loopback)');
             } catch (appErr) {
                 console.warn('[Audio] Falha ao capturar no modo excluir Discord:', appErr.message);
-                alert('Aviso de Áudio: ' + appErr.message + '\nContinuando transmissão apenas com vídeo.');
+                showToast('Aviso de Áudio: ' + appErr.message + ' (Continuando transmissão apenas com vídeo)', 'warning');
             }
         } else if (audioMode === 'app' && targetPid) {
             // Mode 2: Isolated Application Audio Capture (WASAPI Process Loopback)
@@ -1871,7 +1961,7 @@ async function startScreenShare(audioMode = 'exclude_discord', targetPid = null)
                 console.log('[Audio] ✅ Capturing isolated application audio via WASAPI Loopback for PID:', targetPid);
             } catch (appErr) {
                 console.warn('[Audio] Failed to capture app audio:', appErr.message);
-                alert('Aviso de Áudio: ' + appErr.message + '\nContinuando transmissão apenas com vídeo.');
+                showToast('Aviso de Áudio: ' + appErr.message + ' (Continuando transmissão apenas com vídeo)', 'warning');
             }
         } else if (audioMode === 'system') {
             // Mode 2: System / VB-Cable Audio
@@ -2005,7 +2095,7 @@ async function startScreenShare(audioMode = 'exclude_discord', targetPid = null)
     } catch (err) {
         console.error('[Capture] Error getting display media:', err);
         if (err.name !== 'NotAllowedError') {
-            alert('Não foi possível iniciar o compartilhamento: ' + err.message);
+            showToast('Não foi possível iniciar o compartilhamento: ' + err.message, 'error');
         }
     }
 }
@@ -2300,8 +2390,8 @@ btnCopyLink.addEventListener('click', () => {
             btnCopyLink.innerHTML = origText;
         }, 2000);
     }).catch(() => {
-        // Fallback for mobile if clipboard API requires focus
-        prompt('Copie o link abaixo:', inviteUrl);
+        // Fallback se a API de clipboard do navegador falhar
+        showToast('Não foi possível copiar automaticamente. Acesse: ' + inviteUrl, 'warning', 6000);
     });
 });
 
