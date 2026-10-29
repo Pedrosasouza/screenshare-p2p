@@ -1874,6 +1874,11 @@ function openShareConfigModal() {
         fetchWindowList();
     }
 
+    const resRadio = document.querySelector(`input[name="videoResolution"][value="${selectedVideoResolution}"]`);
+    if (resRadio) resRadio.checked = true;
+    const fpsRadio = document.querySelector(`input[name="videoFps"][value="${selectedVideoFps}"]`);
+    if (fpsRadio) fpsRadio.checked = true;
+
     if (shareConfigModal) {
         shareConfigModal.removeAttribute('hidden');
         shareConfigModal.style.display = 'flex';
@@ -1895,15 +1900,27 @@ if (btnConfirmStartShare) {
         closeShareConfigModal();
         const mode = document.querySelector('input[name="audioSourceType"]:checked')?.value || 'exclude_discord';
         const targetPid = selectAudioApp ? selectAudioApp.value : null;
-        await startScreenShare(mode, targetPid);
+
+        const resChoice = document.querySelector('input[name="videoResolution"]:checked')?.value;
+        if (resChoice === '720p' || resChoice === '1080p') {
+            selectedVideoResolution = resChoice;
+            try { localStorage.setItem(VIDEO_RES_KEY, selectedVideoResolution); } catch (_) {}
+        }
+        const fpsChoice = Number(document.querySelector('input[name="videoFps"]:checked')?.value);
+        if (fpsChoice === 30 || fpsChoice === 60) {
+            selectedVideoFps = fpsChoice;
+            try { localStorage.setItem(VIDEO_FPS_KEY, String(selectedVideoFps)); } catch (_) {}
+        }
+
+        await startScreenShare(mode, targetPid, selectedVideoResolution, selectedVideoFps);
     });
 }
 
-async function startScreenShare(audioMode = 'exclude_discord', targetPid = null) {
+async function startScreenShare(audioMode = 'exclude_discord', targetPid = null, resolution = selectedVideoResolution, fps = selectedVideoFps) {
     try {
-        let idealFps = 60;
-        let idealWidth = 1920;
-        let idealHeight = 1080;
+        let idealFps = Number(fps) || 60;
+        let idealWidth = resolution === '720p' ? 1280 : 1920;
+        let idealHeight = resolution === '720p' ? 720 : 1080;
 
         // Auto-detect mobile or constrained cellular network
         if (navigator.connection) {
@@ -1916,11 +1933,7 @@ async function startScreenShare(audioMode = 'exclude_discord', targetPid = null)
             }
         }
 
-        const videoConstraints = {
-            width: { ideal: idealWidth, max: 1920 },
-            height: { ideal: idealHeight, max: 1080 },
-            frameRate: { ideal: idealFps, max: 60 }
-        };
+        const videoConstraints = getVideoConstraints(idealWidth === 1280 ? '720p' : '1080p', idealFps);
 
         let screenStream = null;
         let audioTrack = null;
