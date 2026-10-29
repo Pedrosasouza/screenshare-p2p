@@ -252,16 +252,12 @@
             </div>
 
             <div class="toolbar-center">
-                <div class="active-streams-counter" id="activeStreamsBadge">
+                <div class="active-streams-counter">
                     <span class="dot"></span> <span id="activeStreamsText">0 Transmissões Ativas</span>
                 </div>
             </div>
 
-            <div class="toolbar-right">
-                <button class="btn btn-secondary btn-sm" id="btnAudioGuide" title="Como transmitir áudio do jogo sem vazar a chamada do Discord">
-                    <i class="fa-brands fa-discord"></i> Como streamar com o Discord aberto
-                </button>
-            </div>
+            <div class="toolbar-right"></div>
         </footer>
 
         <!-- Screen Share Configuration Modal (App Audio Isolation) -->
@@ -316,10 +312,10 @@
                         <label class="audio-option-card" style="display: flex; flex-direction: column; gap: 4px; padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--border); background: var(--bg-surface); cursor: pointer;">
                             <div style="display: flex; align-items: center; gap: 10px;">
                                 <input type="radio" name="audioSourceType" value="system" id="audioSourceSystem">
-                                <strong><i class="fa-solid fa-volume-high"></i> Áudio Geral do Sistema / VB-Cable</strong>
+                                <strong><i class="fa-solid fa-volume-high"></i> Áudio Geral do Sistema</strong>
                             </div>
                             <span style="font-size: 0.8rem; color: var(--text-muted); padding-left: 24px;">
-                                Captura o áudio nativo do Windows ou cabo virtual.
+                                Captura o áudio nativo do dispositivo de som do Windows.
                             </span>
                         </label>
 
@@ -337,212 +333,6 @@
                     <button class="btn btn-primary btn-block" id="btnConfirmStartShare">
                         <i class="fa-solid fa-display"></i> Continuar e Escolher Janela
                     </button>
-                </div>
-            </div>
-        </div>
-
-        <!-- Audio Guide Modal (VB-Audio & Discord Guide) -->
-        <div class="modal-overlay" id="audioGuideModal" style="display: none;" hidden>
-            <div class="modal-card modal-guide">
-                <div class="modal-header">
-                    <h3><i class="fa-solid fa-headphones"></i> Como Streamar com o Discord Aberto (Sem Eco)</h3>
-                    <button class="btn-close" id="btnCloseAudioGuide" title="Fechar (ESC)"><i class="fa-solid fa-xmark"></i></button>
-                </div>
-                <div class="modal-body">
-                    <!-- Official Download Button Card -->
-                    <div class="guide-download-card">
-                        <div class="download-info">
-                            <i class="fa-solid fa-download download-icon"></i>
-                            <div>
-                                <strong>VB-Audio Virtual Cable (100% Gratuito)</strong>
-                                <span>Driver oficial de áudio virtual para Windows 10 e 11 (64-bit)</span>
-                            </div>
-                        </div>
-                        <a href="https://vb-audio.com/Cable/" target="_blank" rel="noopener noreferrer" class="btn btn-primary btn-sm">
-                            <i class="fa-solid fa-arrow-up-right-from-square"></i> Baixar no Site Oficial
-                        </a>
-                    </div>
-
-                    <!-- Why it's necessary callout -->
-                    <div class="guide-callout">
-                        <div class="guide-callout-icon">
-                            <i class="fa-solid fa-circle-question"></i>
-                        </div>
-                        <div class="guide-callout-text">
-                            <strong>Por que o cabo virtual é necessário?</strong>
-                            <p>O Windows mistura <strong>todos os sons</strong> (jogo + voz dos amigos no Discord) em uma única saída. Sem o cabo virtual, tudo o que seus amigos falam na call ecoaria na sua transmissão. O <strong>VB-Cable</strong> cria um cabo de som virtual separado: o som do jogo passa pelo cabo e vai para a live, enquanto a voz do Discord toca direto no seu fone físico sem vazar!</p>
-                        </div>
-                    </div>
-
-                    <!-- Step 1: Instalação Passo a Passo -->
-                    <div class="guide-section">
-                        <h4 class="guide-section-title">
-                            <span class="step-num">1</span> Instalação Detalhada do Driver (Apenas 1ª vez)
-                        </h4>
-                        
-                        <div class="guide-substeps">
-                            <div class="guide-substep">
-                                <span class="substep-bullet">1.1</span>
-                                <div>
-                                    <div class="substep-title">Extraia os arquivos do ZIP (Obrigatório)</div>
-                                    <p>Após baixar <code>VBCABLE_Driver_Pack43.zip</code>, clique com o botão direito nele e escolha <strong>"Extrair Tudo..."</strong>. <span class="text-danger">⚠️ Nunca execute de dentro do .zip sem extrair antes</span>, pois os arquivos do driver não serão carregados.</p>
-                                </div>
-                            </div>
-
-                            <div class="guide-substep">
-                                <span class="substep-bullet">1.2</span>
-                                <div>
-                                    <div class="substep-title">Localize o instalador correto de 64-bit</div>
-                                    <p>Abra a pasta extraída e localize o arquivo <code>VBCABLE_Setup_x64.exe</code> (para computadores 64-bit, que é o padrão de 99% dos PCs).</p>
-                                </div>
-                            </div>
-
-                            <div class="guide-substep">
-                                <span class="substep-bullet">1.3</span>
-                                <div>
-                                    <div class="substep-title">Executar como Administrador (Essencial)</div>
-                                    <p>Clique com o <strong>botão direito</strong> em cima de <code>VBCABLE_Setup_x64.exe</code> e selecione <span class="badge-admin"><i class="fa-solid fa-shield"></i> "Executar como Administrador"</span>. Se abrir com clique duplo comum, a instalação pode falhar por falta de privilégios no Windows.</p>
-                                </div>
-                            </div>
-
-                            <div class="guide-substep">
-                                <span class="substep-bullet">1.4</span>
-                                <div>
-                                    <div class="substep-title">Concluir e Reiniciar o Windows</div>
-                                    <p>Na janela do instalador, clique no botão <strong>"Install Driver"</strong>. Quando surgir a confirmação <em>"Installation Complete"</em>, clique em OK e <strong class="text-highlight">reinicie o seu computador</strong> para o Windows ativar os canais de áudio.</p>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Step 2: Configuração no Windows -->
-                    <div class="guide-section">
-                        <h4 class="guide-section-title">
-                            <span class="step-num">2</span> Configurar o Windows (Atalho Rápido)
-                        </h4>
-
-                        <div class="guide-shortcut-banner">
-                            <i class="fa-solid fa-keyboard"></i>
-                            <div>
-                                <span class="shortcut-label">Atalho Rápido do Windows:</span>
-                                <div class="shortcut-text">Pressione <kbd>Win</kbd> + <kbd>R</kbd>, digite <code>mmsys.cpl</code> e aperte <kbd>Enter</kbd></div>
-                                <p>Isso abre diretamente o Painel Clássico de Som do Windows com todas as abas necessárias.</p>
-                            </div>
-                        </div>
-
-                        <div class="guide-substeps">
-                            <div class="guide-substep">
-                                <span class="substep-bullet">2.1</span>
-                                <div>
-                                    <div class="substep-title">Aba Reprodução: Jogo no Cabo Virtual</div>
-                                    <p>Na aba <em>Reprodução</em>, clique com botão direito em <code>CABLE Input (VB-Audio Virtual Cable)</code> e marque <strong>"Definir como Dispositivo Padrão"</strong>. A partir de agora, o áudio dos seus jogos vai direto para o cabo virtual.</p>
-                                </div>
-                            </div>
-
-                            <div class="guide-substep">
-                                <span class="substep-bullet">2.2</span>
-                                <div>
-                                    <div class="substep-title">Aba Gravação: Escutar o jogo no seu Fone Real</div>
-                                    <p>Vá para a aba <em>Gravação</em>, clique duas vezes em <code>CABLE Output</code> e abra a aba <strong>"Escutar"</strong>:</p>
-                                    <ul class="guide-checklist">
-                                        <li>Marque a caixinha: ✅ <strong>"Escutar o dispositivo"</strong> (Listen to this device).</li>
-                                        <li>No campo <em>"Reproduzir através deste dispositivo"</em>: selecione o seu <strong>Fone de ouvido real</strong> (ex: Realtek, Fone USB, etc.).</li>
-                                        <li>Clique em <strong>Aplicar</strong> e depois em <strong>OK</strong>.</li>
-                                    </ul>
-                                    <p class="guide-subtext"><em>Pronto! Agora você escuta o jogo normalmente no seu fone, e o StreamGrid captura o áudio da live sem atrasos!</em></p>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Step 3: Configurar o Discord -->
-                    <div class="guide-section">
-                        <h4 class="guide-section-title">
-                            <span class="step-num">3</span> Configurar o Discord (Para a voz NÃO vazar)
-                        </h4>
-
-                        <div class="guide-substeps">
-                            <div class="guide-substep">
-                                <span class="substep-bullet">3.1</span>
-                                <div>
-                                    <div class="substep-title">Saída Direta no seu Fone Físico</div>
-                                    <p>No Discord, abra <em>Configurações de Usuário (⚙️) &gt; Voz e Vídeo</em>:</p>
-                                    <ul class="guide-checklist">
-                                        <li><strong>Dispositivo de Saída:</strong> NUNCA use "Default". Selecione o nome do seu <strong>Fone Real</strong> (ex: <em>Alto-falantes / Fones Realtek</em>).</li>
-                                        <li><strong>Dispositivo de Entrada:</strong> Selecione seu microfone físico normalmente.</li>
-                                    </ul>
-                                    <div class="guide-tip-inline">
-                                        <i class="fa-solid fa-check-double"></i>
-                                        <span><strong>Resultado:</strong> A voz dos seus amigos toca diretamente no seu ouvido. Como ela não passa pelo <code>CABLE Input</code>, a transmissão fica 100% livre da voz deles!</span>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Step 4: Desativar Modo Exclusivo (OBRIGATÓRIO / ESSENCIAL) -->
-                    <div class="guide-section guide-section-warning">
-                        <h4 class="guide-section-title text-danger">
-                            <span class="step-num" style="background: var(--danger);">4</span> 
-                            Desativar Modo Exclusivo 
-                            <span class="badge-essential"><i class="fa-solid fa-triangle-exclamation"></i> ESSENCIAL</span>
-                        </h4>
-
-                        <div class="guide-warning-box">
-                            <i class="fa-solid fa-triangle-exclamation"></i>
-                            <div>
-                                <strong>IMPORTANTE: Se o modo exclusivo não for desativado, a tela NÃO compartilha!</strong>
-                                <p>O Windows bloqueia o compartilhamento de tela com áudio se algum aplicativo estiver com controle exclusivo do dispositivo. Para transmitir sem erro, você <strong>DEVE</strong> desmarcar o modo exclusivo nos 3 dispositivos abaixo:</p>
-                            </div>
-                        </div>
-
-                        <div class="guide-substeps">
-                            <div class="guide-substep">
-                                <span class="substep-bullet">4.1</span>
-                                <div>
-                                    <div class="substep-title">Desmarque o controle exclusivo nestes 3 lugares:</div>
-                                    <p>No Painel de Som (<kbd>Win</kbd> + <kbd>R</kbd> &gt; <code>mmsys.cpl</code>):</p>
-                                    <ul class="guide-checklist">
-                                        <li><strong>1. Reprodução:</strong> Botão direito em <code>CABLE Input</code> &gt; <em>Propriedades</em> &gt; aba <strong>Avançado</strong> &gt; <strong class="text-danger">Desmarque</strong>: <em>"Permitir que aplicativos assumam controle exclusivo deste dispositivo"</em>.</li>
-                                        <li><strong>2. Gravação:</strong> Botão direito em <code>CABLE Output</code> &gt; <em>Propriedades</em> &gt; aba <strong>Avançado</strong> &gt; <strong class="text-danger">Desmarque</strong>: <em>"Permitir que aplicativos assumam controle exclusivo deste dispositivo"</em>.</li>
-                                        <li><strong>3. Reprodução:</strong> Botão direito no seu <strong>Fone/Alto-falantes</strong> &gt; <em>Propriedades</em> &gt; aba <strong>Avançado</strong> &gt; <strong class="text-danger">Desmarque</strong>: <em>"Permitir que aplicativos assumam controle exclusivo deste dispositivo"</em>.</li>
-                                    </ul>
-                                </div>
-                            </div>
-
-                            <div class="guide-substep">
-                                <span class="substep-bullet">4.2</span>
-                                <div>
-                                    <div class="substep-title">Taxa de Amostragem (48000 Hz)</div>
-                                    <p>Também na aba <em>Avançado</em> de cada dispositivo, selecione o formato <strong>2 canais, 24 bits, 48000 Hz (Qualidade de Estúdio)</strong> para garantir que todos fiquem sincronizados e sem estalos.</p>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Resumo Rápido -->
-                    <div class="guide-summary-row">
-                        <div class="summary-pill">
-                            <span class="pill-label">Windows (Saída)</span>
-                            <span class="pill-val"><i class="fa-solid fa-volume-high"></i> CABLE Input</span>
-                            <span class="pill-note">Capturado na live</span>
-                        </div>
-                        <div class="summary-pill">
-                            <span class="pill-label">Discord (Saída)</span>
-                            <span class="pill-val"><i class="fa-brands fa-discord"></i> Fone Real</span>
-                            <span class="pill-note">Apenas no seu ouvido</span>
-                        </div>
-                        <div class="summary-pill">
-                            <span class="pill-label">CABLE Output</span>
-                            <span class="pill-val"><i class="fa-solid fa-ear-listen"></i> Escutar: Ativado</span>
-                            <span class="pill-note">Toca no seu fone</span>
-                        </div>
-                        <div class="summary-pill" style="border-color: rgba(239, 68, 68, 0.4);">
-                            <span class="pill-label" style="color: #f87171;">Modo Exclusivo</span>
-                            <span class="pill-val" style="color: #f87171;"><i class="fa-solid fa-ban"></i> Desativado</span>
-                            <span class="pill-note">Essencial p/ tela</span>
-                        </div>
-                    </div>
                 </div>
             </div>
         </div>

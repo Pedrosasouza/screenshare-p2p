@@ -9,10 +9,7 @@ windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Threading",
-    "Win32_System_ProcessStatus",
     "Win32_System_Diagnostics_ToolHelp",
-    "Win32_System_JobObjects",
-    "Win32_Security",
 ] }
 tokio = { version = "1.38", features = ["full"] }
 tokio-tungstenite = "0.23"

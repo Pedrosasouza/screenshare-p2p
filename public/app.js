@@ -372,10 +372,6 @@ const qualityModeLabel = document.getElementById('qualityModeLabel');
 // Quality mode: 'motion' = fluid 60fps (gaming), 'detail' = sharp text/UI (Tibia, documents)
 let contentHintMode = 'motion';
 
-const audioGuideModal = document.getElementById('audioGuideModal');
-const btnAudioGuide = document.getElementById('btnAudioGuide');
-const btnCloseAudioGuide = document.getElementById('btnCloseAudioGuide');
-const btnFullscreen = document.getElementById('btnFullscreen');
 const btnThemeToggle = document.getElementById('btnThemeToggle');
 const THEME_KEY = 'streamgrid_theme';
 
@@ -2088,50 +2084,7 @@ btnCopyLink.addEventListener('click', () => {
     });
 });
 
-// Fullscreen App (Optional Toolbar Button)
-if (btnFullscreen) {
-    btnFullscreen.addEventListener('click', () => {
-        const tiles = streamGrid.querySelectorAll('.stream-tile');
-        if (tiles.length > 0) {
-            const firstTile = tiles[0];
-            const video = firstTile.querySelector('video');
-            toggleTileFullscreen(firstTile, video);
-            return;
-        }
 
-        if (!document.fullscreenElement && !document.webkitFullscreenElement) {
-            const reqDocFs = document.documentElement.requestFullscreen || 
-                             document.documentElement.webkitRequestFullscreen ||
-                             document.documentElement.mozRequestFullScreen;
-            if (reqDocFs) {
-                try { reqDocFs.call(document.documentElement).catch(() => {}); } catch(e) {}
-            }
-        } else {
-            const exitDocFs = document.exitFullscreen || document.webkitExitFullscreen;
-            if (exitDocFs) {
-                try { exitDocFs.call(document).catch(() => {}); } catch(e) {}
-            }
-        }
-    });
-}
-
-// Audio Guide Modal
-btnAudioGuide.addEventListener('click', () => {
-    audioGuideModal.hidden = false;
-    audioGuideModal.style.display = 'flex';
-});
-btnCloseAudioGuide.addEventListener('click', () => {
-    audioGuideModal.hidden = true;
-    audioGuideModal.style.display = 'none';
-});
-
-// Close modal on outside click or ESC key
-audioGuideModal.addEventListener('click', (e) => {
-    if (e.target === audioGuideModal) {
-        audioGuideModal.hidden = true;
-        audioGuideModal.style.display = 'none';
-    }
-});
 
 window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
@@ -2141,10 +2094,6 @@ window.addEventListener('keydown', (e) => {
             } else if (roomId) {
                 closeRoomModal();
             }
-        }
-        if (!audioGuideModal.hidden && audioGuideModal.style.display !== 'none') {
-            audioGuideModal.hidden = true;
-            audioGuideModal.style.display = 'none';
         }
     }
 });
