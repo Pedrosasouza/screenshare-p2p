@@ -378,10 +378,42 @@ async function runEvictionBugTest() {
             setTimeout(() => resolve(false), 2000);
         });
 
+        const bJoined = new Promise(resolve => {
+            socketB.once('room-users', resolve);
+        });
         socketB.emit('join-room', { roomId: 'sala-secreta', password: 'senha-super-segura', clientId: 'user-1' });
-        await socketADisconnected;
 
-        // 3. Agora Socket C tenta entrar na sala 'sala-secreta' SEM senha
+        const [aWasEvicted] = await Promise.all([socketADisconnected, bJoined]);
+
+        // Asserção estrita de observabilidade externa: Socket A deve ser desconectado forçadamente pelo servidor
+        if (!aWasEvicted || socketA.connected) {
+            socketA.disconnect();
+            socketB.disconnect();
+            socketC.disconnect();
+            server.stop();
+            console.log(`\x1b[31mFALHOU (Socket A não foi expulso pelo servidor na eviction)\x1b[0m`);
+            return { passed: false, bugConfirmed: false };
+        }
+
+        // 3. Verificação de caixa-preta via check-room antes da tentativa de entrada
+        const checkResult = await new Promise(resolve => {
+            const timer = setTimeout(() => resolve({ status: 'timeout' }), 1500);
+            socketC.emit('check-room', { roomId: 'sala-secreta' }, res => {
+                clearTimeout(timer);
+                resolve({ status: 'ok', res });
+            });
+        });
+
+        if (checkResult.status !== 'ok' || !checkResult.res?.exists || !checkResult.res?.hasPassword || checkResult.res?.memberCount !== 1) {
+            socketA.disconnect();
+            socketB.disconnect();
+            socketC.disconnect();
+            server.stop();
+            console.log(`\x1b[31mVULNERÁVEL (check-room falhou pós-eviction: sala órfã sumiu do mapa! res=${JSON.stringify(checkResult.res)})\x1b[0m`);
+            return { passed: false, bugConfirmed: true };
+        }
+
+        // 4. Agora Socket C tenta entrar na sala 'sala-secreta' SEM senha
         const cResult = await new Promise(resolve => {
             socketC.once('room-users', data => resolve({ status: 'joined', data }));
             socketC.once('join-error', data => resolve({ status: 'rejected', data }));
