@@ -1230,6 +1230,14 @@ function addLocalTracksToPC(pc) {
     });
 }
 
+function getMaxBitrateForPeerCount() {
+    // Escala dinâmica de acordo com o número de conexões ativas assistindo
+    const count = peers.size;
+    if (count <= 1) return 6000000;      // 1 espectador: 6.0 Mbps (teto máximo)
+    if (count === 2) return 4500000;     // 2 espectadores: 4.5 Mbps cada (9.0 Mbps total)
+    return 3500000;                      // 3+ espectadores: 3.5 Mbps cada (10.5 Mbps total) - 1080p nítido sem saturação
+}
+
 function configureSenderParams(sender, kind) {
     if (kind === 'video' && sender && typeof sender.getParameters === 'function') {
         try {
@@ -1237,7 +1245,7 @@ function configureSenderParams(sender, kind) {
             // NEVER sacrifice 1080p resolution - keep text and game pixels razor-sharp
             params.degradationPreference = 'maintain-resolution';
             if (params.encodings && params.encodings[0]) {
-                params.encodings[0].maxBitrate = 6000000;
+                params.encodings[0].maxBitrate = getMaxBitrateForPeerCount();
                 params.encodings[0].maxFramerate = 60;
             }
             sender.setParameters(params).catch(() => {});
@@ -1300,14 +1308,15 @@ function startQualityMonitor() {
                             const current = params.encodings[0].maxBitrate || 6000000;
                             let targetBitrate;
 
+                            const peerCap = getMaxBitrateForPeerCount();
                             if (availableBitrate < 1200000) {
                                 targetBitrate = 800000; // Emergency floor
                             } else if (availableBitrate < 2500000) {
                                 targetBitrate = Math.floor(availableBitrate * 0.65);
                             } else if (availableBitrate < 5000000) {
-                                targetBitrate = Math.floor(availableBitrate * 0.75);
+                                targetBitrate = Math.min(peerCap, Math.floor(availableBitrate * 0.75));
                             } else {
-                                targetBitrate = 6000000; // Cap
+                                targetBitrate = peerCap; // Cap dinâmico por contagem de espectadores
                             }
 
                             // Auto-throttle framerate to 30fps under critical bottleneck to prevent freezes
