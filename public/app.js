@@ -1,6 +1,9 @@
 ﻿// ==========================================
 // Rust Audio Helper (WASAPI Application Loopback)
 // ==========================================
+let helperAuthToken = (typeof crypto !== 'undefined' && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : 'sg_tok_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
 let helperWs = null;
 let helperConnected = false;
 let availableWindows = [];
@@ -14,7 +17,7 @@ async function spawnAudioHelperIfNeutralino() {
             const appPath = (typeof NL_PATH !== 'undefined' && NL_PATH) ? NL_PATH : '.';
             const parentPid = (typeof NL_PID !== 'undefined' && NL_PID) ? NL_PID : 0;
             console.log('[AudioHelper] Spawning helper process (parent PID:', parentPid, ')...');
-            await Neutralino.os.spawnProcess(`"${appPath}/bin/streamgrid-audio-helper.exe" --port 45454 --parent-pid ${parentPid}`);
+            await Neutralino.os.spawnProcess(`"${appPath}/bin/streamgrid-audio-helper.exe" --port 45454 --parent-pid ${parentPid} --token "${helperAuthToken}"`);
         } catch(err) {
             console.log('[AudioHelper] Spawn attempt note:', err.message || err);
         }
@@ -30,10 +33,10 @@ function connectAudioHelper() {
         helperWs.binaryType = 'arraybuffer';
 
         helperWs.onopen = () => {
-            console.log('[AudioHelper] ✅ Conectado ao Helper WASAPI de Áudio (Rust)');
-            helperConnected = true;
-            checkDiscordStatus();
-            fetchWindowList();
+            console.log('[AudioHelper] 🔌 Conexão estabelecida com Helper WASAPI. Autenticando...');
+            helperConnected = false;
+            // Envia o token de autenticação imediatamente
+            helperWs.send(JSON.stringify({ type: 'auth', token: helperAuthToken }));
         };
 
         helperWs.onmessage = (event) => {
@@ -47,7 +50,16 @@ function connectAudioHelper() {
 
             try {
                 const msg = JSON.parse(event.data);
-                if (msg.type === 'windows_list') {
+                if (msg.type === 'auth_ok') {
+                    console.log('[AudioHelper] 🛡️ Autenticação aceita pelo Helper!');
+                    helperConnected = true;
+                    checkDiscordStatus();
+                    fetchWindowList();
+                } else if (msg.type === 'auth_failed') {
+                    console.error('[AudioHelper] ❌ Falha na autenticação do Helper:', msg.error);
+                    helperConnected = false;
+                    try { helperWs.close(); } catch(e) {}
+                } else if (msg.type === 'windows_list') {
                     availableWindows = msg.windows || [];
                     updateAudioAppSelect(availableWindows);
                 } else if (msg.type === 'discord_status') {
