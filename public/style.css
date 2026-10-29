@@ -1,4 +1,4 @@
-:root, [data-theme="dark"] {
+﻿:root, [data-theme="dark"] {
     --bg-dark: #090a0f;
     --bg-surface: #12151c;
     --bg-card: #181c26;
@@ -631,7 +631,15 @@ body {
 }
 
 .stream-grid[data-count="3"] {
-    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+}
+
+/* O terceiro stream ganha largura centralizada na linha inferior (layout 2+1 estilo Discord/Meet) */
+.stream-grid[data-count="3"] .stream-tile:nth-child(3) {
+    grid-column: 1 / -1;
+    max-width: 72%;
+    justify-self: center;
 }
 
 .stream-grid[data-count="4"] {

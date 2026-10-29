@@ -1512,8 +1512,27 @@ function updateEchoWarningVisibility() {
 
 function openShareConfigModal() {
     updateEchoWarningVisibility();
-    checkDiscordStatus();
-    fetchWindowList();
+
+    const isDesktop = (typeof Neutralino !== 'undefined' && Boolean(Neutralino.os));
+
+    // Se estiver no navegador web (sem app desktop), adapta o modal amigavelmente
+    const desktopOnlyCard1 = audioSourceExcludeDiscord?.closest('.audio-option-card');
+    const desktopOnlyCard2 = audioSourceApp?.closest('.audio-option-card');
+
+    if (!isDesktop) {
+        if (desktopOnlyCard1) desktopOnlyCard1.style.display = 'none';
+        if (desktopOnlyCard2) desktopOnlyCard2.style.display = 'none';
+        if (audioSourceSystem) {
+            audioSourceSystem.checked = true;
+            audioSourceSystem.closest('.audio-option-card').style.border = '1px solid var(--primary)';
+        }
+    } else {
+        if (desktopOnlyCard1) desktopOnlyCard1.style.display = 'flex';
+        if (desktopOnlyCard2) desktopOnlyCard2.style.display = 'flex';
+        checkDiscordStatus();
+        fetchWindowList();
+    }
+
     if (shareConfigModal) {
         shareConfigModal.removeAttribute('hidden');
         shareConfigModal.style.display = 'flex';
