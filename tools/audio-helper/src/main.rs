@@ -514,6 +514,11 @@ async fn main() {
         }
     };
 
+    if args.token.trim().is_empty() {
+        eprintln!("[Helper Security] ERRO CRÍTICO: O parâmetro --token é obrigatório.");
+        std::process::exit(1);
+    }
+
     if let Ok(local_addr) = listener.local_addr() {
         println!("STREAMGRID_AUDIO_HELPER_PORT={}", local_addr.port());
     }
@@ -558,13 +563,41 @@ async fn main() {
     }
 }
 
+fn is_allowed_origin(origin: &str) -> bool {
+    let lower = origin.trim().to_lowercase();
+    lower.starts_with("http://localhost:") || lower == "http://localhost"
+        || lower.starts_with("https://localhost:") || lower == "https://localhost"
+        || lower.starts_with("http://127.0.0.1:") || lower == "http://127.0.0.1"
+        || lower.starts_with("https://127.0.0.1:") || lower == "https://127.0.0.1"
+        || lower.starts_with("neutralino://")
+}
+
 async fn handle_client(
     stream: TcpStream,
     required_token: Arc<String>,
     parent_pid: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut ws = tokio_tungstenite::accept_async(stream).await?;
-    let mut authenticated = required_token.is_empty();
+    let callback = |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                    response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+        if let Some(origin_header) = req.headers().get("Origin") {
+            if let Ok(origin_str) = origin_header.to_str() {
+                if !is_allowed_origin(origin_str) {
+                    eprintln!("[Helper Security] Rejeitando conexão WebSocket com Origin não autorizado: {}", origin_str);
+                    let mut err_response = tokio_tungstenite::tungstenite::handshake::server::ErrorResponse::new(Some("Forbidden Origin".into()));
+                    *err_response.status_mut() = tokio_tungstenite::tungstenite::http::StatusCode::FORBIDDEN;
+                    return Err(err_response);
+                }
+            } else {
+                let mut err_response = tokio_tungstenite::tungstenite::handshake::server::ErrorResponse::new(Some("Invalid Origin Header".into()));
+                *err_response.status_mut() = tokio_tungstenite::tungstenite::http::StatusCode::BAD_REQUEST;
+                return Err(err_response);
+            }
+        }
+        Ok(response)
+    };
+
+    let mut ws = tokio_tungstenite::accept_hdr_async(stream, callback).await?;
+    let mut authenticated = false;
 
     let mut capture_stop_signal: Option<Arc<AtomicBool>> = None;
     let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(100);
@@ -598,7 +631,7 @@ async fn handle_client(
 
                     match client_msg {
                         ClientMessage::Auth { token } => {
-                            if *required_token == token || required_token.is_empty() {
+                            if !required_token.is_empty() && *required_token == token {
                                 authenticated = true;
                                 let _ = ws.send(Message::Text(serde_json::to_string(&ServerMessage::AuthOk)?)).await;
                             } else {
