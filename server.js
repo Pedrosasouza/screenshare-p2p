@@ -184,6 +184,7 @@ io.on('connection', (socket) => {
 
         const cleanPassword = typeof data.password === 'string' ? data.password.trim() : '';
         const clientId = typeof data.clientId === 'string' ? data.clientId.trim().slice(0, 100) : null;
+        const cleanUserName = typeof data.userName === 'string' ? data.userName.trim().slice(0, 32) : '';
 
         let room = rooms.get(cleanRoomId);
         const clientKey = getClientIdentifier(socket);
@@ -210,6 +211,7 @@ io.on('connection', (socket) => {
                     passwordHash: hash,
                     passwordSalt: salt,
                     members: new Map(), // socketId -> clientId
+                    userNames: new Map(), // socketId -> userName
                     activeStreams: new Set()
                 };
                 rooms.set(cleanRoomId, room);
@@ -282,16 +284,20 @@ io.on('connection', (socket) => {
 
         socket.join(cleanRoomId);
         socket.roomId = cleanRoomId;
+        const displayName = cleanUserName || `Participante ${socket.id.substr(0, 5)}`;
         room.members.set(socket.id, clientId || socket.id);
+        if (!room.userNames) room.userNames = new Map();
+        room.userNames.set(socket.id, displayName);
 
         const otherUsers = Array.from(room.members.keys()).filter(id => id !== socket.id);
         const activeStreams = Array.from(room.activeStreams).filter(id => id !== socket.id);
 
-        console.log(`[->] Socket ${socket.id} joined room "${cleanRoomId}" (Members: ${room.members.size})`);
+        console.log(`[->] Socket ${socket.id} joined room "${cleanRoomId}" as "${displayName}" (Members: ${room.members.size})`);
 
         // Send existing room members and active streamers to new user
         socket.emit('room-users', {
             users: otherUsers,
+            userNames: Object.fromEntries(room.userNames),
             activeStreams: activeStreams,
             socketId: socket.id,
             memberCount: room.members.size,
@@ -301,6 +307,7 @@ io.on('connection', (socket) => {
         // Notify existing members about new user
         socket.to(cleanRoomId).emit('user-joined', {
             socketId: socket.id,
+            userName: displayName,
             memberCount: room.members.size
         });
 
@@ -382,6 +389,7 @@ io.on('connection', (socket) => {
             if (rid && rooms.has(rid)) {
                 const r = rooms.get(rid);
                 r.members.delete(sock.id);
+                if (r.userNames) r.userNames.delete(sock.id);
                 const wasStreaming = r.activeStreams.has(sock.id);
                 r.activeStreams.delete(sock.id);
 
