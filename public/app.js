@@ -1,4 +1,4 @@
-﻿// ==========================================
+// ==========================================
 // Rust Audio Helper (WASAPI Application Loopback)
 // ==========================================
 let helperAuthToken = (typeof crypto !== 'undefined' && crypto.randomUUID)
@@ -1107,8 +1107,19 @@ function getOrCreatePeerConnection(peerId) {
     pc.oniceconnectionstatechange = () => {
         console.log(`[WebRTC] ICE state (${peerId}):`, pc.iceConnectionState);
         if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
-            // Attempt ICE restart if needed
-            if (pc.restartIce) pc.restartIce();
+            if (peerObj._iceRestartTimeout) clearTimeout(peerObj._iceRestartTimeout);
+            peerObj._iceRestartTimeout = setTimeout(() => {
+                if ((pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') && localStream) {
+                    console.log(`[WebRTC] Triggering active ICE restart for: ${peerId}`);
+                    if (pc.restartIce) pc.restartIce();
+                    sendOffer(peerId);
+                }
+            }, 2000);
+        } else if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+            if (peerObj._iceRestartTimeout) {
+                clearTimeout(peerObj._iceRestartTimeout);
+                peerObj._iceRestartTimeout = null;
+            }
         }
     };
 
