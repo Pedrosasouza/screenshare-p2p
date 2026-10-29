@@ -57,6 +57,13 @@ function connectAudioHelper() {
                     helperConnectAttempts = 0; // Conectado com sucesso, reseta contador
                     checkDiscordStatus();
                     fetchWindowList();
+                    if (!window._helperPingInterval) {
+                        window._helperPingInterval = setInterval(() => {
+                            if (helperWs && helperWs.readyState === WebSocket.OPEN) {
+                                helperWs.send(JSON.stringify({ type: String.fromCharCode(112,105,110,103) }));
+                            }
+                        }, 1500);
+                    }
                 } else if (msg.type === 'auth_failed') {
                     console.error('[AudioHelper] ❌ Falha na autenticação do Helper:', msg.error);
                     helperConnected = false;
@@ -233,7 +240,8 @@ if (typeof Neutralino !== 'undefined') {
                 } catch(e) {}
                 // Garantia final: encerra o app Neutralino
                 try {
-                    await Neutralino.app.exit();
+                    await new Promise(r => setTimeout(r, 80));
+                await Neutralino.app.exit();
                 } catch(e) {}
             });
         }

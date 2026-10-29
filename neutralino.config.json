@@ -31,7 +31,7 @@
       "resizable": true,
       "maximize": false,
       "hidden": false,
-      "exitProcessOnClose": true
+      "exitProcessOnClose": false
     }
   }
 }

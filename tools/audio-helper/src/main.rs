@@ -521,11 +521,39 @@ async fn main() {
 
     let required_token = Arc::new(args.token);
     let parent_pid = args.parent_pid;
+    let active_connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    // Watchdog: Encerra o helper apos 2.5s se a conexao com StreamGrid cair
+    let active_conns_watchdog = active_connections.clone();
+    tokio::spawn(async move {
+        let mut had_connection = false;
+        let mut grace_start: Option<Instant> = None;
+        let startup_time = Instant::now();
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            let count = active_conns_watchdog.load(Ordering::Relaxed);
+            if count > 0 {
+                had_connection = true;
+                grace_start = None;
+            } else if had_connection {
+                let elapsed = grace_start.get_or_insert_with(Instant::now).elapsed();
+                if elapsed > tokio::time::Duration::from_millis(2500) {
+                    eprintln!("[Helper Watchdog] StreamGrid fechado. Encerrando helper.");
+                    std::process::exit(0);
+                }
+            } else if startup_time.elapsed() > tokio::time::Duration::from_secs(30) {
+                std::process::exit(0);
+            }
+        }
+    });
 
     while let Ok((stream, _)) = listener.accept().await {
         let token = required_token.clone();
+        let conn_counter = active_connections.clone();
         tokio::spawn(async move {
+            conn_counter.fetch_add(1, Ordering::Relaxed);
             let _ = handle_client(stream, token, parent_pid).await;
+            conn_counter.fetch_sub(1, Ordering::Relaxed);
         });
     }
 }
