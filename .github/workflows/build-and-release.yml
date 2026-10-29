@@ -1,0 +1,132 @@
+name: CI & Windows Release Build
+
+on:
+  push:
+    branches:
+      - master
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - master
+      - main
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Forçar criação de release no GitHub Releases (mesmo sem tag)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  test-and-build:
+    name: Build & Package (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/audio-helper
+
+      - name: Run WebRTC & Signaling Security Tests
+        run: npm test
+
+      - name: Build Rust Audio Helper (WASAPI Loopback)
+        shell: pwsh
+        run: |
+          cargo build --release --manifest-path tools/audio-helper/Cargo.toml
+          New-Item -ItemType Directory -Force -Path bin | Out-Null
+          Copy-Item tools/audio-helper/target/release/streamgrid-audio-helper.exe -Destination bin/streamgrid-audio-helper.exe -Force
+
+      - name: Run Audio Helper Token & Lifecycle Tests
+        run: npm run test:helper
+
+      - name: Build Neutralino Desktop Package
+        shell: pwsh
+        run: npx @neutralinojs/neu build
+
+      - name: Package Windows Bundle & Compute Checksums
+        shell: pwsh
+        run: |
+          # 1. Garantir diretórios de distribuição
+          New-Item -ItemType Directory -Force -Path dist/StreamGrid/bin | Out-Null
+          
+          # 2. Copiar binário auxiliar compilado em Rust
+          Copy-Item bin/streamgrid-audio-helper.exe -Destination dist/StreamGrid/bin/streamgrid-audio-helper.exe -Force
+          
+          # 3. Limpeza de logs de execução e arquivos temporários
+          Remove-Item -Path dist/StreamGrid/neutralinojs.log, dist/StreamGrid/.tmp -Recurse -Force -ErrorAction SilentlyContinue
+          Get-ChildItem -Path dist/StreamGrid -Include *linux*, *mac* | Remove-Item -Force -ErrorAction SilentlyContinue
+          
+          # 4. Compactar o pacote final para distribuição
+          Compress-Archive -Path dist/StreamGrid -DestinationPath dist/StreamGrid-Windows.zip -Force
+          
+          # 5. Gerar hash SHA-256 para integridade e auditoria
+          $hash = (Get-FileHash -Path dist/StreamGrid-Windows.zip -Algorithm SHA256).Hash
+          "$hash  StreamGrid-Windows.zip" | Out-File -FilePath dist/StreamGrid-Windows.zip.sha256 -Encoding ascii
+          Write-Host "SHA-256: $hash"
+
+      # =========================================================================
+      # INTEGRAÇÃO COM SIGNPATH FOUNDATION (ASSINATURA DE CÓDIGO)
+      # Após aprovação na SignPath Foundation:
+      # 1. Configure as credenciais no GitHub: Settings > Secrets and variables > Actions:
+      #    - SIGNPATH_API_TOKEN
+      #    - SIGNPATH_ORGANIZATION_ID
+      # 2. Descomente as linhas abaixo para assinar os binários antes da publicação:
+      # =========================================================================
+      # - name: Submit signing request to SignPath Foundation
+      #   if: startsWith(github.ref, 'refs/tags/v')
+      #   uses: signpath/github-action-submit-signing-request@v1
+      #   with:
+      #     api_token: ${{ secrets.SIGNPATH_API_TOKEN }}
+      #     organization_id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+      #     project_slug: 'screenshare-p2p'
+      #     signing_policy_slug: 'release-signing'
+      #     artifact_path: 'dist/StreamGrid-Windows.zip'
+      #     output_artifact_directory: 'dist/signed'
+      # =========================================================================
+
+      - name: Upload Build Artifacts (CI Run)
+        uses: actions/upload-artifact@v4
+        with:
+          name: StreamGrid-Windows
+          path: |
+            dist/StreamGrid-Windows.zip
+            dist/StreamGrid-Windows.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/StreamGrid-Windows.zip
+            dist/StreamGrid-Windows.zip.sha256
+          generate_release_notes: true
+          draft: false
+          prerelease: false

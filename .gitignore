@@ -4,3 +4,5 @@ bin/
 tools/audio-helper/target/
 .env
 *.log
+.tmp/
+
