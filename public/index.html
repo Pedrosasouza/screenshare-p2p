@@ -330,6 +330,34 @@
                         </label>
                     </div>
 
+                    <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 12px; margin-top: 16px;">
+                        Qualidade e Taxa de Quadros (Vídeo):
+                    </p>
+                    <div class="video-quality-options" style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px;">
+                        <div class="quality-card" style="display: flex; flex-direction: column; gap: 6px; padding: 10px; border-radius: var(--radius-md); border: 1px solid var(--border); background: var(--bg-surface);">
+                            <span style="font-size: 0.8rem; font-weight: 600; color: var(--text-muted);"><i class="fa-solid fa-expand"></i> Resolução</span>
+                            <div style="display: flex; gap: 10px; align-items: center; margin-top: 4px;">
+                                <label style="display: flex; align-items: center; gap: 6px; font-size: 0.85rem; cursor: pointer;">
+                                    <input type="radio" name="videoResolution" value="1080p" checked> 1080p
+                                </label>
+                                <label style="display: flex; align-items: center; gap: 6px; font-size: 0.85rem; cursor: pointer;">
+                                    <input type="radio" name="videoResolution" value="720p"> 720p
+                                </label>
+                            </div>
+                        </div>
+                        <div class="quality-card" style="display: flex; flex-direction: column; gap: 6px; padding: 10px; border-radius: var(--radius-md); border: 1px solid var(--border); background: var(--bg-surface);">
+                            <span style="font-size: 0.8rem; font-weight: 600; color: var(--text-muted);"><i class="fa-solid fa-gauge-high"></i> Taxa de Quadros</span>
+                            <div style="display: flex; gap: 10px; align-items: center; margin-top: 4px;">
+                                <label style="display: flex; align-items: center; gap: 6px; font-size: 0.85rem; cursor: pointer;">
+                                    <input type="radio" name="videoFps" value="60" checked> 60 FPS
+                                </label>
+                                <label style="display: flex; align-items: center; gap: 6px; font-size: 0.85rem; cursor: pointer;">
+                                    <input type="radio" name="videoFps" value="30"> 30 FPS
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
                     <button class="btn btn-primary btn-block" id="btnConfirmStartShare">
                         <i class="fa-solid fa-display"></i> Continuar e Escolher Janela
                     </button>
