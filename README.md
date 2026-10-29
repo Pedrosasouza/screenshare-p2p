@@ -37,17 +37,6 @@ Além da visualização em grade, o projeto aborda um desafio comum em transmiss
 
 ---
 
-## 📸 Demonstração da Interface
-
-<p align="center">
-  <!-- Substitua pelo caminho da sua captura ou GIF em docs/ (ex: docs/preview.png) -->
-  <img src="docs/preview.png" alt="Demonstração do StreamGrid — Visualização em Grade" width="850" onerror="this.style.display='none'" />
-</p>
-
-> *Dica: Adicione uma captura ou GIF curto mostrando 2 ou mais telas ativas na grade em `docs/preview.png` para ilustrar a experiência de uso.*
-
----
-
 ## ⚖️ Versão Web vs. Versão Desktop
 
 Devido às restrições de segurança e sandbox dos navegadores (`getDisplayMedia`), determinadas operações de baixo nível no subsistema de som do sistema operacional são exclusivas do aplicativo desktop.
@@ -78,11 +67,11 @@ Devido às restrições de segurança e sandbox dos navegadores (`getDisplayMedi
 ### 2. Motor de Áudio Dedicado (Exclusivo Desktop / Rust)
 * **WASAPI Loopback com Filtro por Processo:** Captura direta da sessão de áudio do Windows (`IAudioClient`), permitindo filtrar fluxos a partir do identificador de processo (PID).
 * **Sem Dependência de Drivers Externos:** Não requer instalação ou configuração de softwares de cabos virtuais adicionais.
-* **Ciclo de Vida Vinculado:** O assistente de áudio em segundo plano (`streamgrid-audio-helper.exe`) é acoplado ao ciclo da aplicação, com encerramento automático garantido ao fechar a janela principal.
+* **Ciclo de Vida Vinculado:** O assistente de áudio em segundo plano (`streamgrid-audio-helper.exe`) é acoplado ao ciclo da aplicação, com encerramento automático ao fechar a janela principal.
 
 ### 3. Gerenciamento de Salas & Segurança
 * **Salas Públicas ou Privadas:** Criação por identificadores legíveis (`grid-xxxx-xxxx`) ou códigos customizados.
-* **Proteção por Senha Opcional:** Armazenamento seguro no servidor com hash e salt.
+* **Proteção por Senha Opcional:** As senhas das salas privadas são armazenadas como hashes com salt no servidor.
 * **Mitigação de Abusos:** Rate-limiting para proteção contra tentativas repetitivas de senha e sanitização de dados para prevenção de injeção de scripts (DOM XSS).
 
 ---
@@ -168,10 +157,15 @@ O repositório inclui testes automatizados para verificar a robustez da sinaliza
 npm test
 ```
 
-* **Fuzzing & Resiliência:** Avalia a estabilidade do servidor diante de mensagens WebSocket com formatos inesperados ou incompletos.
-* **Otimização de SDP:** Valida a substituição correta de parâmetros para negociação de áudio e vídeo no WebRTC.
-* **Rate Limiting:** Testa o bloqueio temporário após tentativas consecutivas incorretas de senha.
-* **Ciclo de Vida de Token:** Valida o mecanismo de emissão e verificação de tokens do helper local.
+A suíte padrão executa:
+* **Fuzzing & Resiliência:** Avalia a estabilidade do servidor diante de mensagens WebSocket com formatos inesperados ou incompletos (`test/fuzz-crash-test.js`).
+* **Otimização de SDP:** Valida a substituição correta de parâmetros para negociação de áudio e vídeo no WebRTC (`test/sdp-optimization.test.js`).
+* **Rate Limiting:** Testa o bloqueio temporário após tentativas consecutivas incorretas de senha (`test/ip-rate-limit.test.js`).
+
+Para validar especificamente o ciclo de vida e a persistência de tokens do assistente de áudio no Windows:
+```bash
+npm run test:helper
+```
 
 ---
 
