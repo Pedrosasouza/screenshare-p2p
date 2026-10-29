@@ -1,4 +1,4 @@
-﻿const express = require('express');
+const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
@@ -12,7 +12,8 @@ const io = new Server(server, {
         methods: ["GET", "POST"]
     },
     pingInterval: 5000,
-    pingTimeout: 7000
+    pingTimeout: 7000,
+    maxHttpBufferSize: 1e5 // 100 KB max payload size
 });
 
 // Serve static files from public directory
@@ -27,8 +28,69 @@ app.get('*', (req, res) => {
 const rooms = new Map();
 
 // Anti-Brute Force Protection for Password-Protected Rooms
-// Key: client IP or socket ID -> { count: number, lockedUntil: number }
+// Key: client IP or socket ID -> { count: number, lockedUntil: number, lastAttempt: number }
 const loginAttempts = new Map();
+
+// Validation and sanitization helpers
+const ROOM_ID_REGEX = /^[a-z0-9_-]{3,64}$/;
+
+function isPlainObject(obj) {
+    return obj !== null && typeof obj === 'object' && !Array.isArray(obj);
+}
+
+function isValidSignal(signal) {
+    if (!isPlainObject(signal)) return false;
+    const isSdp = typeof signal.type === 'string' && (signal.type === 'offer' || signal.type === 'answer') && typeof signal.sdp === 'string';
+    const isIce = Boolean(signal.candidate || signal.sdpMid !== undefined || signal.sdpMLineIndex !== undefined);
+    return isSdp || isIce;
+}
+
+function checkRateLimit(socket, eventName, windowMs = 1000) {
+    const now = Date.now();
+    if (!socket._rateLimit) {
+        socket._rateLimit = new Map();
+    }
+    let tracker = socket._rateLimit.get(eventName);
+    if (!tracker || now > tracker.resetAt) {
+        tracker = { count: 0, resetAt: now + windowMs };
+        socket._rateLimit.set(eventName, tracker);
+    }
+    tracker.count += 1;
+    // Permite maior vazão para rajadas de candidatos ICE no WebRTC Mesh (até 250/s)
+    const maxEvents = eventName === 'signal' ? 250 : 50;
+    return tracker.count <= maxEvents;
+}
+
+function safeHandler(socket, eventName, handler) {
+    return async (...args) => {
+        const ack = typeof args[args.length - 1] === 'function' ? args.pop() : undefined;
+        const payload = args[0];
+
+        if (!checkRateLimit(socket, eventName)) {
+            if (typeof ack === 'function') {
+                try { ack({ error: 'rate_limited' }); } catch (_) {}
+            }
+            return;
+        }
+
+        try {
+            await Promise.resolve(handler(payload, ack));
+        } catch (err) {
+            if (!socket._errorLogCount) socket._errorLogCount = 0;
+            if (socket._errorLogCount < 5) {
+                console.warn(`[Security/Error] Exception in "${eventName}" from ${socket.id}:`, err.message);
+                socket._errorLogCount++;
+            }
+            if (typeof ack === 'function') {
+                try { ack({ error: 'server_error' }); } catch (_) {}
+            }
+            socket.emit('server-error', {
+                event: eventName,
+                message: 'Invalid payload or server error.'
+            });
+        }
+    };
+}
 
 function getClientIdentifier(socket) {
     // Captura IP real considerando proxies reversos como Cloudflare / Render
@@ -52,13 +114,40 @@ setInterval(() => {
 io.on('connection', (socket) => {
     console.log(`[+] Client connected: ${socket.id}`);
 
-    socket.on('join-room', ({ roomId, clientId, password }) => {
-        const cleanRoomId = (roomId || '').trim().toLowerCase();
-        if (!cleanRoomId) return;
+    socket.on('join-room', safeHandler(socket, 'join-room', (data) => {
+        if (!isPlainObject(data)) return;
+
+        const rawRoomId = typeof data.roomId === 'string' ? data.roomId.trim().toLowerCase() : '';
+        if (!ROOM_ID_REGEX.test(rawRoomId)) {
+            socket.emit('join-error', {
+                error: 'invalid_room',
+                message: 'Nome de sala inválido. Use de 3 a 64 caracteres alfanuméricos, hífen ou underline.'
+            });
+            return;
+        }
+        const cleanRoomId = rawRoomId;
+
+        // Password format validation: reject if provided and not string
+        if (data.password !== undefined && data.password !== null && typeof data.password !== 'string') {
+            socket.emit('join-error', {
+                error: 'invalid_password_format',
+                message: 'Formato de senha inválido.'
+            });
+            return;
+        }
+
+        if (typeof data.password === 'string' && data.password.length > 100) {
+            socket.emit('join-error', {
+                error: 'invalid_password_format',
+                message: 'A senha excede o limite de 100 caracteres.'
+            });
+            return;
+        }
+
+        const cleanPassword = typeof data.password === 'string' ? data.password.trim() : '';
+        const clientId = typeof data.clientId === 'string' ? data.clientId.trim().slice(0, 100) : null;
 
         let room = rooms.get(cleanRoomId);
-        const cleanPassword = (password || '').trim();
-
         const clientKey = getClientIdentifier(socket);
         const now = Date.now();
         const attemptData = loginAttempts.get(clientKey) || { count: 0, lockedUntil: 0, lastAttempt: now };
@@ -138,6 +227,11 @@ io.on('connection', (socket) => {
             }
         }
 
+        // Re-register room in Map if eviction of sole member triggered room deletion
+        if (!rooms.has(cleanRoomId)) {
+            rooms.set(cleanRoomId, room);
+        }
+
         socket.join(cleanRoomId);
         socket.roomId = cleanRoomId;
         room.members.set(socket.id, clientId || socket.id);
@@ -166,24 +260,35 @@ io.on('connection', (socket) => {
         io.to(cleanRoomId).emit('room-status', {
             memberCount: room.members.size
         });
-    });
+    }));
 
     // Check room existence, member count & password requirement
-    socket.on('check-room', ({ roomId }, callback) => {
-        const cleanRoomId = (roomId || '').trim().toLowerCase();
-        const room = rooms.get(cleanRoomId);
-        if (typeof callback === 'function') {
-            callback({
-                exists: Boolean(room && room.members.size > 0),
-                memberCount: room ? room.members.size : 0,
-                hasPassword: Boolean(room && room.password)
+    socket.on('check-room', safeHandler(socket, 'check-room', (data, callback) => {
+        if (typeof callback !== 'function') return;
+
+        if (!isPlainObject(data) || typeof data.roomId !== 'string' || !ROOM_ID_REGEX.test(data.roomId.trim().toLowerCase())) {
+            return callback({
+                exists: false,
+                memberCount: 0,
+                hasPassword: false
             });
         }
-    });
+
+        const cleanRoomId = data.roomId.trim().toLowerCase();
+        const room = rooms.get(cleanRoomId);
+        callback({
+            exists: Boolean(room && room.members.size > 0),
+            memberCount: room ? room.members.size : 0,
+            hasPassword: Boolean(room && room.password)
+        });
+    }));
 
     // Targeted WebRTC Signal Relay (Peer-to-Peer Mesh with Room Isolation)
-    socket.on('signal', ({ targetId, signal }) => {
-        if (!targetId || !signal) return;
+    socket.on('signal', safeHandler(socket, 'signal', (data) => {
+        if (!isPlainObject(data)) return;
+        const targetId = typeof data.targetId === 'string' ? data.targetId.trim() : null;
+        if (!targetId || !isValidSignal(data.signal)) return;
+
         const senderRoom = socket.roomId;
         if (!senderRoom) return;
 
@@ -196,62 +301,72 @@ io.on('connection', (socket) => {
 
         io.to(targetId).emit('signal', {
             senderId: socket.id,
-            signal
+            signal: data.signal
         });
-    });
+    }));
 
-    // Broadcast stream state changes (started/stopped screen share)
-    socket.on('stream-state', ({ roomId, state }) => {
-        const cleanRoomId = (roomId || socket.roomId || '').trim().toLowerCase();
-        const room = rooms.get(cleanRoomId);
-        if (room) {
-            if (state === 'started') {
-                room.activeStreams.add(socket.id);
-            } else {
-                room.activeStreams.delete(socket.id);
-            }
+    // Broadcast stream state changes (strictly isolated to socket's authenticated room)
+    socket.on('stream-state', safeHandler(socket, 'stream-state', (data) => {
+        if (!isPlainObject(data)) return;
+        if (data.state !== 'started' && data.state !== 'stopped') return;
+
+        const senderRoom = socket.roomId;
+        if (!senderRoom) return;
+
+        const room = rooms.get(senderRoom);
+        if (!room) return;
+
+        if (data.state === 'started') {
+            room.activeStreams.add(socket.id);
+        } else {
+            room.activeStreams.delete(socket.id);
         }
-        socket.to(cleanRoomId).emit('stream-state', {
+
+        socket.to(senderRoom).emit('stream-state', {
             senderId: socket.id,
-            state
+            state: data.state
         });
-    });
+    }));
 
     function leaveCurrentRoom(sock) {
-        const rid = sock.roomId;
-        if (rid && rooms.has(rid)) {
-            const r = rooms.get(rid);
-            r.members.delete(sock.id);
-            const wasStreaming = r.activeStreams.has(sock.id);
-            r.activeStreams.delete(sock.id);
+        try {
+            const rid = sock.roomId;
+            if (rid && rooms.has(rid)) {
+                const r = rooms.get(rid);
+                r.members.delete(sock.id);
+                const wasStreaming = r.activeStreams.has(sock.id);
+                r.activeStreams.delete(sock.id);
 
-            if (r.members.size === 0) {
-                rooms.delete(rid);
-                console.log(`[x] Room "${rid}" deleted (empty)`);
-            } else {
-                if (wasStreaming) {
-                    io.to(rid).emit('stream-state', {
-                        senderId: sock.id,
-                        state: 'stopped'
+                if (r.members.size === 0) {
+                    rooms.delete(rid);
+                    console.log(`[x] Room "${rid}" deleted (empty)`);
+                } else {
+                    if (wasStreaming) {
+                        io.to(rid).emit('stream-state', {
+                            senderId: sock.id,
+                            state: 'stopped'
+                        });
+                    }
+                    io.to(rid).emit('user-left', {
+                        socketId: sock.id,
+                        memberCount: r.members.size
+                    });
+                    io.to(rid).emit('room-status', {
+                        memberCount: r.members.size
                     });
                 }
-                io.to(rid).emit('user-left', {
-                    socketId: sock.id,
-                    memberCount: r.members.size
-                });
-                io.to(rid).emit('room-status', {
-                    memberCount: r.members.size
-                });
+                sock.leave(rid);
+                sock.roomId = null;
             }
-            sock.leave(rid);
-            sock.roomId = null;
+        } catch (err) {
+            console.error(`[Error] Exception during leaveCurrentRoom for ${sock.id}:`, err.message);
         }
     }
 
-    socket.on('disconnect', () => {
+    socket.on('disconnect', safeHandler(socket, 'disconnect', () => {
         console.log(`[-] Client disconnected: ${socket.id}`);
         leaveCurrentRoom(socket);
-    });
+    }));
 
 });
 
