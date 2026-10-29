@@ -1542,7 +1542,7 @@ function updateEchoWarningVisibility() {
 function openShareConfigModal() {
     updateEchoWarningVisibility();
 
-    const isDesktop = (typeof Neutralino !== 'undefined' && Boolean(Neutralino.os));
+    const isDesktop = (typeof window !== 'undefined' && Boolean(window.NL_PORT));
 
     // Se estiver no navegador web (sem app desktop), adapta o modal amigavelmente
     const desktopOnlyCard1 = audioSourceExcludeDiscord?.closest('.audio-option-card');
