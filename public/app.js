@@ -6,6 +6,7 @@ let helperAuthToken = (typeof crypto !== 'undefined' && crypto.randomUUID)
     : 'sg_tok_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
 let helperWs = null;
 let helperConnected = false;
+let helperConnectAttempts = 0;
 let availableWindows = [];
 let helperAudioContext = null;
 let activeAudioWorkletNode = null;
@@ -53,6 +54,7 @@ function connectAudioHelper() {
                 if (msg.type === 'auth_ok') {
                     console.log('[AudioHelper] 🛡️ Autenticação aceita pelo Helper!');
                     helperConnected = true;
+                    helperConnectAttempts = 0; // Conectado com sucesso, reseta contador
                     checkDiscordStatus();
                     fetchWindowList();
                 } else if (msg.type === 'auth_failed') {
@@ -85,7 +87,10 @@ function connectAudioHelper() {
 
         helperWs.onclose = () => {
             helperConnected = false;
-            setTimeout(connectAudioHelper, 3000);
+            // Retry rápido nos primeiros 2s (250ms) para conexão instantânea ao abrir o app
+            const retryDelay = helperConnectAttempts < 6 ? 250 : 3000;
+            helperConnectAttempts++;
+            setTimeout(connectAudioHelper, retryDelay);
         };
         helperWs.onerror = () => {
             helperConnected = false;
@@ -216,9 +221,14 @@ if (typeof Neutralino !== 'undefined') {
     try {
         Neutralino.init();
         spawnAudioHelperIfNeutralino();
-    } catch(e) {}
+        // Pequena pausa de 120ms para o processo do helper subir a porta antes da primeira conexão
+        setTimeout(connectAudioHelper, 120);
+    } catch(e) {
+        connectAudioHelper();
+    }
+} else {
+    connectAudioHelper();
 }
-connectAudioHelper();
 
 const SERVER_URL = (window.location.protocol.startsWith('http') && !window.location.hostname.includes('localhost') && window.location.hostname !== '127.0.0.1')
     ? window.location.origin
@@ -1821,19 +1831,33 @@ function createStreamTile(id, stream, labelText, isMuted) {
         slider.addEventListener('input', (e) => {
             const val = parseFloat(e.target.value);
             video.volume = val;
-            muteBtn.innerHTML = val === 0 ? '<i class="fa-solid fa-volume-xmark"></i>' : '<i class="fa-solid fa-volume-high"></i>';
+            if (val > 0) {
+                video.muted = false;
+                video.removeAttribute('muted');
+                const badge = tile.querySelector('.tap-unmute-badge');
+                if (badge) badge.remove();
+            } else {
+                video.muted = true;
+            }
+            muteBtn.innerHTML = (val === 0 || video.muted) ? '<i class="fa-solid fa-volume-xmark"></i>' : '<i class="fa-solid fa-volume-high"></i>';
         });
 
         muteBtn.addEventListener('click', (e) => {
             e.stopPropagation();
-            if (video.volume > 0) {
-                video.volume = 0;
+            if (!video.muted && video.volume > 0) {
+                video.muted = true;
                 slider.value = '0';
                 muteBtn.innerHTML = '<i class="fa-solid fa-volume-xmark"></i>';
             } else {
-                video.volume = 1;
-                slider.value = '1';
+                video.muted = false;
+                video.removeAttribute('muted');
+                const prevVal = parseFloat(slider.value);
+                const targetVol = prevVal > 0 ? prevVal : 1;
+                video.volume = targetVol;
+                slider.value = targetVol.toString();
                 muteBtn.innerHTML = '<i class="fa-solid fa-volume-high"></i>';
+                const badge = tile.querySelector('.tap-unmute-badge');
+                if (badge) badge.remove();
             }
         });
 
