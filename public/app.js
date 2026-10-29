@@ -318,6 +318,12 @@ const rtcConfig = {
 // Application State
 const STORAGE_KEY = 'streamgrid_last_room';
 const CLIENT_ID_KEY = 'streamgrid_client_id';
+const USERNAME_KEY = 'streamgrid_username';
+
+let currentUserName = '';
+try {
+    currentUserName = (localStorage.getItem(USERNAME_KEY) || '').trim().slice(0, 24);
+} catch (_) {}
 
 let clientId = '';
 try {
@@ -354,6 +360,7 @@ const btnChooseCreate = document.getElementById('btnChooseCreate');
 const btnChooseJoin = document.getElementById('btnChooseJoin');
 
 // Create View Elements
+const inputCreateUserName = document.getElementById('inputCreateUserName');
 const inputCreateRoomId = document.getElementById('inputCreateRoomId');
 const inputCreateRoomPassword = document.getElementById('inputCreateRoomPassword');
 const btnRandomRoom = document.getElementById('btnRandomRoom');
@@ -364,6 +371,7 @@ const btnConfirmCreate = document.getElementById('btnConfirmCreate');
 const btnBackFromCreate = document.getElementById('btnBackFromCreate');
 
 // Join View Elements
+const inputJoinUserName = document.getElementById('inputJoinUserName');
 const inputJoinRoomId = document.getElementById('inputJoinRoomId');
 const inputJoinRoomPassword = document.getElementById('inputJoinRoomPassword');
 const btnToggleJoinPass = document.getElementById('btnToggleJoinPass');
@@ -612,6 +620,7 @@ function switchRoomView(viewName) {
     if (viewName === 'choice') {
         updateRoomModalCloseButton();
     } else if (viewName === 'create') {
+        if (inputCreateUserName && currentUserName) inputCreateUserName.value = currentUserName;
         if (inputCreateRoomId && !inputCreateRoomId.value.trim()) {
             rollRandomCreateRoom();
         } else if (inputCreateRoomId) {
@@ -624,6 +633,7 @@ function switchRoomView(viewName) {
             }
         }, 50);
     } else if (viewName === 'join') {
+        if (inputJoinUserName && currentUserName) inputJoinUserName.value = currentUserName;
         if (inputJoinRoomId) checkJoinRoomStatus(inputJoinRoomId.value);
         setTimeout(() => {
             if (inputJoinRoomId) {
@@ -721,6 +731,14 @@ if (btnChooseJoin) {
 }
 
 // Create View Listeners
+if (inputCreateUserName) {
+    if (currentUserName) inputCreateUserName.value = currentUserName;
+    inputCreateUserName.addEventListener('input', (e) => {
+        currentUserName = e.target.value.trim().slice(0, 24);
+        try { localStorage.setItem(USERNAME_KEY, currentUserName); } catch (_) {}
+        if (inputJoinUserName) inputJoinUserName.value = e.target.value;
+    });
+}
 if (btnRandomRoom) {
     btnRandomRoom.addEventListener('click', rollRandomCreateRoom);
 }
@@ -753,6 +771,14 @@ if (btnBackFromCreate) {
 }
 
 // Join View Listeners
+if (inputJoinUserName) {
+    if (currentUserName) inputJoinUserName.value = currentUserName;
+    inputJoinUserName.addEventListener('input', (e) => {
+        currentUserName = e.target.value.trim().slice(0, 24);
+        try { localStorage.setItem(USERNAME_KEY, currentUserName); } catch (_) {}
+        if (inputCreateUserName) inputCreateUserName.value = e.target.value;
+    });
+}
 if (inputJoinRoomId) {
     inputJoinRoomId.addEventListener('input', () => {
         clearRoomError();
@@ -780,6 +806,11 @@ if (btnBackFromJoin) {
 
 function handleConfirmCreate() {
     clearRoomError();
+    const rawName = inputCreateUserName ? inputCreateUserName.value.trim().slice(0, 24) : '';
+    if (rawName) {
+        currentUserName = rawName;
+        try { localStorage.setItem(USERNAME_KEY, currentUserName); } catch (_) {}
+    }
     const raw = inputCreateRoomId ? inputCreateRoomId.value : '';
     let newRoomId;
     if (!raw.trim()) {
@@ -794,11 +825,16 @@ function handleConfirmCreate() {
     }
     if (inputCreateRoomId) inputCreateRoomId.value = newRoomId;
     const pass = (inputCreateRoomPassword ? inputCreateRoomPassword.value.trim() : '');
-    joinRoom(newRoomId, pass);
+    joinRoom(newRoomId, pass, currentUserName);
 }
 
 function handleConfirmJoin() {
     clearRoomError();
+    const rawName = inputJoinUserName ? inputJoinUserName.value.trim().slice(0, 24) : '';
+    if (rawName) {
+        currentUserName = rawName;
+        try { localStorage.setItem(USERNAME_KEY, currentUserName); } catch (_) {}
+    }
     const rawRoom = inputJoinRoomId ? inputJoinRoomId.value : '';
     const newRoomId = sanitizeRoomId(rawRoom);
     if (!newRoomId || newRoomId.length < 3) {
@@ -807,7 +843,7 @@ function handleConfirmJoin() {
         return;
     }
     const pass = (inputJoinRoomPassword ? inputJoinRoomPassword.value.trim() : '');
-    joinRoom(newRoomId, pass);
+    joinRoom(newRoomId, pass, currentUserName);
 }
 
 // Auto populate room code from URL params or localStorage
@@ -883,7 +919,7 @@ function cleanupRoomState() {
     updateGridState();
 }
 
-function joinRoom(targetRoomId, targetPass = '') {
+function joinRoom(targetRoomId, targetPass = '', targetUserName = '') {
     clearRoomError();
     const cleanId = sanitizeRoomId(targetRoomId) || generateRandomRoomId();
     if (cleanId.length < 3) {
@@ -893,6 +929,10 @@ function joinRoom(targetRoomId, targetPass = '') {
     }
     const newRoomId = cleanId;
     currentRoomPassword = (targetPass || '').trim();
+    if (targetUserName) {
+        currentUserName = targetUserName.trim().slice(0, 24);
+        try { localStorage.setItem(USERNAME_KEY, currentUserName); } catch (_) {}
+    }
 
     // If switching rooms, close all previous connections cleanly
     if (roomId && roomId !== newRoomId) {
@@ -919,7 +959,7 @@ function joinRoom(targetRoomId, targetPass = '') {
     updateRoomModalCloseButton();
 
     if (socket) {
-        socket.emit('join-room', { roomId, clientId, password: currentRoomPassword });
+        socket.emit('join-room', { roomId, clientId, password: currentRoomPassword, userName: currentUserName });
     }
 }
 
@@ -982,7 +1022,7 @@ socket.on('connect', () => {
     console.log('[Socket] Connected to server. Socket ID:', myId);
     if (roomId) {
         console.log('[Socket] Joining room on connect:', roomId);
-        socket.emit('join-room', { roomId, clientId, password: currentRoomPassword });
+        socket.emit('join-room', { roomId, clientId, password: currentRoomPassword, userName: currentUserName });
     }
 });
 
@@ -1016,7 +1056,7 @@ socket.on('join-error', ({ error, message }) => {
 });
 
 // Socket Events
-socket.on('room-users', async ({ users, activeStreams, socketId, memberCount, hasPassword }) => {
+socket.on('room-users', async ({ users, userNames, activeStreams, socketId, memberCount, hasPassword }) => {
     myId = socketId;
     console.log('[Socket] Joined room. My ID:', myId, 'Other users:', users, 'Active streams:', activeStreams);
     remoteActiveStreams.clear();
@@ -1041,6 +1081,9 @@ socket.on('room-users', async ({ users, activeStreams, socketId, memberCount, ha
     // Initialize peer connections for existing users
     users.forEach(peerId => {
         getOrCreatePeerConnection(peerId);
+        if (userNames && userNames[peerId]) {
+            updatePeerUserName(peerId, userNames[peerId]);
+        }
     });
 
     // If I am currently sharing screen, send offer with my tracks to all peers
@@ -1052,11 +1095,13 @@ socket.on('room-users', async ({ users, activeStreams, socketId, memberCount, ha
     }
 });
 
-socket.on('user-joined', async ({ socketId, memberCount }) => {
-    console.log('[Socket] User joined:', socketId);
-    showToast('Um participante entrou na sala.', 'info');
-    playPresenceChime('join');
+socket.on('user-joined', async ({ socketId, userName, memberCount }) => {
+    console.log('[Socket] User joined:', socketId, userName);
     const pc = getOrCreatePeerConnection(socketId);
+    if (userName) updatePeerUserName(socketId, userName);
+    const displayName = userName || 'Um participante';
+    showToast(`${displayName} entrou na sala.`, 'info');
+    playPresenceChime('join');
     updateMemberCount(memberCount);
 
     // Sincronização Automática (Late-Joiner Sync):
@@ -1071,7 +1116,9 @@ socket.on('user-left', ({ socketId, memberCount }) => {
     remoteActiveStreams.delete(socketId);
     updateEchoWarningVisibility();
     console.log('[Socket] User left:', socketId);
-    showToast('Um participante saiu da sala.', 'info');
+    const peerObj = peers.get(socketId);
+    const displayName = (peerObj && peerObj.userName) || 'Um participante';
+    showToast(`${displayName} saiu da sala.`, 'info');
     playPresenceChime('leave');
     removePeerConnection(socketId);
     updateMemberCount(memberCount);
@@ -1294,6 +1341,7 @@ function getOrCreatePeerConnection(peerId) {
     const peerObj = {
         pc,
         stream: new MediaStream(),
+        userName: '',
         tileEl: null,
         iceCandidateQueue: [],
         isRemoteDescriptionSet: false,
@@ -1331,7 +1379,8 @@ function getOrCreatePeerConnection(peerId) {
         // Only create visual tile in grid if we actually have a video track (prevents audio-only black screens)
         const hasVideo = peerObj.stream.getVideoTracks().length > 0;
         if (!peerObj.tileEl && hasVideo) {
-            peerObj.tileEl = createStreamTile(peerId, peerObj.stream, `Participante ${peerId.substr(0, 5)}`, false);
+            const label = peerObj.userName || `Participante ${peerId.substr(0, 5)}`;
+            peerObj.tileEl = createStreamTile(peerId, peerObj.stream, label, false);
             streamGrid.appendChild(peerObj.tileEl);
         }
 
@@ -1404,6 +1453,18 @@ function getOrCreatePeerConnection(peerId) {
     };
 
     return pc;
+}
+
+function updatePeerUserName(peerId, userName) {
+    if (!userName) return;
+    const cleanName = userName.trim().slice(0, 24);
+    const peerObj = peers.get(peerId);
+    if (!peerObj) return;
+    peerObj.userName = cleanName;
+    if (peerObj.tileEl) {
+        const nameEl = peerObj.tileEl.querySelector('.user-name');
+        if (nameEl) nameEl.textContent = cleanName;
+    }
 }
 
 
@@ -2131,7 +2192,8 @@ async function startScreenShare(audioMode = 'exclude_discord', targetPid = null,
         }
 
         // --- Step 5: Add Local Tile preview in Grid ---
-        const localTile = createStreamTile('local', localStream, 'Você (Sua Tela)', true);
+        const localLabel = currentUserName ? `${currentUserName} (Você)` : 'Você (Sua Tela)';
+        const localTile = createStreamTile('local', localStream, localLabel, true);
         localTile.id = 'localStreamTile';
         streamGrid.appendChild(localTile);
 
@@ -2231,10 +2293,13 @@ function createStreamTile(id, stream, labelText, isMuted) {
     // Tile Header Badge (Live + Name)
     const headerBadge = document.createElement('div');
     headerBadge.className = 'tile-header-badge';
-    headerBadge.innerHTML = `
-        <span class="live-dot"></span>
-        <span class="user-name">${labelText}</span>
-    `;
+    const liveDot = document.createElement('span');
+    liveDot.className = 'live-dot';
+    const userNameSpan = document.createElement('span');
+    userNameSpan.className = 'user-name';
+    userNameSpan.textContent = labelText;
+    headerBadge.appendChild(liveDot);
+    headerBadge.appendChild(userNameSpan);
 
     // Tile Controls Overlay (Mute + Volume + Fullscreen)
     const controlsOverlay = document.createElement('div');
