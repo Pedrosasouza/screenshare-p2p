@@ -1,4 +1,4 @@
-const express = require('express');
+﻿const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
@@ -26,6 +26,29 @@ app.get('*', (req, res) => {
 // Store active rooms and members
 const rooms = new Map();
 
+// Anti-Brute Force Protection for Password-Protected Rooms
+// Key: client IP or socket ID -> { count: number, lockedUntil: number }
+const loginAttempts = new Map();
+
+function getClientIdentifier(socket) {
+    // Captura IP real considerando proxies reversos como Cloudflare / Render
+    const forwarded = socket.handshake.headers['x-forwarded-for'];
+    if (forwarded) {
+        return forwarded.split(',')[0].trim();
+    }
+    return socket.handshake.address || socket.id;
+}
+
+// Limpeza periódica da memória a cada 10 minutos
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, data] of loginAttempts.entries()) {
+        if (now > data.lockedUntil && (now - data.lastAttempt > 600000)) {
+            loginAttempts.delete(key);
+        }
+    }
+}, 600000);
+
 io.on('connection', (socket) => {
     console.log(`[+] Client connected: ${socket.id}`);
 
@@ -36,6 +59,21 @@ io.on('connection', (socket) => {
         let room = rooms.get(cleanRoomId);
         const cleanPassword = (password || '').trim();
 
+        const clientKey = getClientIdentifier(socket);
+        const now = Date.now();
+        const attemptData = loginAttempts.get(clientKey) || { count: 0, lockedUntil: 0, lastAttempt: now };
+
+        // Verifica se o IP/Cliente está temporariamente bloqueado por força bruta
+        if (attemptData.lockedUntil > now) {
+            const waitSeconds = Math.ceil((attemptData.lockedUntil - now) / 1000);
+            console.warn(`[Security] Bloqueio anti-força bruta ativo para ${clientKey}. Restam ${waitSeconds}s.`);
+            socket.emit('join-error', {
+                error: 'rate_limited',
+                message: `Muitas tentativas incorretas. Aguarde ${waitSeconds} segundos antes de tentar novamente.`
+            });
+            return;
+        }
+
         if (!room) {
             room = {
                 password: cleanPassword || null,
@@ -43,16 +81,39 @@ io.on('connection', (socket) => {
                 activeStreams: new Set()
             };
             rooms.set(cleanRoomId, room);
+            loginAttempts.delete(clientKey);
         } else if (room.password) {
             // Password-protected room check
             if (room.password !== cleanPassword) {
-                console.log(`[Auth] Rejected socket ${socket.id} for room "${cleanRoomId}": Invalid password`);
+                attemptData.count += 1;
+                attemptData.lastAttempt = now;
+
+                // Penalidade progressiva após 5 tentativas incorretas
+                if (attemptData.count >= 5) {
+                    const penaltySeconds = attemptData.count >= 10 ? 120 : (attemptData.count >= 7 ? 60 : 30);
+                    attemptData.lockedUntil = now + (penaltySeconds * 1000);
+                    loginAttempts.set(clientKey, attemptData);
+
+                    console.warn(`[Security] Bloqueando ${clientKey} por ${penaltySeconds}s após ${attemptData.count} tentativas falhas.`);
+                    socket.emit('join-error', {
+                        error: 'rate_limited',
+                        message: `Muitas tentativas incorretas. Bloqueado por ${penaltySeconds} segundos.`
+                    });
+                    return;
+                }
+
+                loginAttempts.set(clientKey, attemptData);
+                const remaining = 5 - attemptData.count;
+                console.log(`[Auth] Rejected socket ${socket.id} for room "${cleanRoomId}": Invalid password (${remaining} tentativas restantes)`);
                 socket.emit('join-error', {
                     error: 'invalid_password',
-                    message: 'Senha incorreta para esta sala.'
+                    message: `Senha incorreta. ${remaining} tentativa(s) restante(s) antes do bloqueio.`
                 });
                 return;
             }
+
+            // Senha correta: limpa registro de falhas
+            loginAttempts.delete(clientKey);
         }
 
         // Leave any previous room
