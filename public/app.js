@@ -1102,6 +1102,80 @@ socket.on('stream-state', ({ senderId, state }) => {
     updateEchoWarningVisibility();
 });
 
+// Diagnóstico e Feedback Visual de Falha de Conexão P2P
+function setPeerConnectionStatus(peerId, status, message) {
+    const peerObj = peers.get(peerId);
+    if (!peerObj || !peerObj.tileEl) return;
+    let warningEl = peerObj.tileEl.querySelector('.peer-connection-warning');
+    if (status === 'failed') {
+        if (!warningEl) {
+            warningEl = document.createElement('div');
+            warningEl.className = 'peer-connection-warning';
+            warningEl.style.position = 'absolute';
+            warningEl.style.top = '10px';
+            warningEl.style.left = '10px';
+            warningEl.style.right = '10px';
+            warningEl.style.zIndex = '5';
+            warningEl.style.background = 'rgba(239, 68, 68, 0.9)';
+            warningEl.style.color = '#fff';
+            warningEl.style.padding = '6px 10px';
+            warningEl.style.borderRadius = '6px';
+            warningEl.style.fontSize = '0.75rem';
+            warningEl.style.display = 'flex';
+            warningEl.style.alignItems = 'center';
+            warningEl.style.gap = '6px';
+            warningEl.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> <span>${message || 'Falha de conexão direta P2P.'}</span>`;
+            peerObj.tileEl.appendChild(warningEl);
+        }
+    } else if (warningEl) {
+        warningEl.remove();
+    }
+}
+
+async function logPeerConnectionTelemetry(peerId, pc) {
+    if (!pc || typeof pc.getStats !== 'function') return;
+    try {
+        const stats = await pc.getStats();
+        stats.forEach(report => {
+            if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated) {
+                const localCand = stats.get(report.localCandidateId);
+                const remoteCand = stats.get(report.remoteCandidateId);
+                const localType = localCand ? localCand.candidateType : 'unknown';
+                const remoteType = remoteCand ? remoteCand.candidateType : 'unknown';
+                console.log(`[WebRTC QoS] Conexão P2P com ${peerId} estabelecida: local=${localType}, remoto=${remoteType}`);
+            }
+        });
+    } catch (_) {}
+}
+
+// Otimização de GPU/CPU: pausa decodificação de faixas de vídeo quando janela estiver oculta/minimizada
+function updateBackgroundTracksOptimization() {
+    const isHidden = typeof document !== 'undefined' && Boolean(document.hidden);
+    const activeFsTile = typeof document !== 'undefined'
+        ? (document.querySelector('.stream-tile.pseudo-fullscreen') || (document.fullscreenElement && document.fullscreenElement.classList.contains('stream-tile') ? document.fullscreenElement : null))
+        : null;
+    const activeFsPeerId = activeFsTile ? activeFsTile.dataset.peerId : null;
+
+    for (const [peerId, peerObj] of peers.entries()) {
+        if (peerObj.stream) {
+            peerObj.stream.getVideoTracks().forEach(track => {
+                if (isHidden) {
+                    track.enabled = false;
+                } else if (activeFsPeerId && peerId !== activeFsPeerId && activeFsPeerId !== 'local') {
+                    track.enabled = false;
+                } else {
+                    track.enabled = true;
+                }
+            });
+        }
+    }
+}
+
+if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', updateBackgroundTracksOptimization);
+    document.addEventListener('fullscreenchange', updateBackgroundTracksOptimization);
+}
+
 // PeerConnection Factory
 function getOrCreatePeerConnection(peerId) {
     if (peers.has(peerId)) {
@@ -1213,11 +1287,16 @@ function getOrCreatePeerConnection(peerId) {
                     sendOffer(peerId);
                 }
             }, 2000);
+            if (pc.iceConnectionState === 'failed') {
+                setPeerConnectionStatus(peerId, 'failed', 'Falha de conexão P2P: Firewall ou rede restrita bloqueando tráfego.');
+            }
         } else if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
             if (peerObj._iceRestartTimeout) {
                 clearTimeout(peerObj._iceRestartTimeout);
                 peerObj._iceRestartTimeout = null;
             }
+            setPeerConnectionStatus(peerId, 'ok');
+            logPeerConnectionTelemetry(peerId, pc);
         }
     };
 
@@ -2102,6 +2181,7 @@ function toggleTileFullscreen(tile, video) {
         tile.classList.remove('pseudo-fullscreen');
         const exitBtn = tile.querySelector('.btn-exit-pseudo-fs');
         if (exitBtn) exitBtn.remove();
+        updateBackgroundTracksOptimization();
         return;
     }
 
@@ -2140,6 +2220,7 @@ function toggleTileFullscreen(tile, video) {
 
 function enterPseudoFullscreen(tile) {
     tile.classList.add('pseudo-fullscreen');
+    updateBackgroundTracksOptimization();
     if (!tile.querySelector('.btn-exit-pseudo-fs')) {
         const exitBtn = document.createElement('button');
         exitBtn.className = 'btn-exit-pseudo-fs';
@@ -2149,6 +2230,7 @@ function enterPseudoFullscreen(tile) {
             e.stopPropagation();
             tile.classList.remove('pseudo-fullscreen');
             exitBtn.remove();
+            updateBackgroundTracksOptimization();
         });
         tile.appendChild(exitBtn);
     }
