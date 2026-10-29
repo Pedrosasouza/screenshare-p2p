@@ -178,14 +178,10 @@ npm run test:helper
 
 ---
 
-## 🔒 Segurança, Políticas & Assinatura de Código
+## 🔒 Segurança & Privacidade
 
-Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
-
-> **Status:** The project has applied to the SignPath Foundation code signing program. Approval and signing integration are pending. Current Windows releases are not signed with a SignPath Foundation certificate.
-
-* **Política de Assinatura:** Consulte [docs/CODE_SIGNING_POLICY.md](docs/CODE_SIGNING_POLICY.md) para diretrizes de segurança, governança de chaves e builds auditáveis via GitHub Actions.
-* **Política de Privacidade:** Consulte [PRIVACY.md](PRIVACY.md) para detalhes sobre a transmissão peer-to-peer criptografada (WebRTC DTLS/SRTP) e armazenamento de senhas com salt.
+* **Política de Privacidade:** Consulte [PRIVACY.md](PRIVACY.md) para detalhes sobre a transmissão peer-to-peer criptografada de ponta a ponta (WebRTC DTLS/SRTP), ausência de gravação de mídia e proteção de senhas com hash e salt.
+* **Integridade dos Binários:** Todos os pacotes de lançamento para Windows são compilados de forma automatizada e auditável via GitHub Actions, com hashes criptográficos SHA-256 publicados em cada release para conferência.
 
 ---
 

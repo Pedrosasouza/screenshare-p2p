@@ -90,26 +90,6 @@ jobs:
           "$hash  StreamGrid-Windows.zip" | Out-File -FilePath dist/StreamGrid-Windows.zip.sha256 -Encoding ascii
           Write-Host "SHA-256: $hash"
 
-      # =========================================================================
-      # INTEGRAÇÃO COM SIGNPATH FOUNDATION (ASSINATURA DE CÓDIGO)
-      # Após aprovação na SignPath Foundation:
-      # 1. Configure as credenciais no GitHub: Settings > Secrets and variables > Actions:
-      #    - SIGNPATH_API_TOKEN
-      #    - SIGNPATH_ORGANIZATION_ID
-      # 2. Descomente as linhas abaixo para assinar os binários antes da publicação:
-      # =========================================================================
-      # - name: Submit signing request to SignPath Foundation
-      #   if: startsWith(github.ref, 'refs/tags/v')
-      #   uses: signpath/github-action-submit-signing-request@v1
-      #   with:
-      #     api_token: ${{ secrets.SIGNPATH_API_TOKEN }}
-      #     organization_id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
-      #     project_slug: 'screenshare-p2p'
-      #     signing_policy_slug: 'release-signing'
-      #     artifact_path: 'dist/StreamGrid-Windows.zip'
-      #     output_artifact_directory: 'dist/signed'
-      # =========================================================================
-
       - name: Upload Build Artifacts (CI Run)
         uses: actions/upload-artifact@v4
         with:
