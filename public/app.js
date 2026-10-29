@@ -1281,32 +1281,95 @@ function prioritizeH264(sdp) {
 
 // SDP Optimization Helper (Unlocks Smooth 1080p60 Bitrate & Stereo Audio without Freezes)
 function optimizeSDP(sdp) {
+    if (!sdp || typeof sdp !== 'string') return sdp;
     sdp = prioritizeH264(sdp);
-    let lines = sdp.split('\r\n');
-    let newLines = [];
+    const lines = sdp.split('\r\n');
 
-    for (let line of lines) {
-        newLines.push(line);
+    // 1. Mapear payloads para Opus e Codecs de Vídeo via linhas a=rtpmap
+    const opusPayloads = new Set();
+    const videoPayloads = new Set();
+    const existingFmtpPayloads = new Set();
 
-        // Opus Stereo with efficient bitrate (128kbps — clear game audio without wasting bandwidth)
-        if (line.startsWith('a=fmtp:') && line.includes('opus/48000')) {
-            newLines[newLines.length - 1] = line + ';stereo=1;sprop-stereo=1;maxaveragebitrate=128000';
-        }
-
-        // Balanced 1080p60 Bitrate Tuning: start at 3.5 Mbps, adapt up to 6 Mbps max with 1.8 Mbps floor
-        // Prevents saturation and bufferbloat when 2+ streams run concurrently on residential networks
-        if (line.startsWith('a=fmtp:') && (line.toLowerCase().includes('h264') || line.toLowerCase().includes('vp8') || line.toLowerCase().includes('vp9'))) {
-            if (!line.includes('x-google-max-bitrate')) {
-                newLines[newLines.length - 1] = line + ';x-google-min-bitrate=1800;x-google-start-bitrate=3500;x-google-max-bitrate=6000';
+    for (const line of lines) {
+        if (line.startsWith('a=rtpmap:')) {
+            const match = line.match(/^a=rtpmap:(\d+)\s+([^\/]+)/i);
+            if (match) {
+                const pt = match[1];
+                const codec = match[2].toLowerCase();
+                if (codec === 'opus') {
+                    opusPayloads.add(pt);
+                } else if (codec === 'h264' || codec === 'vp8' || codec === 'vp9') {
+                    videoPayloads.add(pt);
+                }
+            }
+        } else if (line.startsWith('a=fmtp:')) {
+            const match = line.match(/^a=fmtp:(\d+)/i);
+            if (match) {
+                existingFmtpPayloads.add(match[1]);
             }
         }
+    }
 
-        // 6000 Kbps max bitrate gives crystal clear 1080p 60FPS without choking multi-stream bandwidth
+    const newLines = [];
+    let inVideoSection = false;
+
+    for (let i = 0; i < lines.length; i++) {
+        let line = lines[i];
+
         if (line.startsWith('m=video')) {
+            inVideoSection = true;
+            newLines.push(line);
             newLines.push('b=AS:6000');
             newLines.push('b=TIAS:6000000');
+            continue;
+        } else if (line.startsWith('m=')) {
+            inVideoSection = false;
+        }
+
+        // Evitar linhas duplicadas de banda na seção de vídeo
+        if (inVideoSection && (line.startsWith('b=AS:') || line.startsWith('b=TIAS:'))) {
+            continue;
+        }
+
+        // Atualizar linhas a=fmtp existentes
+        if (line.startsWith('a=fmtp:')) {
+            const match = line.match(/^a=fmtp:(\d+)/i);
+            if (match) {
+                const pt = match[1];
+                if (opusPayloads.has(pt)) {
+                    if (!line.includes('stereo=1')) {
+                        line += ';stereo=1;sprop-stereo=1;maxaveragebitrate=128000';
+                    }
+                } else if (videoPayloads.has(pt)) {
+                    if (!line.includes('x-google-max-bitrate')) {
+                        line += ';x-google-min-bitrate=1800;x-google-start-bitrate=3500;x-google-max-bitrate=6000';
+                    }
+                }
+            }
+            newLines.push(line);
+            continue;
+        }
+
+        newLines.push(line);
+
+        // Se o rtpmap não tinha a=fmtp associado originalmente, injetar logo após a=rtpmap
+        if (line.startsWith('a=rtpmap:')) {
+            const match = line.match(/^a=rtpmap:(\d+)/i);
+            if (match) {
+                const pt = match[1];
+                if (!existingFmtpPayloads.has(pt)) {
+                    if (opusPayloads.has(pt)) {
+                        newLines.push(`a=fmtp:${pt} stereo=1;sprop-stereo=1;maxaveragebitrate=128000`);
+                        existingFmtpPayloads.add(pt);
+                    } else if (videoPayloads.has(pt)) {
+                        newLines.push(`a=fmtp:${pt} x-google-min-bitrate=1800;x-google-start-bitrate=3500;x-google-max-bitrate=6000`);
+                        existingFmtpPayloads.add(pt);
+                    }
+                }
+            }
         }
     }
+
     return newLines.join('\r\n');
 }
 
