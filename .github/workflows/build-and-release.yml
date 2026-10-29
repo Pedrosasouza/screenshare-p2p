@@ -21,6 +21,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   test-and-build:
@@ -99,6 +101,12 @@ jobs:
             dist/StreamGrid-Windows.zip.sha256
           if-no-files-found: error
           retention-days: 14
+
+      - name: Generate Artifact Attestation (Provenance via Sigstore)
+        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == 'true'
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: 'dist/StreamGrid-Windows.zip'
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == 'true'

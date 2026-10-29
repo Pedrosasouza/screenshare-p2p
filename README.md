@@ -142,7 +142,8 @@ Acesse a interface no navegador em: `http://localhost:3000` (ou pelo endereço d
 As versões oficiais pré-compiladas para Windows estão disponíveis diretamente na página de lançamentos:
 * **Última Versão:** [GitHub Releases — StreamGrid](https://github.com/Pedrosasouza/screenshare-p2p/releases/latest)
 * **Arquivo Portátil:** Baixe o arquivo `StreamGrid-Windows.zip`, extraia em uma pasta de sua preferência e execute `StreamGrid-win_x64.exe`.
-* **Verificação de Integridade:** Cada versão inclui o arquivo `StreamGrid-Windows.zip.sha256` para conferência de hash SHA-256.
+* **Verificação de Integridade:** Cada versão inclui o arquivo `StreamGrid-Windows.zip.sha256` para conferência de hash SHA-256 (validação de integridade do arquivo baixado contra corrupção em trânsito).
+* **Aviso do Windows SmartScreen & Assinatura de Código:** Por ser um projeto open-source independente distribuído sem um certificado de assinatura Authenticode comercial pago da Microsoft, o Windows SmartScreen pode apresentar o aviso informativo *"O Windows protegeu o seu computador - Fornecedor desconhecido"*. Para abrir normalmente, clique em *"Mais informações"* e em seguida em *"Executar assim mesmo"*. Todos os pacotes são compilados publicamente a partir do código-fonte auditável via GitHub Actions com atestação de proveniência criptográfica.
 
 ---
 
@@ -180,8 +181,9 @@ npm run test:helper
 
 ## 🔒 Segurança & Privacidade
 
-* **Política de Privacidade:** Consulte [PRIVACY.md](PRIVACY.md) para detalhes sobre a transmissão peer-to-peer criptografada de ponta a ponta (WebRTC DTLS/SRTP), ausência de gravação de mídia e proteção de senhas com hash e salt.
-* **Integridade dos Binários:** Todos os pacotes de lançamento para Windows são compilados de forma automatizada e auditável via GitHub Actions, com hashes criptográficos SHA-256 publicados em cada release para conferência.
+* **Criptografia de Mídia (DTLS/SRTP) e Canal de Sinalização:** Os fluxos de áudio e vídeo trafegam diretamente entre os participantes (P2P Mesh) protegidos por DTLS 1.2/1.3 e SRTP, sem decodificação por servidores de mídia centrais (SFU/MCU). Conforme detalhado em [PRIVACY.md](PRIVACY.md), a segurança do handshake inicial de chaves depende da integridade do canal de sinalização (HTTPS/WSS com o servidor), uma vez que o sistema não implementa verificação out-of-band de certificados entre os membros.
+* **Política de Privacidade & Retenção de Dados:** Consulte [PRIVACY.md](PRIVACY.md) para detalhes completos sobre o ciclo de vida dos dados em memória volátil, a visibilidade mútua de endereços IP entre membros de uma sala (necessária para negociação ICE no WebRTC P2P) e logs temporários de infraestrutura de borda (Render).
+* **Integridade dos Binários & Proveniência:** Todos os pacotes de lançamento para Windows são compilados de forma automatizada e auditável via GitHub Actions em runners isolados, acompanhados de somas de verificação SHA-256 e atestados de proveniência criptográfica gerados via Sigstore (*GitHub Artifact Attestations*).
 
 ---
 

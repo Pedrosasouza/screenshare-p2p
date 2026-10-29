@@ -8,21 +8,24 @@ StreamGrid is designed with a strict privacy-first architecture: we do not colle
 
 ---
 
-## 1. Peer-to-Peer (WebRTC) Media Streams
+## 1. Peer-to-Peer (WebRTC) Media Streams & Cryptographic Model
 
 * **Direct Transmission:** All audio and video streams transmitted between participants in a room travel directly peer-to-peer (P2P Mesh) via WebRTC.
-* **End-to-End Encryption:** Peer-to-peer connections utilize industry-standard cryptographic protocols (DTLS and SRTP). Media payloads are encrypted between peers and never pass through a central media server (SFU/MCU).
+* **Media Encryption (DTLS/SRTP):** Peer-to-peer connections utilize industry-standard cryptographic protocols (DTLS 1.2/1.3 and SRTP). Media payloads are encrypted and authenticated directly between peers and never pass through a central media server (SFU/MCU).
+* **Signaling Trust Model:** Users should understand the cryptographic boundaries of WebRTC signaling: during connection setup, DTLS certificate fingerprints are exchanged in Session Description Protocol (SDP) messages via the signaling server. Because StreamGrid does not currently implement out-of-band identity verification (such as Short Authentication Strings or independent public key pinning), the confidentiality of the session against active Man-in-the-Middle (MitM) attacks depends on the integrity of the signaling channel (HTTPS/WSS connection to the signaling host).
+* **Peer IP Visibility in WebRTC:** Because StreamGrid establishes direct P2P connections without an intermediary relay server, WebRTC relies on ICE candidates to discover viable network paths. Participating in a room requires exchanging ICE candidates that reveal your public and local IP addresses directly to the other peers in that room.
 * **No Media Recording or Storage:** StreamGrid does not record, archive, analyze, or inspect video or audio streams.
 
 ---
 
 ## 2. Signaling Server & Ephemeral Room Data
 
-The signaling server (hosted on Render) coordinates the initial WebRTC connection setup:
-* **Session Metadata:** The server facilitates the exchange of SDP (Session Description Protocol) offers, answers, and ICE candidates between clients. Once the peer-to-peer connection is established, ongoing media traffic does not traverse the signaling server.
-* **Room Passwords:** When a private room is created with a password, the password is never stored in plain text. It is hashed using cryptographic hashing with random salts (`scrypt`/`bcrypt`) in server memory.
+The signaling server coordinates the initial WebRTC connection setup:
+* **Application-Level Privacy:** The application server (Node.js/Socket.io) does not write access logs to persistent disk, database storage, or third-party analytics services. Server console output tracks ephemeral socket connection and room lifecycle events without printing or recording client IP addresses.
+* **Session Metadata:** The server facilitates the exchange of SDP offers, answers, and ICE candidates between clients. Once the peer-to-peer connection is established, ongoing media traffic does not traverse the signaling server.
+* **Room Passwords:** When a private room is created with a password, the password is never stored in plain text. It is hashed using cryptographic hashing with random salts (`scrypt`) in server memory.
 * **Ephemeral Lifecycle:** Room states, participant sockets, and password hashes exist solely in volatile memory during the active session. Once all participants leave a room, the room and its associated state are evicted from memory.
-* **Abuse Prevention & Rate Limiting:** The server maintains temporary, rolling counters in memory to prevent brute-force password guessing and denial-of-service attempts. IP addresses used for rate limiting are not logged persistently or linked to personal profiles.
+* **Abuse Prevention & Rate Limiting:** The server maintains temporary, rolling counters in memory to prevent brute-force password guessing and denial-of-service attempts. IP addresses used for rate limiting are stored in a volatile in-memory map and automatically evicted after 10 minutes of inactivity; they are never logged persistently or linked to personal profiles.
 
 ---
 
@@ -37,15 +40,16 @@ The Windows desktop version includes a native companion module for selective pro
 
 ## 4. Third-Party Services & Infrastructure
 
-* **Turn / STUN Servers:** StreamGrid utilizes public Google STUN servers (`stun:stun.l.google.com:19302`) solely for NAT traversal (discovering public IP candidates for WebRTC handshakes). STUN servers only assist in establishing the direct P2P connection and cannot inspect or decrypt media contents.
-* **Hosting:** The public web demonstration and signaling instance run on Render infrastructure. Standard connection logs (such as IP addresses and request timestamps) may be processed by Render in accordance with their privacy policy to maintain network availability and security.
+* **STUN Servers:** StreamGrid utilizes public Google STUN servers (`stun:stun.l.google.com:19302`) solely for NAT traversal (discovering external reflexive IP candidates for WebRTC handshakes). STUN requests do not carry room names, user identities, or media content.
+* **Hosting Infrastructure Logs (Render):** The public web demonstration and signaling instance are deployed on Render infrastructure. Standard connection logs (such as IP addresses, User-Agent strings, and request timestamps) are automatically processed and temporarily retained by Render's edge proxies in accordance with their privacy policy to maintain network availability, DDoS mitigation, and operational security.
 
 ---
 
 ## 5. Cookies & Local Storage
 
 * StreamGrid does not use persistent tracking cookies or advertising identifiers.
-* Local browser storage (`sessionStorage`) is used strictly to retain non-sensitive session preferences (such as the ephemeral local audio helper token across page reloads).
+* Local browser storage (`localStorage`) is used strictly to retain non-sensitive client preferences (such as your chosen display name, preferred resolution, and framerate).
+* Session storage (`sessionStorage`) is used to retain ephemeral session tokens (such as the local audio helper connection token across page reloads).
 
 ---
 
