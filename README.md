@@ -1,190 +1,178 @@
-# 🖥️ StreamGrid — Multi-Screenshare P2P (1080p 60FPS)
+# 🖥️ StreamGrid — Multi-Screen Sharing over WebRTC
 
 <p align="center">
-  <img src="public/icon.png" alt="StreamGrid Logo" width="100" />
+  <a href="https://screenshare-p2p.onrender.com" target="_blank">
+    <img src="public/icon.png" alt="StreamGrid Logo" width="90" />
+  </a>
 </p>
 
 <p align="center">
-  <strong>Compartilhamento de tela simultâneo de ultra-baixa latência com isolamento de áudio por WASAPI para jogos, filmes e colaboração.</strong>
+  <strong>Compartilhamento simultâneo de múltiplas telas em tempo real com isolamento nativo de áudio para Windows.</strong>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/WebRTC-P2P%20Ultra--Low%20Latency-blue?style=for-the-badge&logo=webrtc" alt="WebRTC">
-  <img src="https://img.shields.io/badge/Rust-WASAPI%20Audio%20Loopback-DEA584?style=for-the-badge&logo=rust" alt="Rust">
-  <img src="https://img.shields.io/badge/Neutralinojs-Desktop%20App-9b59b6?style=for-the-badge" alt="Neutralinojs">
-  <img src="https://img.shields.io/badge/Node.js-Signaling%20Server-339933?style=for-the-badge&logo=node.js" alt="Node.js">
-  <img src="https://img.shields.io/badge/Status-Estável%20v1.0-brightgreen?style=for-the-badge" alt="Status">
+  <a href="https://screenshare-p2p.onrender.com">
+    <img src="https://img.shields.io/badge/🌐_Live_Demo-Acessar_no_Render-46E3B7?style=for-the-badge&logo=render&logoColor=white" alt="Live Demo no Render">
+  </a>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/WebRTC-P2P%20Full%20Mesh-3399FF?style=flat-square&logo=webrtc" alt="WebRTC">
+  <img src="https://img.shields.io/badge/Rust-WASAPI%20Loopback-DEA584?style=flat-square&logo=rust" alt="Rust">
+  <img src="https://img.shields.io/badge/Desktop-Neutralinojs%20v5.6-9b59b6?style=flat-square" alt="Neutralinojs">
+  <img src="https://img.shields.io/badge/Signaling-Node.js%20%2F%20Socket.io-339933?style=flat-square&logo=node.js" alt="Node.js">
+  <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License">
 </p>
 
 ---
 
-## 📖 Visão Geral
+## 📌 O que é o StreamGrid?
 
-O **StreamGrid** é uma aplicação completa de compartilhamento de tela ponto-a-ponto (P2P via WebRTC), projetada especificamente para quem deseja assistir transmissões mútuas com fluidez de 60FPS e delay praticamente nulo (< 100ms em rede local / redes diretas).
+O **StreamGrid** é uma aplicação de compartilhamento de tela projetada para resolver duas limitações frequentes em chamadas convencionais (Discord, Google Meet, Teams):
 
-Ideal para casais e amigos assistirem jogos ou séries ao mesmo tempo, permitindo que **todos na sala compartilhem a tela simultaneamente em uma grade inteligente**, sem intermediários de vídeo centralizados consumindo largura de banda.
+1. **Compartilhamento restrito a uma única pessoa:** No StreamGrid, **múltiplos participantes podem transmitir suas telas ao mesmo tempo**, organizadas em uma grade de visualização responsiva com controles de volume independentes.
+2. **O problema do eco de áudio (Loopback):** Ao transmitir o som do PC durante uma chamada com amigos, a voz dos próprios participantes costuma vazar na transmissão, gerando eco infinito. Na versão Desktop do StreamGrid, um motor nativo filtra e **exclui o áudio da chamada do Discord** sem depender de drivers ou cabos virtuais adicionais.
 
----
-
-## ✨ Principais Funcionalidades
-
-### 🚀 Performance & Vídeo
-* **P2P Direto via WebRTC:** Conexão ponto a ponto direta entre os navegadores/aplicativos após a sinalização inicial, garantindo a menor latência possível.
-* **1080p 60FPS com SDP Otimizado:** Negociação de SDP customizada para máxima taxa de bitrate de vídeo e priorização de perfil de alta fidelidade (`b=AS:8000`, `max-fr=60`).
-* **Multi-Transmissão Simultânea (Grade Dinâmica):** Vários membros podem transmitir ao mesmo tempo. A grade adapta automaticamente o layout (1 tela, split horizontal/vertical, grade 2x2, etc.).
-* **Controles por Transmissão:** Controle de volume independente por tela, modo tela cheia e alternador de perfil de qualidade (*Fluido* vs *Nitidez*).
-
-### 🎧 Motor de Áudio WASAPI Exclusivo (Rust)
-Desenvolvido em **Rust** utilizando as APIs de baixo nível do Windows (**WASAPI Loopback Process Isolation**):
-* **Filtro Anti-Eco do Discord (Zero Configuração):** Captura todo o som do computador (jogos, YouTube, Spotify) e **exclui automaticamente a chamada de voz do Discord**. Você e seus amigos não ouvem o próprio eco na stream, sem precisar de cabos de áudio virtuais (VB-Audio Cable).
-* **Captura por Aplicativo Específico:** Permite isolar e transmitir apenas o áudio de uma janela/jogo selecionado.
-* **Ciclo de Vida Automático & Watchdog:** O assistente de áudio em segundo plano é iniciado e encerrado automaticamente junto com a aplicação, com watchdog atrelado ao PID do processo pai.
-
-### 🛡️ Salas & Segurança
-* **Salas Privadas e Senhas:** Crie salas com códigos amigáveis ou gere códigos aleatórios protegidos por senha com hash SHA-256 e salting.
-* **Proteção Anti-Brute-Force & Rate Limiting:** Limitação estrita de tentativas de autenticação e mitigação de flood de sinalização WebSockets.
-* **Prevenção de Ataques:** Sanitização de entradas contra DOM XSS, proteção contra impersonação de stream e desconexão forçada de sessões duplicadas.
-
-### 💻 Multiplataforma (App Desktop & Navegador)
-* **Desktop Nativo (Windows):** Pacote ultra-leve compilado com [Neutralinojs](https://neutralino.js.org/) (~15MB de consumo de memória vs. ~200MB+ de Electron).
-* **Acesso Web Universal:** Pode ser acessado diretamente pelo Chrome ou Edge em qualquer máquina na rede local.
+> 🚀 **Experimente agora mesmo:** A versão web da aplicação está hospedada e disponível para testes em:  
+> **👉 [https://screenshare-p2p.onrender.com](https://screenshare-p2p.onrender.com)**
 
 ---
 
-## 🏗️ Arquitetura do Sistema
+## ⚖️ Versão Web vs. Versão Desktop (Importante)
+
+Devido às políticas de segurança e sandbox dos navegadores modernos (`getDisplayMedia`), certas operações de baixo nível de áudio do sistema operacional só são possíveis no aplicativo desktop.
+
+| Recurso | Versão Web (Navegador) | Versão Desktop (Windows) |
+| :--- | :---: | :---: |
+| **Acesso Imediato sem Instalação** | ✅ Sim (Link direto no Render) | ⚙️ Requer download/compilação |
+| **Visualização Multi-Telas em Grade** | ✅ Sim | ✅ Sim |
+| **Transmissão de Vídeo (1080p 60FPS)** | ✅ Sim | ✅ Sim |
+| **Áudio de Abas / Dispositivo Padrão** | ✅ Sim (nativo do navegador) | ✅ Sim |
+| **Filtro Anti-Eco (Transmitir PC sem Discord)** | ❌ *Indisponível no browser* | ✅ **Exclusivo Desktop (Rust WASAPI)** |
+| **Captura de Áudio Isolada por Janela/Jogo** | ❌ *Indisponível no browser* | ✅ **Exclusivo Desktop (Rust WASAPI)** |
+
+> [!IMPORTANT]
+> **Ressalva de Áudio:**  
+> A transmissão de som completo do computador com **exclusão automática da voz do Discord** e a **captura de áudio por processo específico** funcionam exclusivamente no **aplicativo Desktop para Windows**.  
+> No navegador (versão Web), o compartilhamento de som fica limitado ao que a API padrão do navegador oferece (áudio da aba ou áudio global do sistema).
+
+---
+
+## 🎯 Funcionalidades Principais
+
+### 1. Visualização & Transmissão Simultânea
+* **Grade Dinâmica Multi-Stream:** Suporte para 1, 2, 3 ou mais transmissões simultâneas na mesma sala, adaptando o layout da tela automaticamente.
+* **Controles Independentes por Tela:** Ajuste de volume individual para cada tela recebida, botão de tela cheia com duplo-clique e indicador de status de conexão.
+* **Otimização de SDP:** Manipulação de descritores de sessão WebSockets para priorizar áudio estéreo Opus (48kHz) e perfis de vídeo de alta taxa de quadros (60FPS).
+
+### 2. Motor de Áudio Dedicado (Exclusivo Desktop / Rust)
+* **WASAPI Process-Loopback:** Captura de áudio diretamente da sessão do Windows (`IAudioClient`), permitindo incluir ou excluir fluxos de áudio baseados no PID (Process Identifier).
+* **Zero Cabos Virtuais:** Não requer a instalação de drivers externos complexos como VB-Audio Cable.
+* **Gerenciamento de Ciclo de Vida:** O assistente de áudio em segundo plano (`streamgrid-audio-helper.exe`) é acoplado ao ciclo do app, encerrando-se automaticamente ao fechar a janela.
+
+### 3. Gerenciamento de Salas & Segurança
+* **Salas Públicas ou Privadas:** Criação rápida com identificadores legíveis (`grid-xxxx-xxxx`) ou códigos customizados.
+* **Proteção por Senha:** Hashing no servidor com salt para proteger salas privadas.
+* **Rate-Limiting & Anti-Brute-Force:** Bloqueio temporário após tentativas consecutivas inválidas de senha e sanitização contra injeção de scripts (DOM XSS).
+
+---
+
+## 🏗️ Arquitetura do Sistema & Decisões Técnicas
 
 ```mermaid
 flowchart TD
     subgraph Host["💻 Host / Transmissor (Windows)"]
-        WASAPI["🦀 Audio Helper (Rust WASAPI)\n• Exclusão Discord\n• Captura por PID"]
-        DesktopApp["🖥️ StreamGrid (Neutralinojs / Web)\n• getDisplayMedia (1080p60)\n• Web Audio API Mixer"]
-        WASAPI -- "PCM WebSocket\n(Porta 45454)" --> DesktopApp
+        WASAPI["🦀 Audio Helper (Rust WASAPI)\n• Filtro de PID (Exclusão Discord)\n• Captura por Loopback"]
+        DesktopApp["🖥️ StreamGrid App (Neutralinojs / Web)\n• WebRTC RTCPeerConnection\n• Web Audio API Mixer"]
+        WASAPI -- "PCM Stream Local\n(WebSocket ws://127.0.0.1:45454)" --> DesktopApp
     end
 
-    subgraph Signaling["🌐 Servidor de Sinalização (Node.js)"]
-        Server["Node.js + Socket.io\n• Gerenciamento de Salas\n• Rate Limiting & Auth\n• Troca de SDP / ICE"]
+    subgraph Signaling["🌐 Servidor de Sinalização (Render / Node.js)"]
+        Server["Node.js + Socket.io\n• Gerenciador de Salas & Senhas\n• Troca de SDP & ICE Candidates\n• Anti-Brute Force Protection"]
     end
 
-    subgraph Peer["📱 Visualizador / Amigo"]
-        PeerApp["🖥️ StreamGrid Client\n• Grid de Vídeos\n• Volume Independente"]
+    subgraph Peer["📱 Visualizador / Outro Membro"]
+        PeerApp["🖥️ StreamGrid Client\n• Grid Dinâmica Multi-Stream\n• Controles de Volume Individuais"]
     end
 
     DesktopApp <-->|"Sinalização (Handshake Inicial)"| Server
     PeerApp <-->|"Sinalização (Handshake Inicial)"| Server
 
-    DesktopApp <===>|"WebRTC P2P (Vídeo 1080p60 + Áudio Estéreo Opus)"| PeerApp
+    DesktopApp <===>|"WebRTC P2P Direto (Vídeo 1080p + Áudio Opus)"| PeerApp
 ```
+
+### Por que essas decisões de engenharia?
+
+1. **WebRTC P2P (Full Mesh) em vez de Servidor de Mídia Central (SFU/MCU):**
+   * *Motivo:* Para o caso de uso (amigos ou casais compartilhando telas em salas pequenas), a topologia P2P elimina custos de servidores de vídeo em nuvem e minimiza a latência física, já que o tráfego de mídia não precisa passar por um servidor intermediário.
+2. **Rust com WASAPI em vez de C++ ou bibliotecas Node nativas:**
+   * *Motivo:* Rust oferece segurança de memória e alta performance para processamento contínuo de amostras PCM em tempo real, com facilidade de integração com a API `windows-rs`.
+3. **Neutralinojs em vez de Electron:**
+   * *Motivo:* Em vez de empacotar um runtime Chromium completo (~200MB de RAM e 150MB de instalador), o Neutralinojs utiliza o webview nativo do sistema operacional (Edge WebView2), consumindo menos de 20MB de RAM e gerando um executável portátil ultra-leve.
 
 ---
 
-## 📁 Estrutura de Pastas
-
-```text
-screensharep2p/
-├── bin/                          # Binários compilados do audio helper
-│   └── streamgrid-audio-helper.exe
-├── public/                       # Frontend da aplicação
-│   ├── index.html                # Interface de salas e visualizador de streams
-│   ├── style.css                 # Estilos modernos (Dark/Light mode, grid responsiva)
-│   ├── app.js                    # Lógica WebRTC, controles e integração WASAPI
-│   └── js/                       # Dependências estáticas (Neutralino, Socket.io)
-├── tools/
-│   └── audio-helper/             # Código-fonte do motor de áudio nativo em Rust
-│       ├── Cargo.toml
-│       └── src/main.rs           # Captura de loopback WASAPI com isolamento de processo
-├── test/                         # Bateria de testes automatizados
-│   ├── fuzz-crash-test.js        # Teste de robustez contra payloads maliciosos
-│   ├── sdp-optimization.test.js  # Teste unitário de manipulação de SDP
-│   ├── ip-rate-limit.test.js     # Teste de mitigação de força bruta
-│   └── audio-helper-token.test.js# Teste de ciclo de vida de tokens
-├── server.js                     # Servidor Node.js de sinalização e estáticos
-├── neutralino.config.json        # Configuração da janela do app desktop
-└── package.json                  # Scripts e dependências do projeto
-```
-
----
-
-## 🚀 Como Executar
+## 💻 Como Executar Localmente
 
 ### Pré-requisitos
 * [Node.js](https://nodejs.org/) (versão 18 ou superior)
-* [Rust & Cargo](https://rustup.rs/) *(apenas se for recompilar o `audio-helper`)*
+* [Rust & Cargo](https://rustup.rs/) *(apenas se desejar compilar o assistente de áudio a partir do código-fonte)*
 
-### 1. Clonar e Instalar Dependências
+### 1. Instalação e Execução do Servidor
 ```bash
+# Clonar o repositório
 git clone https://github.com/Pedrosasouza/screenshare-p2p.git
 cd screenshare-p2p
-npm install
-```
 
-### 2. Iniciar o Servidor de Sinalização
-```bash
+# Instalar dependências
+npm install
+
+# Iniciar servidor local
 npm start
 ```
-Para modo de desenvolvimento com recarregamento automático:
-```bash
-npm run dev
-```
 
-O servidor exibirá o endereço local e o IP da sua rede:
-```text
-==================================================
-  🖥️ StreamGrid Multi-Screenshare rodando!
-  Local:   http://localhost:3000
-  Rede:    http://192.168.x.x:3000
-==================================================
-```
-Basta abrir o link no navegador no seu computador e enviar o link da rede para quem estiver conectado com você.
+Acesse em seu navegador através de: `http://localhost:3000` (ou pelo IP da sua rede local exibido no terminal).
 
 ---
 
-## 📦 Como Compilar a Versão Desktop para Windows
+## 📦 Compilação do Executável Desktop (Windows)
 
-O projeto inclui um script que compila o assistente de áudio em Rust no modo `release`, empacota os arquivos com o Neutralinojs e gera um pacote `.zip` portátil pronto para uso:
+Para compilar o assistente de áudio em Rust e empacotar o cliente Desktop em um único `.zip` portátil:
 
 ```bash
 npm run build-windows
 ```
 
-O artefato final estará disponível em:
+O arquivo gerado estará disponível na pasta:
 ```text
 dist/StreamGrid-Windows.zip
 ```
 
 ---
 
-## 🧪 Testes Automatizados
+## 🧪 Bateria de Testes
 
-O repositório conta com suites de teste para garantir a segurança e estabilidade da sinalização e manipulação SDP:
+O projeto inclui testes automatizados para verificar a integridade da sinalização e segurança do servidor:
 
 ```bash
 npm test
 ```
 
-Os testes cobrem:
-* **Fuzzing & Crash Tests:** Garante que o servidor não sofra crash com mensagens WebSocket corrompidas ou tipos inesperados.
-* **Otimização de SDP:** Validação de injeção correta de bitrates e estéreo Opus.
-* **Rate Limiting:** Validação do bloqueio temporário após tentativas consecutivas inválidas de senha.
-* **Token Lifecycle:** Garantia de persistência e validação dos tokens de autenticação local.
+* **Fuzzing & Crash Tests:** Verifica resiliência do servidor contra payloads WebSocket malformados ou tipos de dados inválidos.
+* **Otimização de SDP:** Valida se as regras de substituição de payload para áudio estéreo e taxas de vídeo são aplicadas corretamente.
+* **Rate Limiting:** Testa o bloqueio de requisições consecutivas com senhas incorretas.
+* **Ciclo de Vida de Token:** Validação de tokens de autenticação local do helper.
 
 ---
 
-## ⚙️ Tecnologias Utilizadas
+## 👤 Autor
 
-* **Linguagens:** JavaScript (ES6+), Rust (Edition 2021), HTML5, CSS3.
-* **WebRTC & Streaming:** RTCPeerConnection, Web Audio API, Opus Codec.
-* **Sinalização:** Node.js, Express, Socket.io.
-* **Nativo / Sistema:** WASAPI (Windows Audio Session API), Tokio, Windows API (`windows-rs`).
-* **Desktop:** Neutralinojs v5.6.
+Desenvolvido por **Pedro Souza**  
+* GitHub: [@Pedrosasouza](https://github.com/Pedrosasouza)  
+* Portfólio: [Pedrosasouza.github.io](https://Pedrosasouza.github.io)
 
 ---
 
 ## 📄 Licença
 
-Distribuído sob a licença **MIT**. Consulte o arquivo [LICENSE](LICENSE) para obter mais informações.
-
----
-
-<p align="center">
-  Desenvolvido por <strong><a href="https://github.com/Pedrosasouza">Pedro Souza</a></strong>
-</p>
+Este projeto está sob a licença [MIT](LICENSE).
