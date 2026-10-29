@@ -93,12 +93,25 @@ function safeHandler(socket, eventName, handler) {
 }
 
 function getClientIdentifier(socket) {
-    // Captura IP real considerando proxies reversos como Cloudflare / Render
-    const forwarded = socket.handshake.headers['x-forwarded-for'];
-    if (forwarded) {
-        return forwarded.split(',')[0].trim();
+    const trustProxy = process.env.TRUST_PROXY === 'true' || process.env.TRUST_PROXY === '1';
+
+    if (trustProxy) {
+        const forwarded = socket.handshake.headers['x-forwarded-for'];
+        if (typeof forwarded === 'string' && forwarded.trim()) {
+            const parts = forwarded.split(',');
+            // Extrai o IP anexado pelo proxy confiável de borda (mais à direita)
+            const safeIp = parts[parts.length - 1].trim().replace(/^::ffff:/, '');
+            if (safeIp) return safeIp;
+        }
     }
-    return socket.handshake.address || socket.id;
+
+    // Padrão seguro: utiliza o endereço da conexão física do socket
+    const rawAddress = socket.handshake.address;
+    if (typeof rawAddress === 'string' && rawAddress.trim()) {
+        return rawAddress.trim().replace(/^::ffff:/, '');
+    }
+
+    return socket.id;
 }
 
 // Limpeza periódica da memória a cada 10 minutos
