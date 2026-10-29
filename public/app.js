@@ -2006,6 +2006,156 @@ if (shareConfigModal) {
     });
 }
 
+// Toolbar Utilities: Picture-in-Picture & Stats Modals
+const btnTogglePip = document.getElementById('btnTogglePip');
+const btnToggleStats = document.getElementById('btnToggleStats');
+const statsModal = document.getElementById('statsModal');
+const btnCloseStatsModal = document.getElementById('btnCloseStatsModal');
+
+let statsUpdateInterval = null;
+
+async function updateStatsDisplay() {
+    const elConnectionState = document.getElementById('statsConnectionState');
+    const elRtt = document.getElementById('statsRtt');
+    const elPacketLoss = document.getElementById('statsPacketLoss');
+    const elLocalStream = document.getElementById('statsLocalStream');
+    const elContentHint = document.getElementById('statsContentHint');
+
+    const peerCount = peers ? peers.size : 0;
+    if (elConnectionState) {
+        if (peerCount === 0) {
+            elConnectionState.textContent = 'Aguardando participantes...';
+        } else {
+            let connectedCount = 0;
+            peers.forEach(p => {
+                if (p.pc && (p.pc.connectionState === 'connected' || p.pc.iceConnectionState === 'connected')) {
+                    connectedCount++;
+                }
+            });
+            elConnectionState.textContent = connectedCount > 0
+                ? `Conectado (${connectedCount}/${peerCount} pares)`
+                : `Negociando (${peerCount} pares)`;
+        }
+    }
+
+    if (elLocalStream) {
+        if (localStream && localStream.active) {
+            elLocalStream.textContent = `Ativa (${selectedVideoResolution} @ ${selectedVideoFps} FPS)`;
+        } else {
+            elLocalStream.textContent = 'Inativa';
+        }
+    }
+
+    if (elContentHint) {
+        elContentHint.textContent = contentHintMode === 'motion' ? 'Fluido (Jogos / 60 FPS)' : 'Detalhado (Nitidez / Texto)';
+    }
+
+    let minRtt = null;
+    let totalLost = 0;
+    let totalReceived = 0;
+
+    if (peers && peers.size > 0) {
+        for (const [, peerObj] of peers.entries()) {
+            if (!peerObj.pc || peerObj.pc.connectionState === 'closed') continue;
+            try {
+                const stats = await peerObj.pc.getStats();
+                stats.forEach(report => {
+                    if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.currentRoundTripTime != null) {
+                        const rttMs = Math.round(report.currentRoundTripTime * 1000);
+                        if (minRtt === null || rttMs < minRtt) minRtt = rttMs;
+                    }
+                    if (report.type === 'inbound-rtp' && report.kind === 'video') {
+                        totalLost += (report.packetsLost || 0);
+                        totalReceived += (report.packetsReceived || 0);
+                    }
+                });
+            } catch (_) {}
+        }
+    }
+
+    if (elRtt) {
+        elRtt.textContent = minRtt !== null ? `${minRtt} ms` : '-- ms';
+    }
+
+    if (elPacketLoss) {
+        if (totalReceived + totalLost > 0) {
+            const lossPct = ((totalLost / (totalReceived + totalLost)) * 100).toFixed(1);
+            elPacketLoss.textContent = `${lossPct}%`;
+        } else {
+            elPacketLoss.textContent = '0%';
+        }
+    }
+}
+
+function openStatsModal() {
+    if (statsModal) {
+        statsModal.removeAttribute('hidden');
+        statsModal.style.display = 'flex';
+        updateStatsDisplay();
+        if (statsUpdateInterval) clearInterval(statsUpdateInterval);
+        statsUpdateInterval = setInterval(updateStatsDisplay, 1000);
+    }
+}
+
+function closeStatsModal() {
+    if (statsModal) {
+        statsModal.setAttribute('hidden', '');
+        statsModal.style.display = 'none';
+        if (statsUpdateInterval) {
+            clearInterval(statsUpdateInterval);
+            statsUpdateInterval = null;
+        }
+    }
+}
+
+async function togglePictureInPicture() {
+    if (typeof document === 'undefined' || !document.pictureInPictureEnabled) {
+        showToast('Janela Flutuante (Picture-in-Picture) não é suportada neste navegador.', 'warning');
+        return;
+    }
+
+    try {
+        if (document.pictureInPictureElement) {
+            await document.exitPictureInPicture();
+            return;
+        }
+
+        const remoteVideo = streamGrid ? streamGrid.querySelector('.stream-tile:not(#localStreamTile) video') : null;
+        const localVideo = streamGrid ? streamGrid.querySelector('#localStreamTile video') : null;
+        const targetVideo = remoteVideo || localVideo || (streamGrid ? streamGrid.querySelector('video') : null);
+
+        if (!targetVideo) {
+            showToast('Nenhuma transmissão ativa para abrir em janela flutuante.', 'info');
+            return;
+        }
+
+        await targetVideo.requestPictureInPicture();
+    } catch (err) {
+        console.error('[PiP] Falha ao alternar Picture-in-Picture:', err);
+        showToast('Não foi possível ativar a janela flutuante: ' + (err.message || 'Erro desconhecido'), 'error');
+    }
+}
+
+if (btnTogglePip) {
+    btnTogglePip.addEventListener('click', togglePictureInPicture);
+}
+
+if (btnToggleStats) {
+    btnToggleStats.addEventListener('click', openStatsModal);
+}
+
+if (btnCloseStatsModal) {
+    btnCloseStatsModal.addEventListener('click', closeStatsModal);
+}
+
+if (statsModal) {
+    statsModal.addEventListener('click', (e) => {
+        if (e.target === statsModal) {
+            closeStatsModal();
+        }
+    });
+}
+
 btnStartShare.addEventListener('click', openShareConfigModal);
 btnStartShareBig.addEventListener('click', openShareConfigModal);
 
@@ -2532,6 +2682,10 @@ window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
         if (shareConfigModal && !shareConfigModal.hidden && shareConfigModal.style.display !== 'none') {
             closeShareConfigModal();
+            return;
+        }
+        if (statsModal && !statsModal.hidden && statsModal.style.display !== 'none') {
+            closeStatsModal();
             return;
         }
         if (!roomModal.hidden && roomModal.style.display !== 'none') {

@@ -277,7 +277,14 @@
                 </div>
             </div>
 
-            <div class="toolbar-right"></div>
+            <div class="toolbar-right">
+                <button class="btn btn-secondary btn-sm" id="btnTogglePip" title="Janela Flutuante (Picture-in-Picture)" type="button">
+                    <i class="fa-solid fa-arrow-up-right-from-square"></i> <span class="btn-text">Janela Flutuante</span>
+                </button>
+                <button class="btn btn-secondary btn-sm" id="btnToggleStats" title="Estatísticas da Conexão WebRTC" type="button">
+                    <i class="fa-solid fa-chart-simple"></i> <span class="btn-text">Estatísticas</span>
+                </button>
+            </div>
         </footer>
 
         <!-- Screen Share Configuration Modal (App Audio Isolation) -->
@@ -381,6 +388,40 @@
                     <button class="btn btn-primary btn-block" id="btnConfirmStartShare">
                         <i class="fa-solid fa-display"></i> Continuar e Escolher Janela
                     </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- WebRTC P2P Stats / Diagnostic Modal -->
+        <div class="modal-overlay" id="statsModal" style="display: none;" hidden>
+            <div class="modal-card modal-sm">
+                <div class="modal-header">
+                    <h3><i class="fa-solid fa-chart-simple"></i> Diagnóstico da Conexão P2P</h3>
+                    <button class="btn-close" id="btnCloseStatsModal" title="Fechar (ESC)"><i class="fa-solid fa-xmark"></i></button>
+                </div>
+                <div class="modal-body">
+                    <div style="display: flex; flex-direction: column; gap: 12px; font-size: 0.88rem;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: var(--bg-surface); border-radius: var(--radius-sm); border: 1px solid var(--border);">
+                            <span style="color: var(--text-muted);"><i class="fa-solid fa-network-wired"></i> Estado P2P</span>
+                            <strong id="statsConnectionState">Aguardando pares...</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: var(--bg-surface); border-radius: var(--radius-sm); border: 1px solid var(--border);">
+                            <span style="color: var(--text-muted);"><i class="fa-solid fa-stopwatch"></i> Latência (RTT)</span>
+                            <strong id="statsRtt">-- ms</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: var(--bg-surface); border-radius: var(--radius-sm); border: 1px solid var(--border);">
+                            <span style="color: var(--text-muted);"><i class="fa-solid fa-triangle-exclamation"></i> Perda de Pacotes</span>
+                            <strong id="statsPacketLoss">0%</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: var(--bg-surface); border-radius: var(--radius-sm); border: 1px solid var(--border);">
+                            <span style="color: var(--text-muted);"><i class="fa-solid fa-video"></i> Transmissão Local</span>
+                            <strong id="statsLocalStream">Inativa</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: var(--bg-surface); border-radius: var(--radius-sm); border: 1px solid var(--border);">
+                            <span style="color: var(--text-muted);"><i class="fa-solid fa-tv"></i> Modo de Otimização</span>
+                            <strong id="statsContentHint">Fluido (Jogos / 60 FPS)</strong>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
