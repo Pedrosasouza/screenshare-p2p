@@ -3,6 +3,31 @@ const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
 const os = require('os');
+const { scrypt, randomBytes, timingSafeEqual } = require('crypto');
+const { promisify } = require('util');
+const scryptAsync = promisify(scrypt);
+
+// Cryptographic Password Hashing & Safe Verification (scrypt + random 16-byte salt)
+async function hashPassword(password) {
+    if (typeof password !== 'string' || !password) {
+        return { hash: null, salt: null };
+    }
+    const salt = randomBytes(16);
+    const hash = await scryptAsync(password, salt, 32);
+    return { hash, salt };
+}
+
+async function verifyPassword(password, storedHash, storedSalt) {
+    if (typeof password !== 'string' || !password || !Buffer.isBuffer(storedHash) || !Buffer.isBuffer(storedSalt)) {
+        return false;
+    }
+    try {
+        const derivedKey = await scryptAsync(password, storedSalt, storedHash.length);
+        return timingSafeEqual(derivedKey, storedHash);
+    } catch (_) {
+        return false;
+    }
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -127,7 +152,7 @@ setInterval(() => {
 io.on('connection', (socket) => {
     console.log(`[+] Client connected: ${socket.id}`);
 
-    socket.on('join-room', safeHandler(socket, 'join-room', (data) => {
+    socket.on('join-room', safeHandler(socket, 'join-room', async (data) => {
         if (!isPlainObject(data)) return;
 
         const rawRoomId = typeof data.roomId === 'string' ? data.roomId.trim().toLowerCase() : '';
@@ -176,17 +201,27 @@ io.on('connection', (socket) => {
             return;
         }
 
+        let isNewRoom = false;
         if (!room) {
-            room = {
-                password: cleanPassword || null,
-                members: new Map(), // socketId -> clientId
-                activeStreams: new Set()
-            };
-            rooms.set(cleanRoomId, room);
-            loginAttempts.delete(clientKey);
-        } else if (room.password) {
-            // Password-protected room check
-            if (room.password !== cleanPassword) {
+            const { hash, salt } = await hashPassword(cleanPassword);
+            room = rooms.get(cleanRoomId);
+            if (!room) {
+                room = {
+                    passwordHash: hash,
+                    passwordSalt: salt,
+                    members: new Map(), // socketId -> clientId
+                    activeStreams: new Set()
+                };
+                rooms.set(cleanRoomId, room);
+                loginAttempts.delete(clientKey);
+                isNewRoom = true;
+            }
+        }
+
+        if (!isNewRoom && room.passwordHash) {
+            // Password-protected room check via constant-time verification
+            const isValid = await verifyPassword(cleanPassword, room.passwordHash, room.passwordSalt);
+            if (!isValid) {
                 attemptData.count += 1;
                 attemptData.lastAttempt = now;
 
@@ -260,7 +295,7 @@ io.on('connection', (socket) => {
             activeStreams: activeStreams,
             socketId: socket.id,
             memberCount: room.members.size,
-            hasPassword: Boolean(room.password)
+            hasPassword: Boolean(room.passwordHash)
         });
 
         // Notify existing members about new user
@@ -292,7 +327,7 @@ io.on('connection', (socket) => {
         callback({
             exists: Boolean(room && room.members.size > 0),
             memberCount: room ? room.members.size : 0,
-            hasPassword: Boolean(room && room.password)
+            hasPassword: Boolean(room && room.passwordHash)
         });
     }));
 
@@ -397,11 +432,22 @@ function getLocalIp() {
 }
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    const localIp = getLocalIp();
-    console.log(`\n==================================================`);
-    console.log(`  🖥️ StreamGrid Multi-Screenshare rodando!`);
-    console.log(`  Local:   http://localhost:${PORT}`);
-    console.log(`  Rede:    http://${localIp}:${PORT}`);
-    console.log(`==================================================\n`);
-});
+if (require.main === module) {
+    server.listen(PORT, () => {
+        const localIp = getLocalIp();
+        console.log(`\n==================================================`);
+        console.log(`  🖥️ StreamGrid Multi-Screenshare rodando!`);
+        console.log(`  Local:   http://localhost:${PORT}`);
+        console.log(`  Rede:    http://${localIp}:${PORT}`);
+        console.log(`==================================================\n`);
+    });
+}
+
+module.exports = {
+    app,
+    server,
+    io,
+    rooms,
+    hashPassword,
+    verifyPassword
+};
