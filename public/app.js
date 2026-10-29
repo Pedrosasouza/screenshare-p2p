@@ -1,9 +1,20 @@
 // ==========================================
 // Rust Audio Helper (WASAPI Application Loopback)
 // ==========================================
-let helperAuthToken = (typeof crypto !== 'undefined' && crypto.randomUUID)
-    ? crypto.randomUUID()
-    : 'sg_tok_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
+const HELPER_AUTH_TOKEN_KEY = 'streamgrid_helper_auth_token';
+let helperAuthToken = null;
+try {
+    helperAuthToken = sessionStorage.getItem(HELPER_AUTH_TOKEN_KEY);
+} catch (_) {}
+
+if (!helperAuthToken) {
+    helperAuthToken = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : 'sg_tok_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
+    try {
+        sessionStorage.setItem(HELPER_AUTH_TOKEN_KEY, helperAuthToken);
+    } catch (_) {}
+}
 let helperWs = null;
 let helperConnected = false;
 let helperConnectAttempts = 0;
@@ -67,7 +78,17 @@ function connectAudioHelper() {
                 } else if (msg.type === 'auth_failed') {
                     console.error('[AudioHelper] ❌ Falha na autenticação do Helper:', msg.error);
                     helperConnected = false;
+                    try { sessionStorage.removeItem(HELPER_AUTH_TOKEN_KEY); } catch (_) {}
+                    helperAuthToken = null;
+                    helperConnectAttempts = 10; // Força recuo para permitir encerramento do watchdog (2,5s)
                     try { helperWs.close(); } catch(e) {}
+                    setTimeout(() => {
+                        helperAuthToken = (typeof crypto !== 'undefined' && crypto.randomUUID)
+                            ? crypto.randomUUID()
+                            : 'sg_tok_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
+                        try { sessionStorage.setItem(HELPER_AUTH_TOKEN_KEY, helperAuthToken); } catch (_) {}
+                        spawnAudioHelperIfNeutralino();
+                    }, 3500);
                 } else if (msg.type === 'windows_list') {
                     availableWindows = msg.windows || [];
                     updateAudioAppSelect(availableWindows);
