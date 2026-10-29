@@ -1937,6 +1937,14 @@ function closeShareConfigModal() {
     }
 }
 
+if (shareConfigModal) {
+    shareConfigModal.addEventListener('click', (e) => {
+        if (e.target === shareConfigModal) {
+            closeShareConfigModal();
+        }
+    });
+}
+
 btnStartShare.addEventListener('click', openShareConfigModal);
 btnStartShareBig.addEventListener('click', openShareConfigModal);
 
@@ -2457,6 +2465,10 @@ btnCopyLink.addEventListener('click', () => {
 
 window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
+        if (shareConfigModal && !shareConfigModal.hidden && shareConfigModal.style.display !== 'none') {
+            closeShareConfigModal();
+            return;
+        }
         if (!roomModal.hidden && roomModal.style.display !== 'none') {
             if (roomViewChoice && roomViewChoice.style.display === 'none') {
                 switchRoomView('choice');
