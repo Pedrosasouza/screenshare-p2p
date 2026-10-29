@@ -14,6 +14,9 @@
   <a href="https://screenshare-p2p.onrender.com">
     <img src="https://img.shields.io/badge/🌐_Live_Demo-Acessar_no_Render-46E3B7?style=for-the-badge&logo=render&logoColor=white" alt="Live Demo no Render">
   </a>
+  <a href="https://github.com/Pedrosasouza/screenshare-p2p/releases/latest">
+    <img src="https://img.shields.io/badge/📦_Download_Windows-Release_v1.0.0-blue?style=for-the-badge&logo=windows&logoColor=white" alt="Download Windows v1.0.0">
+  </a>
 </p>
 
 <p align="center">
@@ -21,6 +24,7 @@
   <img src="https://img.shields.io/badge/Rust-WASAPI%20Loopback-DEA584?style=flat-square&logo=rust" alt="Rust">
   <img src="https://img.shields.io/badge/Desktop-Neutralinojs%20v5.6-9b59b6?style=flat-square" alt="Neutralinojs">
   <img src="https://img.shields.io/badge/Signaling-Node.js%20%2F%20Socket.io-339933?style=flat-square&logo=node.js" alt="Node.js">
+  <img src="https://img.shields.io/badge/SignPath-Code_Signed-388e3c?style=flat-square" alt="SignPath Foundation">
   <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License">
 </p>
 
@@ -134,18 +138,24 @@ Acesse a interface no navegador em: `http://localhost:3000` (ou pelo endereço d
 
 ---
 
-## 📦 Compilação do Executável Desktop (Windows)
+## 📥 Download da Versão Desktop (Windows)
 
-Para compilar o assistente de áudio em Rust e empacotar a aplicação Desktop em um arquivo `.zip` portátil:
+As versões oficiais pré-compiladas para Windows estão disponíveis diretamente na página de lançamentos:
+* **Última Versão:** [GitHub Releases — StreamGrid](https://github.com/Pedrosasouza/screenshare-p2p/releases/latest)
+* **Arquivo Portátil:** Baixe o arquivo `StreamGrid-Windows.zip`, extraia em uma pasta de sua preferência e execute `StreamGrid-win_x64.exe`.
+* **Verificação de Integridade:** Cada versão inclui o arquivo `StreamGrid-Windows.zip.sha256` para conferência de hash SHA-256.
+
+---
+
+## 📦 Compilação Manual a partir do Código-Fonte (Windows)
+
+Se preferir compilar localmente em vez de baixar o executável pré-compilado:
 
 ```bash
 npm run build-windows
 ```
 
-O artefato gerado estará em:
-```text
-dist/StreamGrid-Windows.zip
-```
+O artefato gerado estará em `dist/StreamGrid-Windows.zip`.
 
 ---
 
@@ -166,6 +176,14 @@ Para validar especificamente o ciclo de vida e a persistência de tokens do assi
 ```bash
 npm run test:helper
 ```
+
+---
+
+## 🔒 Segurança, Políticas & Assinatura de Código
+
+* **Assinatura de Código:** Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+* **Política de Assinatura:** Consulte [docs/CODE_SIGNING_POLICY.md](docs/CODE_SIGNING_POLICY.md) para diretrizes de segurança, governança de chaves e builds auditáveis via GitHub Actions.
+* **Política de Privacidade:** Consulte [PRIVACY.md](PRIVACY.md) para detalhes sobre a transmissão peer-to-peer criptografada (WebRTC DTLS/SRTP) e armazenamento de senhas com salt.
 
 ---
 
