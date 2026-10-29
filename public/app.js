@@ -414,9 +414,23 @@ if (btnThemeToggle) {
 initTheme();
 
 // Error Banner Helpers
+function sanitizeRoomId(raw) {
+    if (typeof raw !== 'string') return '';
+    return raw
+        .trim()
+        .toLowerCase()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .replace(/\s+/g, '-')
+        .replace(/[^a-z0-9_-]/g, '')
+        .replace(/-+/g, '-')
+        .slice(0, 64);
+}
+
 function showRoomError(msg) {
     if (!roomErrorBanner) return;
-    roomErrorBanner.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> <span>${msg}</span>`;
+    roomErrorBanner.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> <span></span>';
+    const span = roomErrorBanner.querySelector('span');
+    if (span) span.textContent = msg || '';
     roomErrorBanner.style.display = 'flex';
     roomErrorBanner.hidden = false;
 }
@@ -646,7 +660,18 @@ if (btnBackFromJoin) {
 
 function handleConfirmCreate() {
     clearRoomError();
-    const newRoomId = (inputCreateRoomId ? inputCreateRoomId.value.trim().toLowerCase() : '') || generateRandomRoomId();
+    const raw = inputCreateRoomId ? inputCreateRoomId.value : '';
+    let newRoomId;
+    if (!raw.trim()) {
+        newRoomId = generateRandomRoomId();
+    } else {
+        newRoomId = sanitizeRoomId(raw);
+        if (newRoomId.length < 3) {
+            showRoomError('Nome de sala inválido. Use pelo menos 3 caracteres alfanuméricos.');
+            if (inputCreateRoomId) inputCreateRoomId.focus();
+            return;
+        }
+    }
     if (inputCreateRoomId) inputCreateRoomId.value = newRoomId;
     const pass = (inputCreateRoomPassword ? inputCreateRoomPassword.value.trim() : '');
     joinRoom(newRoomId, pass);
@@ -654,9 +679,10 @@ function handleConfirmCreate() {
 
 function handleConfirmJoin() {
     clearRoomError();
-    const newRoomId = (inputJoinRoomId ? inputJoinRoomId.value.trim().toLowerCase() : '');
-    if (!newRoomId) {
-        showRoomError('Por favor, informe o código da sala para entrar.');
+    const rawRoom = inputJoinRoomId ? inputJoinRoomId.value : '';
+    const newRoomId = sanitizeRoomId(rawRoom);
+    if (!newRoomId || newRoomId.length < 3) {
+        showRoomError('Por favor, informe um código de sala válido (mínimo de 3 caracteres alfanuméricos).');
         if (inputJoinRoomId) inputJoinRoomId.focus();
         return;
     }
@@ -680,13 +706,23 @@ window.addEventListener('DOMContentLoaded', () => {
     try { savedRoom = localStorage.getItem(STORAGE_KEY); } catch(e) {}
 
     if (roomParam) {
-        const clean = roomParam.trim().toLowerCase();
+        const clean = sanitizeRoomId(roomParam);
         if (inputJoinRoomId) inputJoinRoomId.value = clean;
-        joinRoom(clean, passParam || '');
+        if (clean.length >= 3) {
+            joinRoom(clean, passParam || '');
+        } else {
+            openRoomModal('join');
+            showRoomError('Código de sala na URL inválido.');
+        }
     } else if (savedRoom) {
-        const clean = savedRoom.trim().toLowerCase();
+        const clean = sanitizeRoomId(savedRoom);
         if (inputJoinRoomId) inputJoinRoomId.value = clean;
-        joinRoom(clean);
+        if (clean.length >= 3) {
+            joinRoom(clean);
+        } else {
+            try { localStorage.removeItem(STORAGE_KEY); } catch(e) {}
+            openRoomModal('choice');
+        }
     } else {
         openRoomModal('choice');
     }
@@ -729,7 +765,13 @@ function cleanupRoomState() {
 
 function joinRoom(targetRoomId, targetPass = '') {
     clearRoomError();
-    const newRoomId = (targetRoomId || '').trim().toLowerCase() || generateRandomRoomId();
+    const cleanId = sanitizeRoomId(targetRoomId) || generateRandomRoomId();
+    if (cleanId.length < 3) {
+        openRoomModal('join');
+        showRoomError('O código da sala deve ter pelo menos 3 caracteres alfanuméricos.');
+        return;
+    }
+    const newRoomId = cleanId;
     currentRoomPassword = (targetPass || '').trim();
 
     // If switching rooms, close all previous connections cleanly
@@ -831,14 +873,23 @@ socket.on('disconnect', (reason) => {
 // Authentication and Room Error Handler
 socket.on('join-error', ({ error, message }) => {
     console.warn('[Auth] Join error:', error, message);
+    openRoomModal('join');
     if (error === 'invalid_password') {
-        openRoomModal('join');
-        if (inputJoinRoomId) inputJoinRoomId.value = roomId;
+        if (inputJoinRoomId) inputJoinRoomId.value = roomId || '';
         showRoomError(message || 'Senha incorreta para esta sala.');
         if (inputJoinRoomPassword) {
             inputJoinRoomPassword.focus();
             inputJoinRoomPassword.select();
         }
+    } else if (error === 'invalid_room' || error === 'invalid_password_format') {
+        roomId = '';
+        try { localStorage.removeItem(STORAGE_KEY); } catch(e) {}
+        if (window.history && window.history.replaceState) {
+            try { window.history.replaceState({}, '', window.location.pathname); } catch(e) {}
+        }
+        showRoomError(message || 'Código de sala ou formato inválido.');
+    } else if (error === 'rate_limited') {
+        showRoomError(message || 'Muitas tentativas incorretas. Aguarde antes de tentar novamente.');
     } else {
         showRoomError(message || 'Erro ao entrar na sala.');
     }
@@ -857,10 +908,14 @@ socket.on('room-users', async ({ users, activeStreams, socketId, memberCount, ha
     // Sync member count immediately for the joiner
     updateMemberCount(memberCount || (users.length + 1));
 
+    displayRoomId.textContent = roomId;
     if (hasPassword) {
-        displayRoomId.innerHTML = `${roomId} <i class="fa-solid fa-lock" style="font-size:0.75rem;margin-left:4px;" title="Sala protegida por senha"></i>`;
-    } else {
-        displayRoomId.textContent = roomId;
+        const icon = document.createElement('i');
+        icon.className = 'fa-solid fa-lock';
+        icon.style.fontSize = '0.75rem';
+        icon.style.marginLeft = '4px';
+        icon.title = 'Sala protegida por senha';
+        displayRoomId.appendChild(icon);
     }
 
     // Initialize peer connections for existing users
