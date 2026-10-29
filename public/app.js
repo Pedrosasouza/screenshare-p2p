@@ -220,6 +220,24 @@ function stopAppAudioCapture() {
 if (typeof Neutralino !== 'undefined') {
     try {
         Neutralino.init();
+
+        // Encerramento limpo de todos os subprocessos ao fechar a janela
+        if (Neutralino.events && Neutralino.events.on) {
+            Neutralino.events.on('windowClose', async () => {
+                console.log('[Neutralino] Janela fechada. Encerrando processos...');
+                try {
+                    if (helperWs && helperWs.readyState === WebSocket.OPEN) {
+                        helperWs.send(JSON.stringify({ type: 'shutdown' }));
+                        helperWs.close();
+                    }
+                } catch(e) {}
+                // Garantia final: encerra o app Neutralino
+                try {
+                    await Neutralino.app.exit();
+                } catch(e) {}
+            });
+        }
+
         spawnAudioHelperIfNeutralino();
         // Pequena pausa de 120ms para o processo do helper subir a porta antes da primeira conexão
         setTimeout(connectAudioHelper, 120);

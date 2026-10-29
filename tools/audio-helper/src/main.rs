@@ -62,6 +62,8 @@ enum ClientMessage {
     StartExcludeDiscord,
     #[serde(rename = "stop_capture")]
     StopCapture,
+    #[serde(rename = "shutdown")]
+    Shutdown,
     #[serde(rename = "ping")]
     Ping,
 }
@@ -104,11 +106,32 @@ fn spawn_parent_watcher(parent_pid: u32) {
     }
     std::thread::spawn(move || {
         unsafe {
+            // Tentativa 1: Aguarda via WaitForSingleObject se conseguir SYNCHRONIZE
             if let Ok(handle) = OpenProcess(PROCESS_SYNCHRONIZE, false, parent_pid) {
                 let _ = windows::Win32::System::Threading::WaitForSingleObject(
                     handle,
                     windows::Win32::System::Threading::INFINITE,
                 );
+                let _ = windows::Win32::Foundation::CloseHandle(handle);
+            } else {
+                // Tentativa 2: Fallback com polling rápido (300ms) via PROCESS_QUERY_LIMITED_INFORMATION
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, parent_pid) {
+                        Ok(handle) => {
+                            let mut exit_code: u32 = 0;
+                            let res = windows::Win32::System::Threading::GetExitCodeProcess(handle, &mut exit_code);
+                            let _ = windows::Win32::Foundation::CloseHandle(handle);
+                            if res.is_err() || exit_code != 259 /* STILL_ACTIVE */ {
+                                break;
+                            }
+                        }
+                        Err(_) => {
+                            // Se nem sequer puder abrir o processo, ele encerrou
+                            break;
+                        }
+                    }
+                }
             }
         }
         eprintln!("[Helper] Processo pai encerrou. Finalizando streamgrid-audio-helper.");
@@ -646,6 +669,13 @@ async fn handle_client(
                                 stop.store(true, Ordering::Relaxed);
                             }
                             let _ = ws.send(Message::Text(serde_json::to_string(&ServerMessage::CaptureStopped)?)).await;
+                        }
+                        ClientMessage::Shutdown => {
+                            eprintln!("[Helper] Comando de shutdown recebido via WebSocket. Encerrando processo.");
+                            if let Some(stop) = capture_stop_signal.take() {
+                                stop.store(true, Ordering::Relaxed);
+                            }
+                            std::process::exit(0);
                         }
                         ClientMessage::Ping => {
                             let _ = ws.send(Message::Text(serde_json::to_string(&ServerMessage::Pong)?)).await;
