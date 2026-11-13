@@ -129,8 +129,8 @@ async function runTests() {
         failures++;
     }
 
-    // Teste 4: Alocação multi-peer com degradação balanced e teto de upload seguro
-    process.stdout.write('  [Teste] T4: Alocação de banda multi-peer e degradationPreference=balanced ... ');
+    // Teste 4: Alocação multi-peer com degradação maintain-framerate e teto de upload seguro
+    process.stdout.write('  [Teste] T4: Alocação de banda multi-peer e degradationPreference=maintain-framerate ... ');
     try {
         const b2Peers = helpers.getMaxBitrateForPeerCount(2, '1080p', 60);
         const b3Peers = helpers.getMaxBitrateForPeerCount(3, '1080p', 60);
@@ -145,7 +145,7 @@ async function runTests() {
             setParameters: async (p) => { mockSender.appliedParams = p; }
         };
         helpers.configureSenderParams(mockSender, 'video');
-        assert.strictEqual(mockSender.appliedParams.degradationPreference, 'balanced', 'degradationPreference deve ser balanced para evitar telas pretas');
+        assert.strictEqual(mockSender.appliedParams.degradationPreference, 'maintain-framerate', 'degradationPreference no modo Fluido deve preservar FPS (maintain-framerate)');
 
         console.log('\x1b[32mPASSOU\x1b[0m');
     } catch (err) {

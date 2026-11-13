@@ -421,6 +421,22 @@
                             <span style="color: var(--text-muted);"><i class="fa-solid fa-tv"></i> Modo de Otimização</span>
                             <strong id="statsContentHint">Fluido (Jogos / 60 FPS)</strong>
                         </div>
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: var(--bg-surface); border-radius: var(--radius-sm); border: 1px solid var(--border);">
+                            <span style="color: var(--text-muted);"><i class="fa-solid fa-gauge-high"></i> Vídeo Real (FPS / Bitrate)</span>
+                            <strong id="statsVideoTelemetry">--</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: var(--bg-surface); border-radius: var(--radius-sm); border: 1px solid var(--border);">
+                            <span style="color: var(--text-muted);"><i class="fa-solid fa-microchip"></i> Codec / Encoder</span>
+                            <strong id="statsCodecEncoder">--</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: var(--bg-surface); border-radius: var(--radius-sm); border: 1px solid var(--border);">
+                            <span style="color: var(--text-muted);"><i class="fa-solid fa-shield-halved"></i> Limitação WebRTC</span>
+                            <strong id="statsQualityLimitation">Nenhuma (none)</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: var(--bg-surface); border-radius: var(--radius-sm); border: 1px solid var(--border);">
+                            <span style="color: var(--text-muted);"><i class="fa-solid fa-route"></i> Rota ICE Ativa</span>
+                            <strong id="statsIceRoute">--</strong>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -429,7 +445,7 @@
     </div>
 
     <script src="js/socket.io.min.js"></script>
-    <script src="js/neutralino.js"></script>
-    <script src="app.js?v=2.0.1"></script>
+    <script src="js/desktop-bridge.js"></script>
+    <script src="app.js?v=2.2.0"></script>
 </body>
 </html>

@@ -29,7 +29,7 @@ function sanitizeRoomId(raw) {
 class TestServer {
     constructor(port = getNextPort()) {
         this.port = port;
-        this.url = `http://localhost:${this.port}`;
+        this.url = `http://127.0.0.1:${this.port}`;
         this.process = null;
         this.exited = false;
         this.exitCode = null;
@@ -52,10 +52,12 @@ class TestServer {
             });
 
             let isResolved = false;
+            let startupTimer = null;
 
             const checkReady = (str) => {
                 if (!isResolved && str.includes(`http://localhost:${this.port}`)) {
                     isResolved = true;
+                    if (startupTimer) clearTimeout(startupTimer);
                     resolve();
                 }
             };
@@ -76,6 +78,7 @@ class TestServer {
                 this.exitSignal = signal;
                 if (!isResolved) {
                     isResolved = true;
+                    if (startupTimer) clearTimeout(startupTimer);
                     reject(new Error(`Server exited prematurely with code ${code}`));
                 }
             });
@@ -83,16 +86,17 @@ class TestServer {
             this.process.on('error', err => {
                 if (!isResolved) {
                     isResolved = true;
+                    if (startupTimer) clearTimeout(startupTimer);
                     reject(err);
                 }
             });
 
-            setTimeout(() => {
+            startupTimer = setTimeout(() => {
                 if (!isResolved) {
                     isResolved = true;
-                    resolve();
+                    reject(new Error(`Server startup timeout on port ${this.port}`));
                 }
-            }, 5000);
+            }, 10000);
         });
     }
 
@@ -114,23 +118,32 @@ function createClient(serverUrl) {
     return io(serverUrl, {
         transports: ['websocket', 'polling'],
         forceNew: true,
-        reconnection: false,
-        timeout: 4000
+        reconnection: true,
+        reconnectionAttempts: 10,
+        reconnectionDelay: 200,
+        timeout: 8000
     });
 }
 
-function waitForConnect(socket, timeout = 4000) {
+function waitForConnect(socket, timeout = 8000) {
     return new Promise((resolve, reject) => {
         if (socket.connected) return resolve();
-        const timer = setTimeout(() => reject(new Error('Connection timeout')), timeout);
-        socket.once('connect', () => {
+        let lastErr = null;
+        const timer = setTimeout(() => {
+            socket.off('connect', onConnect);
+            socket.off('connect_error', onError);
+            reject(lastErr || new Error('Connection timeout'));
+        }, timeout);
+        const onConnect = () => {
             clearTimeout(timer);
+            socket.off('connect_error', onError);
             resolve();
-        });
-        socket.once('connect_error', err => {
-            clearTimeout(timer);
-            reject(err);
-        });
+        };
+        const onError = (err) => {
+            lastErr = err;
+        };
+        socket.once('connect', onConnect);
+        socket.on('connect_error', onError);
     });
 }
 

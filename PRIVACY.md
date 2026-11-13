@@ -29,18 +29,18 @@ The signaling server coordinates the initial WebRTC connection setup:
 
 ---
 
-## 3. Windows Desktop Audio Helper (`streamgrid-audio-helper.exe`)
+## 3. Windows Desktop Native Audio Engine (Tauri v2 + WASAPI)
 
-The Windows desktop version includes a native companion module for selective process audio capture (WASAPI Loopback):
-* **Local Loopback Only:** The audio helper communicates exclusively over local loopback (`ws://127.0.0.1`) with the StreamGrid desktop application running on the same machine.
-* **Security Tokens:** Communication between the main desktop window and the audio helper requires a cryptographically random, ephemeral security token and strict origin validation.
-* **No Remote Telemetry:** The audio helper never sends captured audio, process identifiers (PIDs), or system information to remote servers. All audio processing and process filtering happen strictly within your local machine's memory.
+The Windows desktop version includes a native Rust module integrated directly into the Tauri v2 application binary for selective process audio capture (WASAPI Loopback):
+* **In-Process IPC Only (No Local Network Ports):** Audio frames and control commands travel strictly through Tauri's internal WebView2 IPC channels (`invoke` / `Channel`) inside the same desktop process, without opening local TCP or WebSocket ports.
+* **Least-Privilege Capabilities:** Desktop capabilities are scoped strictly to the main application window with no arbitrary shell spawning or filesystem exposure.
+* **No Remote Telemetry:** Captured audio, process identifiers (PIDs), window titles, and system information are never sent to remote servers outside active peer-to-peer WebRTC streams initiated by the user. All process filtering happens strictly within local machine memory.
 
 ---
 
 ## 4. Third-Party Services & Infrastructure
 
-* **STUN & TURN Relay Servers:** StreamGrid utilizes Google STUN servers and dedicated TURN relays (Metered.ca) solely for NAT and CGNAT traversal (discovering external reflexive candidates and relaying encrypted media packets when direct P2P connections are blocked by restrictive symmetric firewalls). Media streams traversing TURN relays remain encrypted end-to-end via DTLS/SRTP; relay servers do not inspect room names, passwords, or decrypted content.
+* **STUN & TURN Relay Servers:** StreamGrid utilizes public STUN servers (`stun:stun.l.google.com:19302`, `stun1.l.google.com:19302`, `stun2.l.google.com:19302`, and `stun:global.stun.twilio.com:3478`) for NAT traversal (discovering external reflexive IP candidates) and public Metered.ca Open Relay TURN servers (`turn:openrelay.metered.ca:80` and `:443`) solely as a fallback when direct P2P connections are blocked by symmetric NAT or CGNAT. Media streams traversing TURN relays remain encrypted end-to-end via DTLS/SRTP; STUN/TURN servers do not receive room names, passwords, or decrypted media content.
 * **Hosting Infrastructure Logs (Render):** The public web demonstration and signaling instance are deployed on Render infrastructure. Standard connection logs (such as IP addresses, User-Agent strings, and request timestamps) are automatically processed and temporarily retained by Render's edge proxies in accordance with their privacy policy to maintain network availability, DDoS mitigation, and operational security.
 
 ---
@@ -48,8 +48,8 @@ The Windows desktop version includes a native companion module for selective pro
 ## 5. Cookies & Local Storage
 
 * StreamGrid does not use persistent tracking cookies or advertising identifiers.
-* Local browser storage (`localStorage`) is used strictly to retain non-sensitive client preferences (such as your chosen display name, preferred resolution, and framerate).
-* Session storage (`sessionStorage`) is used to retain ephemeral session tokens (such as the local audio helper connection token across page reloads).
+* Local browser storage (`localStorage`) is used strictly to retain non-sensitive client preferences (such as your chosen display name, preferred resolution, framerate, and custom signaling server URL if configured).
+* Session storage (`sessionStorage`) may be used strictly for ephemeral UI state across reloads within the current window session.
 
 ---
 

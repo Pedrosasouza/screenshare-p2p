@@ -9,20 +9,22 @@ async function runTests() {
 
     let failures = 0;
 
-    // Teste 1 (Pacote 2): package.json deve unificar os testes do audio helper
-    process.stdout.write('  [Teste] T1: package.json script "test:helper" unifica token e origin ... ');
+    // Teste 1 (Pacote 2): package.json deve expor testes Rust WASAPI (src-tauri) e desktop-bridge
+    process.stdout.write('  [Teste] T1: package.json integra testes Rust (test:rust) e desktop-bridge ... ');
     const pkgPath = path.resolve(__dirname, '../package.json');
     const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-    const testHelperScript = pkg.scripts && pkg.scripts['test:helper'];
+    const testScript = pkg.scripts && pkg.scripts['test'];
+    const testRustScript = pkg.scripts && pkg.scripts['test:rust'];
 
     if (
-        testHelperScript &&
-        testHelperScript.includes('audio-helper-token.test.js') &&
-        testHelperScript.includes('audio-helper-origin.test.js')
+        testScript &&
+        testScript.includes('desktop-bridge.test.js') &&
+        testRustScript &&
+        testRustScript.includes('src-tauri/Cargo.toml')
     ) {
         console.log('\x1b[32mPASSOU\x1b[0m');
     } else {
-        console.log('\x1b[31mFALHOU (test:helper não executa ambos os testes)\x1b[0m');
+        console.log('\x1b[31mFALHOU (package.json não referencia desktop-bridge.test.js ou test:rust)\x1b[0m');
         failures++;
     }
 

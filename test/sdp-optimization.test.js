@@ -87,8 +87,8 @@ function runTests() {
 
         const h264Fmtp = lines.find(l => l.startsWith('a=fmtp:96'));
         assert.ok(h264Fmtp, 'Deveria existir uma linha a=fmtp:96');
-        assert.ok(h264Fmtp.includes('x-google-min-bitrate=1800'), 'Deveria conter x-google-min-bitrate=1800');
-        assert.ok(h264Fmtp.includes('x-google-start-bitrate=3500'), 'Deveria conter x-google-start-bitrate=3500');
+        assert.ok(h264Fmtp.includes('x-google-min-bitrate=400'), 'Deveria conter x-google-min-bitrate=400');
+        assert.ok(h264Fmtp.includes('x-google-start-bitrate=1500'), 'Deveria conter x-google-start-bitrate=1500');
         assert.ok(h264Fmtp.includes('x-google-max-bitrate=6000'), 'Deveria conter x-google-max-bitrate=6000');
         assert.ok(h264Fmtp.includes('profile-level-id=42e01f'), 'profile-level-id original deveria ser preservado');
         console.log('PASSOU');
@@ -143,6 +143,21 @@ function runTests() {
         const pass2 = optimizeSDP(pass1);
 
         assert.strictEqual(pass1, pass2, 'Segunda execução deve produzir saída idêntica à primeira');
+        console.log('PASSOU');
+    } catch (err) {
+        failures++;
+        console.log('FALHOU');
+        console.error('    Detalhe:', err.message);
+    }
+
+    // Teste 6: Ordem de codecs de vídeo prioriza VP8 -> VP9 antes de H264 (evitando OpenH264 em CPU)
+    try {
+        process.stdout.write('  [Teste] T6: optimizeSDP prioriza VP8 e VP9 antes de H264 na linha m=video ... ');
+        const optimized = optimizeSDP(SAMPLE_SDP_CHROME);
+        const mVideoLine = optimized.split('\r\n').find(l => l.startsWith('m=video'));
+        assert.ok(mVideoLine, 'Deveria existir linha m=video');
+        const payloads = mVideoLine.split(' ').slice(3);
+        assert.deepStrictEqual(payloads, ['98', '100', '96'], 'Ordem esperada em m=video: VP8 (98), VP9 (100), H264 (96)');
         console.log('PASSOU');
     } catch (err) {
         failures++;

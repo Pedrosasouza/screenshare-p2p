@@ -29,11 +29,26 @@ async function verifyPassword(password, storedHash, storedSalt) {
     }
 }
 
+function getCorsOrigin() {
+    const raw = process.env.ALLOWED_ORIGINS;
+    if (typeof raw !== 'string' || !raw.trim()) {
+        return '*';
+    }
+    const allowed = raw.split(',').map(s => s.trim()).filter(Boolean);
+    if (allowed.length === 0) return '*';
+    return (origin, callback) => {
+        if (!origin || allowed.includes(origin)) {
+            return callback(null, true);
+        }
+        return callback(new Error('Origin not allowed by CORS'));
+    };
+}
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
-        origin: "*",
+        origin: getCorsOrigin(),
         methods: ["GET", "POST"]
     },
     pingInterval: 5000,
@@ -43,6 +58,15 @@ const io = new Server(server, {
 
 // Serve static files from public directory
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Healthcheck endpoint for hosting platforms (e.g. Render)
+app.get('/health', (req, res) => {
+    res.json({
+        status: 'ok',
+        rooms: rooms.size,
+        uptime: Math.floor(process.uptime())
+    });
+});
 
 // Fallback route to ensure index.html is always served
 app.get('*', (req, res) => {
@@ -58,51 +82,6 @@ const loginAttempts = new Map();
 
 // Validation and sanitization helpers
 const ROOM_ID_REGEX = /^[a-z0-9_-]{3,64}$/;
-
-// Dynamic STUN/TURN configuration for WebRTC ICE negotiation (NAT/CGNAT traversal)
-function getIceServers() {
-    const customTurnUrl = process.env.TURN_URL;
-    const customTurnUsername = process.env.TURN_USERNAME;
-    const customTurnCredential = process.env.TURN_CREDENTIAL || process.env.TURN_PASSWORD;
-
-    if (customTurnUrl && customTurnUsername && customTurnCredential) {
-        return [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-            {
-                urls: customTurnUrl.split(',').map(u => u.trim()),
-                username: customTurnUsername,
-                credential: customTurnCredential
-            }
-        ];
-    }
-
-    return [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun.relay.metered.ca:80' },
-        {
-            urls: 'turn:global.relay.metered.ca:80',
-            username: 'bdb82d81274b845949ec5939',
-            credential: 'N+kTpUw0tNRzeSel'
-        },
-        {
-            urls: 'turn:global.relay.metered.ca:80?transport=tcp',
-            username: 'bdb82d81274b845949ec5939',
-            credential: 'N+kTpUw0tNRzeSel'
-        },
-        {
-            urls: 'turn:global.relay.metered.ca:443',
-            username: 'bdb82d81274b845949ec5939',
-            credential: 'N+kTpUw0tNRzeSel'
-        },
-        {
-            urls: 'turns:global.relay.metered.ca:443?transport=tcp',
-            username: 'bdb82d81274b845949ec5939',
-            credential: 'N+kTpUw0tNRzeSel'
-        }
-    ];
-}
 
 function isPlainObject(obj) {
     return obj !== null && typeof obj === 'object' && !Array.isArray(obj);
@@ -347,8 +326,7 @@ io.on('connection', (socket) => {
             activeStreams: activeStreams,
             socketId: socket.id,
             memberCount: room.members.size,
-            hasPassword: Boolean(room.passwordHash),
-            iceServers: getIceServers()
+            hasPassword: Boolean(room.passwordHash)
         });
 
         // Notify existing members about new user
@@ -490,10 +468,12 @@ const PORT = process.env.PORT || 3000;
 if (require.main === module) {
     server.listen(PORT, () => {
         const localIp = getLocalIp();
+        const boundAddress = server.address();
+        const actualPort = (boundAddress && typeof boundAddress === 'object') ? boundAddress.port : PORT;
         console.log(`\n==================================================`);
         console.log(`  🖥️ StreamGrid Multi-Screenshare rodando!`);
-        console.log(`  Local:   http://localhost:${PORT}`);
-        console.log(`  Rede:    http://${localIp}:${PORT}`);
+        console.log(`  Local:   http://localhost:${actualPort}`);
+        console.log(`  Rede:    http://${localIp}:${actualPort}`);
         console.log(`==================================================\n`);
     });
 }
@@ -504,5 +484,6 @@ module.exports = {
     io,
     rooms,
     hashPassword,
-    verifyPassword
+    verifyPassword,
+    getCorsOrigin
 };

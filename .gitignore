@@ -1,8 +1,7 @@
 node_modules/
 dist/
 bin/
-tools/audio-helper/target/
+src-tauri/target/
 .env
 *.log
 .tmp/
-

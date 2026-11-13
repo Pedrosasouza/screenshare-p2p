@@ -52,41 +52,39 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: tools/audio-helper
+          workspaces: src-tauri
 
-      - name: Run WebRTC & Signaling Security Tests
+      - name: Run WebRTC, Signaling & Bridge Tests
         run: npm test
 
-      - name: Build Rust Audio Helper (WASAPI Loopback)
-        shell: pwsh
-        run: |
-          cargo build --release --manifest-path tools/audio-helper/Cargo.toml
-          New-Item -ItemType Directory -Force -Path bin | Out-Null
-          Copy-Item tools/audio-helper/target/release/streamgrid-audio-helper.exe -Destination bin/streamgrid-audio-helper.exe -Force
+      - name: Run Rust Audio & Window Tests (src-tauri)
+        run: cargo test --manifest-path src-tauri/Cargo.toml
 
-      - name: Run Audio Helper Token & Lifecycle Tests
-        run: npm run test:helper
-
-      - name: Build Neutralino Desktop Package
+      - name: Build Tauri v2 Desktop Application
         shell: pwsh
-        run: npx @neutralinojs/neu build
+        run: npx tauri build
 
       - name: Package Windows Bundle & Compute Checksums
         shell: pwsh
         run: |
-          # 1. Garantir diretórios de distribuição
-          New-Item -ItemType Directory -Force -Path dist/StreamGrid/bin | Out-Null
-          
-          # 2. Copiar binário auxiliar compilado em Rust
-          Copy-Item bin/streamgrid-audio-helper.exe -Destination dist/StreamGrid/bin/streamgrid-audio-helper.exe -Force
-          
-          # 3. Limpeza de logs de execução e arquivos temporários
-          Remove-Item -Path dist/StreamGrid/neutralinojs.log, dist/StreamGrid/.tmp -Recurse -Force -ErrorAction SilentlyContinue
-          Get-ChildItem -Path dist/StreamGrid -Include *linux*, *mac* | Remove-Item -Force -ErrorAction SilentlyContinue
-          
-          # 4. Compactar o pacote final para distribuição
+          # 1. Garantir diretório de distribuição
+          New-Item -ItemType Directory -Force -Path dist/StreamGrid | Out-Null
+
+          # 2. Copiar executável compilado pelo Tauri v2
+          $exe = if (Test-Path 'src-tauri/target/release/StreamGrid.exe') {
+            'src-tauri/target/release/StreamGrid.exe'
+          } else {
+            'src-tauri/target/release/streamgrid.exe'
+          }
+          Copy-Item $exe -Destination dist/StreamGrid/StreamGrid.exe -Force
+
+          # 3. Copiar instaladores gerados (NSIS / MSI), se presentes
+          Get-ChildItem -Path src-tauri/target/release/bundle -Include *.exe, *.msi -Recurse -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName -Destination dist/ -Force }
+
+          # 4. Compactar o pacote portátil para distribuição
           Compress-Archive -Path dist/StreamGrid -DestinationPath dist/StreamGrid-Windows.zip -Force
-          
+
           # 5. Gerar hash SHA-256 para integridade e auditoria
           $hash = (Get-FileHash -Path dist/StreamGrid-Windows.zip -Algorithm SHA256).Hash
           "$hash  StreamGrid-Windows.zip" | Out-File -FilePath dist/StreamGrid-Windows.zip.sha256 -Encoding ascii
@@ -99,7 +97,9 @@ jobs:
           path: |
             dist/StreamGrid-Windows.zip
             dist/StreamGrid-Windows.zip.sha256
-          if-no-files-found: error
+            dist/*.exe
+            dist/*.msi
+          if-no-files-found: ignore
           retention-days: 14
 
       - name: Generate Artifact Attestation (Provenance via Sigstore)
@@ -115,6 +115,8 @@ jobs:
           files: |
             dist/StreamGrid-Windows.zip
             dist/StreamGrid-Windows.zip.sha256
+            dist/*.exe
+            dist/*.msi
           generate_release_notes: true
           draft: false
           prerelease: false

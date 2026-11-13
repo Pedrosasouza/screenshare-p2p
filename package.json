@@ -6,17 +6,19 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node test/fuzz-crash-test.js && node test/sdp-optimization.test.js && node test/ip-rate-limit.test.js && node test/password-hash.test.js && node test/client-optimizations.test.js && node test/client-toast.test.js && node test/video-quality-config.test.js && node test/presence-notification.test.js && node test/modal-escape-backdrop.test.js && node test/user-nickname.test.js && node test/toolbar-utilities.test.js && node test/privacy-security-docs.test.js && node test/late-joiner-keyframe-transceiver.test.js",
-    "test:helper": "node test/audio-helper-token.test.js && node test/audio-helper-origin.test.js",
-    "build-helper": "powershell -Command \"$cargo = if (Get-Command cargo -ErrorAction SilentlyContinue) { 'cargo' } else { (Join-Path $env:USERPROFILE '.cargo\\bin\\cargo.exe') }; & $cargo build --release --manifest-path tools/audio-helper/Cargo.toml; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; New-Item -ItemType Directory -Force -Path bin | Out-Null; Copy-Item tools\\audio-helper\\target\\release\\streamgrid-audio-helper.exe -Destination bin\\streamgrid-audio-helper.exe -Force\"",
-    "build-windows": "npm run build-helper && npx @neutralinojs/neu build && powershell -Command \"New-Item -ItemType Directory -Force -Path dist\\StreamGrid\\bin | Out-Null; Copy-Item bin\\streamgrid-audio-helper.exe -Destination dist\\StreamGrid\\bin\\streamgrid-audio-helper.exe -Force; Remove-Item -Path dist\\StreamGrid\\neutralinojs.log, dist\\StreamGrid\\.tmp -Recurse -Force -ErrorAction SilentlyContinue; Get-ChildItem -Path dist\\StreamGrid -Include *linux*, *mac* | Remove-Item -Force; Compress-Archive -Path dist\\StreamGrid -DestinationPath dist\\StreamGrid-Windows.zip -Force\""
+    "tauri": "tauri",
+    "dev:desktop": "tauri dev",
+    "test": "node test/fuzz-crash-test.js && node test/sdp-optimization.test.js && node test/ip-rate-limit.test.js && node test/password-hash.test.js && node test/client-optimizations.test.js && node test/client-toast.test.js && node test/video-quality-config.test.js && node test/presence-notification.test.js && node test/modal-escape-backdrop.test.js && node test/user-nickname.test.js && node test/toolbar-utilities.test.js && node test/privacy-security-docs.test.js && node test/late-joiner-keyframe-transceiver.test.js && node test/webrtc-and-security-fixes.test.js && node test/desktop-bridge.test.js",
+    "test:rust": "powershell -Command \"$cargo = if (Get-Command cargo -ErrorAction SilentlyContinue) { 'cargo' } else { (Join-Path $env:USERPROFILE '.cargo\\bin\\cargo.exe') }; & $cargo test --manifest-path src-tauri/Cargo.toml\"",
+    "build-windows": "npx tauri build && powershell -Command \"New-Item -ItemType Directory -Force -Path dist | Out-Null; $exe = if (Test-Path 'src-tauri\\target\\release\\StreamGrid.exe') { 'src-tauri\\target\\release\\StreamGrid.exe' } else { 'src-tauri\\target\\release\\streamgrid.exe' }; Copy-Item $exe -Destination dist\\StreamGrid.exe -Force; Compress-Archive -Path dist\\StreamGrid.exe -DestinationPath dist\\StreamGrid-Windows.zip -Force\""
   },
   "dependencies": {
     "express": "^4.19.2",
     "socket.io": "^4.7.5"
   },
   "devDependencies": {
-    "@neutralinojs/neu": "^11.8.0",
-    "socket.io-client": "^4.8.1"
+    "@tauri-apps/cli": "^2.12.4",
+    "socket.io-client": "^4.8.1",
+    "ws": "^8.21.3"
   }
 }

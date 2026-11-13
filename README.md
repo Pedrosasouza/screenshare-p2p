@@ -22,7 +22,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/WebRTC-P2P%20Mesh-3399FF?style=flat-square&logo=webrtc" alt="WebRTC">
   <img src="https://img.shields.io/badge/Rust-WASAPI%20Loopback-DEA584?style=flat-square&logo=rust" alt="Rust">
-  <img src="https://img.shields.io/badge/Desktop-Neutralinojs%20v5.6-9b59b6?style=flat-square" alt="Neutralinojs">
+  <img src="https://img.shields.io/badge/Desktop-Tauri%20v2-FFC131?style=flat-square&logo=tauri&logoColor=black" alt="Tauri v2">
   <img src="https://img.shields.io/badge/Signaling-Node.js%20%2F%20Socket.io-339933?style=flat-square&logo=node.js" alt="Node.js">
   <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License">
 </p>
@@ -70,7 +70,7 @@ Devido às restrições de segurança e sandbox dos navegadores (`getDisplayMedi
 ### 2. Motor de Áudio Dedicado (Exclusivo Desktop / Rust)
 * **WASAPI Loopback com Filtro por Processo:** Captura direta da sessão de áudio do Windows (`IAudioClient`), permitindo filtrar fluxos a partir do identificador de processo (PID).
 * **Sem Dependência de Drivers Externos:** Não requer instalação ou configuração de softwares de cabos virtuais adicionais.
-* **Ciclo de Vida Vinculado:** O assistente de áudio em segundo plano (`streamgrid-audio-helper.exe`) é acoplado ao ciclo da aplicação, com encerramento automático ao fechar a janela principal.
+* **Ciclo de Vida Unificado:** O módulo WASAPI em Rust é compilado diretamente no executável principal do Tauri v2, com encerramento imediato da captura ao parar a transmissão ou fechar a janela (sem processos externos ou portas locais abertas).
 
 ### 3. Gerenciamento de Salas & Segurança
 * **Salas Públicas ou Privadas:** Criação por identificadores legíveis (`grid-xxxx-xxxx`) ou códigos customizados.
@@ -84,9 +84,9 @@ Devido às restrições de segurança e sandbox dos navegadores (`getDisplayMedi
 ```mermaid
 flowchart TD
     subgraph Host["💻 Host / Transmissor (Windows)"]
-        WASAPI["🦀 Audio Helper (Rust WASAPI)\n• Filtro de PID (Exclusão da chamada)\n• Captura via Loopback"]
-        DesktopApp["🖥️ StreamGrid App (Neutralinojs / Web)\n• WebRTC RTCPeerConnection\n• Web Audio API Mixer"]
-        WASAPI -- "Fluxo PCM Local\n(WebSocket ws://127.0.0.1:45454)" --> DesktopApp
+        WASAPI["🦀 Módulo WASAPI Integrado (Rust)\n• Filtro de PID (Exclusão da chamada)\n• Captura via Loopback"]
+        DesktopApp["🖥️ StreamGrid App (Tauri v2 / Web)\n• WebRTC RTCPeerConnection\n• Web Audio API Mixer"]
+        WASAPI -- "Fluxo PCM Interno\n(Tauri v2 IPC Channel f32le)" --> DesktopApp
     end
 
     subgraph Signaling["🌐 Servidor de Sinalização (Render / Node.js)"]
@@ -109,8 +109,8 @@ flowchart TD
    * *Motivação:* A topologia P2P direta evita a necessidade de um servidor central de mídia para retransmitir os fluxos de vídeo, reduzindo a infraestrutura de backend necessária para grupos pequenos e permitindo a comunicação direta entre os clientes.
 2. **Módulo em Rust com WASAPI vs. Drivers Virtuais:**
    * *Motivação:* A escolha de Rust permite combinar controle de baixo nível de memória com a biblioteca `windows-rs` para interagir diretamente com as APIs de sessão de áudio do Windows (WASAPI Loopback), viabilizando o filtro por processo sem depender de drivers de terceiros.
-3. **Neutralinojs vs. Electron:**
-   * *Motivação:* O Neutralinojs reaproveita o motor webview nativo já existente no sistema operacional (Edge WebView2 no Windows), reduzindo o tamanho final de distribuição e o consumo de recursos quando comparado ao empacotamento de um runtime Chromium dedicado.
+3. **Tauri v2 vs. Electron:**
+   * *Motivação:* O Tauri v2 combina backend nativo em Rust no mesmo executável com o motor WebView2 já presente no Windows, eliminando processos auxiliares separados, reduzindo o consumo de memória e o tamanho de distribuição em comparação a runtimes Chromium dedicados.
 
 ---
 
@@ -141,7 +141,7 @@ Acesse a interface no navegador em: `http://localhost:3000` (ou pelo endereço d
 
 As versões oficiais pré-compiladas para Windows estão disponíveis diretamente na página de lançamentos:
 * **Última Versão:** [GitHub Releases — StreamGrid](https://github.com/Pedrosasouza/screenshare-p2p/releases/latest)
-* **Arquivo Portátil:** Baixe o arquivo `StreamGrid-Windows.zip`, extraia em uma pasta de sua preferência e execute `StreamGrid-win_x64.exe`.
+* **Arquivo Portátil ou Instalador:** Baixe `StreamGrid-Windows.zip` (extraia e execute `StreamGrid.exe`) ou o instalador Windows gerado no release.
 * **Verificação de Integridade:** Cada versão inclui o arquivo `StreamGrid-Windows.zip.sha256` para conferência de hash SHA-256 (validação de integridade do arquivo baixado contra corrupção em trânsito).
 * **Aviso do Windows SmartScreen & Assinatura de Código:** Por ser um projeto open-source independente distribuído sem um certificado de assinatura Authenticode comercial pago da Microsoft, o Windows SmartScreen pode apresentar o aviso informativo *"O Windows protegeu o seu computador - Fornecedor desconhecido"*. Para abrir normalmente, clique em *"Mais informações"* e em seguida em *"Executar assim mesmo"*. Todos os pacotes são compilados publicamente a partir do código-fonte auditável via GitHub Actions com atestação de proveniência criptográfica.
 
@@ -155,7 +155,7 @@ Se preferir compilar localmente em vez de baixar o executável pré-compilado:
 npm run build-windows
 ```
 
-O artefato gerado estará em `dist/StreamGrid-Windows.zip`.
+O pacote portátil estará em `dist/StreamGrid-Windows.zip` e os instaladores em `src-tauri/target/release/bundle/`.
 
 ---
 
@@ -172,9 +172,9 @@ A suíte padrão executa:
 * **Otimização de SDP:** Valida a substituição correta de parâmetros para negociação de áudio e vídeo no WebRTC (`test/sdp-optimization.test.js`).
 * **Rate Limiting:** Testa o bloqueio temporário após tentativas consecutivas incorretas de senha (`test/ip-rate-limit.test.js`).
 
-Para validar especificamente o ciclo de vida e a persistência de tokens do assistente de áudio no Windows:
+Para validar os testes unitários do motor de áudio WASAPI em Rust (`src-tauri`):
 ```bash
-npm run test:helper
+npm run test:rust
 ```
 
 ---
