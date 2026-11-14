@@ -29,7 +29,29 @@ export function createDefaultRtcConfig() {
 let activeIceProvider = 'fallback';
 let iceServersExpiresAt = 0;
 let iceServersFetchPromise = null;
+let iceRefreshTimerId = null;
 export const rtcConfig = createDefaultRtcConfig();
+
+export function stopIceRefreshTimer() {
+    if (iceRefreshTimerId !== null) {
+        clearTimeout(iceRefreshTimerId);
+        iceRefreshTimerId = null;
+    }
+}
+
+export function scheduleIceRefreshTimer(serverUrl = '', options = {}) {
+    stopIceRefreshTimer();
+    const now = Date.now();
+    const delayMs = iceServersExpiresAt > now ? Math.max(15000, iceServersExpiresAt - now) : 240000;
+    iceRefreshTimerId = setTimeout(async () => {
+        iceRefreshTimerId = null;
+        await refreshIceServers(serverUrl, { ...options, force: true });
+        scheduleIceRefreshTimer(serverUrl, options);
+    }, delayMs);
+    if (iceRefreshTimerId && typeof iceRefreshTimerId.unref === 'function') {
+        iceRefreshTimerId.unref();
+    }
+}
 
 export function getActiveIceProvider() {
     return activeIceProvider;

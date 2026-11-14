@@ -168,7 +168,7 @@ export function showTapToUnmuteBadge(tile, video) {
         if (slider) {
             slider.value = String(video.volume || 1);
         }
-        const muteBtn = tile.querySelector('.tile-controls-overlay .btn-icon');
+        const muteBtn = tile.querySelector('.tile-controls-overlay .btn-mute-toggle') || tile.querySelector('.tile-controls-overlay .btn-icon');
         if (muteBtn) muteBtn.innerHTML = '<i class="fa-solid fa-volume-high"></i>';
     };
     tile._cleanupTapUnmute = cleanup;

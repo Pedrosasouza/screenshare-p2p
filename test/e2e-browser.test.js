@@ -360,8 +360,78 @@ async function runTests() {
         await cdp.evalInSession(tab2.sessionId, `document.getElementById('btnCloseStatsModal')?.click()`);
         console.log('\x1b[32mPASSOU\x1b[0m');
 
-        // Step 6: Zero erros de console/CSP/rede
-        process.stdout.write('  [E2E] T6: Zero erros de console, exceções ou violações CSP/rede em ambas as abas ... ');
+        // Step 6: Transmissão WebRTC real (Tab1 -> Tab2), parar e reiniciar compartilhamento
+        process.stdout.write('  [E2E] T6: WebRTC P2P envia vídeo real, encerra e reinicia compartilhamento entre Tab1 e Tab2 ... ');
+        await cdp.evalInSession(tab1.sessionId, `
+            (() => {
+                if (!navigator.mediaDevices) navigator.mediaDevices = {};
+                navigator.mediaDevices.getDisplayMedia = async () => {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = 320;
+                    canvas.height = 180;
+                    const ctx = canvas.getContext('2d');
+                    let frame = 0;
+                    const draw = () => {
+                        frame++;
+                        ctx.fillStyle = frame % 2 === 0 ? '#2563eb' : '#10b981';
+                        ctx.fillRect(0, 0, canvas.width, canvas.height);
+                        ctx.fillStyle = '#ffffff';
+                        ctx.fillRect((frame * 8) % 280, 70, 32, 32);
+                    };
+                    draw();
+                    const timer = setInterval(draw, 66);
+                    const stream = canvas.captureStream(15);
+                    stream.getTracks().forEach((t) => {
+                        const origStop = t.stop.bind(t);
+                        t.stop = () => { clearInterval(timer); origStop(); };
+                    });
+                    return stream;
+                };
+                return true;
+            })()
+        `);
+
+        const startShareInTab1 = async () => {
+            await cdp.evalInSession(tab1.sessionId, `
+                (() => {
+                    document.getElementById('btnStartShare')?.click();
+                    const noneRadio = document.getElementById('audioSourceNone');
+                    if (noneRadio) noneRadio.checked = true;
+                    document.getElementById('btnConfirmStartShare')?.click();
+                    return true;
+                })()
+            `);
+        };
+
+        // 1º compartilhamento
+        await startShareInTab1();
+        await waitFor(() => cdp.evalInSession(tab2.sessionId, `
+            (() => {
+                const v = document.querySelector('#streamGrid .stream-tile:not(#localStreamTile) video');
+                return v && v.videoWidth > 0 ? { w: v.videoWidth, h: v.videoHeight } : null;
+            })()
+        `), { timeoutMs: 15000, label: 'Tab2 receber 1º vídeo WebRTC' });
+
+        // Parar compartilhamento
+        await cdp.evalInSession(tab1.sessionId, `document.getElementById('btnStopShare')?.click()`);
+        await waitFor(() => cdp.evalInSession(tab2.sessionId, `
+            document.querySelectorAll('#streamGrid .stream-tile:not(#localStreamTile)').length === 0
+        `), { timeoutMs: 10000, label: 'Tab2 remover tile remoto ao parar share' });
+
+        // 2º compartilhamento (re-share na mesma conexão P2P)
+        await startShareInTab1();
+        await waitFor(() => cdp.evalInSession(tab2.sessionId, `
+            (() => {
+                const v = document.querySelector('#streamGrid .stream-tile:not(#localStreamTile) video');
+                return v && v.videoWidth > 0 ? { w: v.videoWidth, h: v.videoHeight } : null;
+            })()
+        `), { timeoutMs: 15000, label: 'Tab2 receber 2º vídeo WebRTC após reiniciar share' });
+
+        await cdp.evalInSession(tab1.sessionId, `document.getElementById('btnStopShare')?.click()`);
+        console.log('\x1b[32mPASSOU\x1b[0m');
+
+        // Step 7: Zero erros de console/CSP/rede
+        process.stdout.write('  [E2E] T7: Zero erros de console, exceções ou violações CSP/rede em ambas as abas ... ');
         const allErrors = [
             ...tab1.errors,
             ...tab2.errors,
@@ -372,7 +442,7 @@ async function runTests() {
         console.log('\x1b[32mPASSOU\x1b[0m');
 
         console.log('\n===============================================================');
-        console.log('  ✅ Todos os 6 testes E2E em navegador real passaram!');
+        console.log('  ✅ Todos os 7 testes E2E em navegador real passaram!');
         console.log('===============================================================\n');
     } catch (err) {
         for (const t of tabs) {

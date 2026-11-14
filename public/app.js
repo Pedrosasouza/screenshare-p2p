@@ -42,6 +42,8 @@ import {
 import {
     rtcConfig,
     refreshIceServers,
+    scheduleIceRefreshTimer,
+    stopIceRefreshTimer,
     getActiveIceProvider,
     getIceProviderDisplayLabel
 } from './js/modules/ice-config.js';
@@ -102,8 +104,14 @@ if (typeof setSignalingStatus === 'function') {
 }
 scheduleColdStartNotice();
 
+// Map of remote peers: peerId -> { pc, stream, tileEl, iceCandidateQueue, isRemoteDescriptionSet }
+const peers = new Map();
+const activeRoomPeers = new Set();
+const recentlyRemovedPeers = new Map();
+let hasRoomMembershipSnapshot = false;
+
 if (typeof refreshIceServers === 'function') {
-    refreshIceServers(SERVER_URL);
+    refreshIceServers(SERVER_URL, { peers });
 }
 
 // Application State
@@ -131,9 +139,6 @@ let roomId = '';
 let pendingRoomJoin = null;
 let myId = '';
 let localStream = null;
-
-// Map of remote peers: peerId -> { pc, stream, tileEl, iceCandidateQueue, isRemoteDescriptionSet }
-const peers = new Map();
 
 // DOM Elements - Room Modal & Views
 const roomModal = document.getElementById('roomModal');
@@ -548,21 +553,19 @@ window.addEventListener('DOMContentLoaded', () => {
     }
 });
 
-function cleanupRoomState() {
+function cleanupRoomState(options = {}) {
+    const silentShareStop = options && options.silent !== undefined ? Boolean(options.silent) : true;
     console.log('[Room] Cleaning up previous room peer connections and stream tiles...');
-    
-    // 1. Stop local screen share if active
+
+    // 1. Stop local screen share if active (silently on room switch to avoid leaking offers/stream-state into new room)
     if (localStream) {
-        stopScreenShare();
+        stopScreenShare({ silent: silentShareStop });
     }
 
     // 2. Terminate and cleanup all active WebRTC peer connections from old room
     for (const [peerId, peerObj] of peers.entries()) {
         try {
             clearPeerTimers(peerObj);
-            if (peerObj.stream) {
-                peerObj.stream.getTracks().forEach(track => track.stop());
-            }
             if (peerObj.pc) {
                 peerObj.pc.close();
             }
@@ -574,6 +577,8 @@ function cleanupRoomState() {
         }
     }
     peers.clear();
+    if (typeof activeRoomPeers !== 'undefined') activeRoomPeers.clear();
+    if (typeof recentlyRemovedPeers !== 'undefined') recentlyRemovedPeers.clear();
     remoteActiveStreams.clear();
     updateEchoWarningVisibility();
 
@@ -688,7 +693,10 @@ socket.on('connect', () => {
         setSignalingStatus('connected');
     }
     if (typeof refreshIceServers === 'function') {
-        refreshIceServers(SERVER_URL);
+        refreshIceServers(SERVER_URL, { peers });
+        if (typeof scheduleIceRefreshTimer === 'function') {
+            scheduleIceRefreshTimer(SERVER_URL, { peers });
+        }
     }
     console.log('[Socket] Connected to server. Socket ID:', myId);
     if (typeof wasSocketDisconnected !== 'undefined' && wasSocketDisconnected) {
@@ -796,9 +804,12 @@ socket.on('room-users', async ({ users, userNames, activeStreams, socketId, memb
     myId = socketId;
     if (typeof refreshIceServers === 'function' && typeof SERVER_URL !== 'undefined') {
         await Promise.race([
-            refreshIceServers(SERVER_URL),
+            refreshIceServers(SERVER_URL, { peers }),
             new Promise((resolve) => setTimeout(resolve, 1200))
         ]);
+        if (typeof scheduleIceRefreshTimer === 'function') {
+            scheduleIceRefreshTimer(SERVER_URL, { peers });
+        }
     }
     if (pendingRoomJoin) {
         const target = pendingRoomJoin;
@@ -839,6 +850,14 @@ socket.on('room-users', async ({ users, userNames, activeStreams, socketId, memb
     updateEchoWarningVisibility();
 
     const activeUserSet = new Set((Array.isArray(users) ? users : []).filter(id => id && id !== myId));
+    if (typeof hasRoomMembershipSnapshot !== 'undefined') hasRoomMembershipSnapshot = true;
+    if (typeof activeRoomPeers !== 'undefined') {
+        activeRoomPeers.clear();
+        activeUserSet.forEach((id) => activeRoomPeers.add(id));
+    }
+    if (typeof recentlyRemovedPeers !== 'undefined') {
+        activeUserSet.forEach((id) => recentlyRemovedPeers.delete(id));
+    }
 
     // Reconcile stale peers that left while disconnected (even without pendingRoomJoin)
     for (const existingPeerId of Array.from(peers.keys())) {
@@ -881,13 +900,15 @@ socket.on('room-users', async ({ users, userNames, activeStreams, socketId, memb
 socket.on('user-joined', async ({ socketId, userName, memberCount }) => {
     if (!socketId || (myId && socketId === myId)) return;
     console.log('[Socket] User joined:', socketId, userName);
-    const pc = getOrCreatePeerConnection(socketId);
-    const peerObj = peers.get(socketId);
-    if (userName) updatePeerUserName(socketId, userName);
     const displayName = userName || 'Um participante';
     showToast(`${displayName} entrou na sala.`, 'info');
     playPresenceChime('join');
     updateMemberCount(memberCount);
+    if (typeof activeRoomPeers !== 'undefined') activeRoomPeers.add(socketId);
+    if (typeof recentlyRemovedPeers !== 'undefined') recentlyRemovedPeers.delete(socketId);
+    const pc = getOrCreatePeerConnection(socketId);
+    const peerObj = peers.get(socketId);
+    if (userName) updatePeerUserName(socketId, userName);
 
     // Sincronização Automática (Late-Joiner Sync):
     // Se eu já estiver compartilhando a tela, envio oferta com minha transmissão ao novo usuário!
@@ -921,6 +942,10 @@ socket.on('user-left', ({ socketId, memberCount }) => {
     const displayName = (peerObj && peerObj.userName) || 'Um participante';
     showToast(`${displayName} saiu da sala.`, 'info');
     playPresenceChime('leave');
+    if (typeof activeRoomPeers !== 'undefined') activeRoomPeers.delete(socketId);
+    if (typeof recentlyRemovedPeers !== 'undefined' && socketId) {
+        recentlyRemovedPeers.set(socketId, Date.now());
+    }
     removePeerConnection(socketId);
     updateMemberCount(memberCount);
     if (localStream) {
@@ -955,16 +980,21 @@ async function sendOffer(peerId) {
 
     if (!isPeerConnectionActive(peerId, peerObj, pc)) return;
 
-    // Guard: Prevent concurrent offer collisions (glare) and offers during unstable signaling states
+    // Guard: Queue pendingOffer instead of silently dropping renegotiations during glare/unstable states
     if (peerObj.makingOffer || pc.signalingState !== 'stable') {
-        console.warn(`[WebRTC] Skipping offer dispatch to ${peerId} (makingOffer: ${peerObj.makingOffer}, signalingState: ${pc.signalingState})`);
+        peerObj.pendingOffer = true;
+        console.warn(`[WebRTC] Enfileirando oferta pendente para ${peerId} (makingOffer: ${peerObj.makingOffer}, signalingState: ${pc.signalingState})`);
         return;
     }
 
     try {
         peerObj.makingOffer = true;
+        peerObj.pendingOffer = false;
         let offer = await pc.createOffer();
-        if (!isPeerConnectionActive(peerId, peerObj, pc) || pc.signalingState !== 'stable') return;
+        if (!isPeerConnectionActive(peerId, peerObj, pc) || pc.signalingState !== 'stable') {
+            peerObj.pendingOffer = true;
+            return;
+        }
         offer = new RTCSessionDescription({
             type: offer.type,
             sdp: optimizeSDP(offer.sdp)
@@ -976,6 +1006,10 @@ async function sendOffer(peerId) {
         console.error('[WebRTC] Error sending offer to peer:', peerId, err);
     } finally {
         peerObj.makingOffer = false;
+        if (peerObj.pendingOffer && isPeerConnectionActive(peerId, peerObj, pc) && pc.signalingState === 'stable') {
+            peerObj.pendingOffer = false;
+            Promise.resolve().then(() => sendOffer(peerId));
+        }
     }
 }
 
@@ -986,6 +1020,19 @@ socket.on('signal', (payload) => {
     if (!senderId || typeof senderId !== 'string') return;
     if (!signal || typeof signal !== 'object') return;
     if (myId && senderId === myId) return;
+
+    if (typeof recentlyRemovedPeers !== 'undefined' && recentlyRemovedPeers.has(senderId)) {
+        return;
+    }
+    if (
+        typeof hasRoomMembershipSnapshot !== 'undefined' &&
+        hasRoomMembershipSnapshot &&
+        !peers.has(senderId) &&
+        typeof activeRoomPeers !== 'undefined' &&
+        !activeRoomPeers.has(senderId)
+    ) {
+        return;
+    }
 
     if (signal.type === 'request-keyframe' && !peers.has(senderId)) {
         return;
@@ -1010,6 +1057,7 @@ socket.on('signal', (payload) => {
 
             if (offerCollision) {
                 console.log('[WebRTC] Glare collision: Polite peer rolling back for:', senderId);
+                peerObj.iceCandidateQueue = [];
                 try {
                     await pc.setLocalDescription({ type: 'rollback' });
                 } catch (e) {
@@ -1044,7 +1092,7 @@ socket.on('signal', (payload) => {
             if (!isPeerConnectionActive(senderId, peerObj, pc)) return;
 
             // If I am broadcasting, ensure my tracks are attached to this peer connection
-            if (localStream) {
+            if (localStream && typeof addLocalTracksToPC === 'function') {
                 addLocalTracksToPC(pc);
             }
 
@@ -1058,8 +1106,14 @@ socket.on('signal', (payload) => {
             if (!isPeerConnectionActive(senderId, peerObj, pc)) return;
             socket.emit('signal', { targetId: senderId, signal: pc.localDescription });
 
+            if (peerObj.pendingOffer && pc.signalingState === 'stable' && typeof sendOffer === 'function') {
+                peerObj.pendingOffer = false;
+                Promise.resolve().then(() => sendOffer(senderId));
+            }
+
         } else if (signal.type === 'answer') {
             if (pc.signalingState === 'have-local-offer') {
+                peerObj.ignoreOffer = false;
                 await pc.setRemoteDescription(new RTCSessionDescription(signal));
                 if (!isPeerConnectionActive(senderId, peerObj, pc)) return;
                 peerObj.isRemoteDescriptionSet = true;
@@ -1069,8 +1123,13 @@ socket.on('signal', (payload) => {
                     const cand = peerObj.iceCandidateQueue.shift();
                     try { await pc.addIceCandidate(cand); } catch(e) {}
                 }
+                if (peerObj.pendingOffer && pc.signalingState === 'stable' && typeof sendOffer === 'function') {
+                    peerObj.pendingOffer = false;
+                    Promise.resolve().then(() => sendOffer(senderId));
+                }
             }
         } else if (signal.candidate) {
+            if (peerObj.ignoreOffer) return;
             const candidate = new RTCIceCandidate(signal.candidate);
             if (pc.remoteDescription && pc.remoteDescription.type && peerObj.isRemoteDescriptionSet) {
                 try {
@@ -1109,6 +1168,9 @@ const remoteActiveStreams = new Set();
 socket.on('stream-state', ({ senderId, state }) => {
     if (state === 'started') {
         remoteActiveStreams.add(senderId);
+        if (typeof ensureRemoteStreamTile === 'function') {
+            ensureRemoteStreamTile(senderId);
+        }
     } else {
         remoteActiveStreams.delete(senderId);
         removeStreamTile(senderId);
@@ -1219,10 +1281,29 @@ function getOrCreatePeerConnection(peerId) {
         isRemoteDescriptionSet: false,
         isPolite,
         makingOffer: false,
+        pendingOffer: false,
         ignoreOffer: false,
+        _iceRestartAttempts: 0,
         _signalChain: Promise.resolve()
     };
     peers.set(peerId, peerObj);
+
+    const scheduleIceRestart = () => {
+        if (peerObj._iceRestartTimeout || (peerObj._iceRestartAttempts || 0) >= 3) return;
+        const delayMs = 2000 * Math.pow(2, peerObj._iceRestartAttempts || 0);
+        peerObj._iceRestartTimeout = setTimeout(() => {
+            peerObj._iceRestartTimeout = null;
+            if (!isPeerConnectionActive(peerId, peerObj, pc)) return;
+            const iceFailed = pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected';
+            const connFailed = pc.connectionState === 'failed' || pc.connectionState === 'disconnected';
+            if (iceFailed || connFailed) {
+                peerObj._iceRestartAttempts = (peerObj._iceRestartAttempts || 0) + 1;
+                console.log(`[WebRTC] Triggering ICE restart #${peerObj._iceRestartAttempts} for: ${peerId}`);
+                if (typeof pc.restartIce === 'function') pc.restartIce();
+                sendOffer(peerId);
+            }
+        }, delayMs);
+    };
 
     // ICE Candidate Handler
     pc.onicecandidate = (event) => {
@@ -1328,26 +1409,32 @@ function getOrCreatePeerConnection(peerId) {
     pc.oniceconnectionstatechange = () => {
         console.log(`[WebRTC] ICE state (${peerId}):`, pc.iceConnectionState);
         if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
-            if (peerObj._iceRestartTimeout) clearTimeout(peerObj._iceRestartTimeout);
-            peerObj._iceRestartTimeout = setTimeout(() => {
-                peerObj._iceRestartTimeout = null;
-                if (!isPeerConnectionActive(peerId, peerObj, pc)) return;
-                if ((pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') && localStream) {
-                    console.log(`[WebRTC] Triggering active ICE restart for: ${peerId}`);
-                    if (pc.restartIce) pc.restartIce();
-                    sendOffer(peerId);
-                }
-            }, 2000);
+            scheduleIceRestart();
             if (pc.iceConnectionState === 'failed') {
                 setPeerConnectionStatus(peerId, 'failed', 'Falha de conexão P2P: Firewall ou rede restrita bloqueando tráfego.');
             }
         } else if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+            peerObj._iceRestartAttempts = 0;
             if (peerObj._iceRestartTimeout) {
                 clearTimeout(peerObj._iceRestartTimeout);
                 peerObj._iceRestartTimeout = null;
             }
             setPeerConnectionStatus(peerId, 'ok');
             logPeerConnectionTelemetry(peerId, pc);
+        }
+    };
+
+    pc.onconnectionstatechange = () => {
+        if (pc.connectionState === 'failed') {
+            scheduleIceRestart();
+            setPeerConnectionStatus(peerId, 'failed', 'Falha de transporte P2P (DTLS/ICE).');
+        } else if (pc.connectionState === 'connected') {
+            peerObj._iceRestartAttempts = 0;
+            if (peerObj._iceRestartTimeout) {
+                clearTimeout(peerObj._iceRestartTimeout);
+                peerObj._iceRestartTimeout = null;
+            }
+            setPeerConnectionStatus(peerId, 'ok');
         }
     };
 
@@ -1408,6 +1495,44 @@ function removePeerConnection(peerId) {
     }
 }
 
+function ensureRemoteStreamTile(peerId) {
+    const peerObj = peers.get(peerId);
+    if (!peerObj) return;
+    if (!peerObj.stream) {
+        peerObj.stream = new MediaStream();
+    }
+    if (peerObj.pc && typeof peerObj.pc.getReceivers === 'function') {
+        peerObj.pc.getReceivers().forEach((receiver) => {
+            const track = receiver && receiver.track;
+            if (!track || track.readyState === 'ended') return;
+            peerObj.stream.getTracks().filter(t => t.kind === track.kind && t.id !== track.id).forEach(oldTrack => {
+                try { peerObj.stream.removeTrack(oldTrack); } catch (e) {}
+            });
+            if (!peerObj.stream.getTracks().some(t => t.id === track.id)) {
+                peerObj.stream.addTrack(track);
+            }
+        });
+    }
+    const hasVideo = peerObj.stream.getVideoTracks().length > 0;
+    if (!peerObj.tileEl && hasVideo) {
+        const label = peerObj.userName || `Participante ${peerId.substr(0, 5)}`;
+        peerObj.tileEl = createStreamTile(peerId, peerObj.stream, label, false);
+        streamGrid.appendChild(peerObj.tileEl);
+    }
+    if (peerObj.tileEl) {
+        const videoEl = typeof peerObj.tileEl.querySelector === 'function'
+            ? peerObj.tileEl.querySelector('video')
+            : null;
+        if (videoEl) {
+            if (videoEl.srcObject !== peerObj.stream) {
+                videoEl.srcObject = peerObj.stream;
+            }
+            startTilePlayback(peerObj.tileEl, videoEl);
+        }
+    }
+    updateGridState();
+}
+
 function removeStreamTile(peerId) {
     if (peers.has(peerId)) {
         const peerObj = peers.get(peerId);
@@ -1419,9 +1544,7 @@ function removeStreamTile(peerId) {
             disposeTileElement(peerObj.tileEl);
             peerObj.tileEl = null;
         }
-        if (peerObj.stream) {
-            peerObj.stream.getTracks().forEach(t => t.stop());
-        }
+        // Keep remote receiver tracks alive so subsequent replaceTrack renegotiations work
         peerObj.stream = new MediaStream();
         updateGridState();
         if (typeof updateBackgroundTracksOptimization === 'function') {
@@ -1437,15 +1560,23 @@ function addLocalTracksToPC(pc) {
     localStream.getTracks().forEach(track => {
         // Reutiliza sender existente (ativo ou silenciado com track null) sem misturar audio/video
         let existingSender = null;
+        let matchedTransceiver = null;
         if (transceivers) {
-            const matchedTransceiver = transceivers.find(t => {
+            matchedTransceiver = transceivers.find(t => {
                 const s = t && t.sender;
                 if (!s) return false;
                 if (s.track) return s.track.id === track.id || s.track.kind === track.kind;
                 const receiverKind = t.receiver && t.receiver.track && t.receiver.track.kind;
                 return (s._kind && s._kind === track.kind) || (receiverKind === track.kind);
-            });
-            existingSender = matchedTransceiver ? matchedTransceiver.sender : null;
+            }) || null;
+            if (matchedTransceiver) {
+                existingSender = matchedTransceiver.sender;
+                if (matchedTransceiver.direction === 'recvonly') {
+                    matchedTransceiver.direction = 'sendrecv';
+                } else if (matchedTransceiver.direction === 'inactive') {
+                    matchedTransceiver.direction = 'sendonly';
+                }
+            }
         }
         if (!existingSender) {
             existingSender = senders.find(s =>
@@ -2537,7 +2668,8 @@ async function startScreenShare(audioMode = 'exclude_discord', targetPid = null,
 // Stop Screen Share
 btnStopShare.addEventListener('click', stopScreenShare);
 
-function stopScreenShare() {
+function stopScreenShare(options = {}) {
+    const silent = Boolean(options && options.silent === true);
     stopQualityMonitor();
     stopAppAudioCapture();
 
@@ -2546,19 +2678,31 @@ function stopScreenShare() {
         localStream = null;
     }
 
-    // Clean up transceivers/senders across all active peer connections
-    for (const [peerId, peerObj] of peers.entries()) {
-        if (peerObj && peerObj.pc) {
-            peerObj.pc.getSenders().forEach(sender => {
-                try {
-                    if (sender.track && !sender._kind) {
-                        sender._kind = sender.track.kind;
-                    }
-                    Promise.resolve(sender.replaceTrack(null)).catch(() => {});
-                } catch (e) {}
-            });
-            // Renegotiate so peers drop the remote tile cleanly
-            sendOffer(peerId);
+    if (!silent) {
+        // Clean up transceivers/senders across all active peer connections
+        for (const [peerId, peerObj] of peers.entries()) {
+            if (peerObj && peerObj.pc) {
+                const transceivers = typeof peerObj.pc.getTransceivers === 'function' ? peerObj.pc.getTransceivers() : null;
+                if (transceivers) {
+                    transceivers.forEach(t => {
+                        if (t && t.sender && t.sender.track) {
+                            t.sender._kind = t.sender.track.kind;
+                            if (t.direction === 'sendrecv') t.direction = 'recvonly';
+                            else if (t.direction === 'sendonly') t.direction = 'inactive';
+                        }
+                    });
+                }
+                peerObj.pc.getSenders().forEach(sender => {
+                    try {
+                        if (sender.track && !sender._kind) {
+                            sender._kind = sender.track.kind;
+                        }
+                        Promise.resolve(sender.replaceTrack(null)).catch(() => {});
+                    } catch (e) {}
+                });
+                // Renegotiate so peers drop the remote tile cleanly
+                sendOffer(peerId);
+            }
         }
     }
 
@@ -2574,7 +2718,9 @@ function stopScreenShare() {
     btnQualityToggle.hidden = true;
     updateGridState();
 
-    socket.emit('stream-state', { roomId, state: 'stopped' });
+    if (!silent) {
+        socket.emit('stream-state', { roomId, state: 'stopped' });
+    }
 }
 
 function startTilePlayback(tile, videoEl) {
@@ -2588,6 +2734,9 @@ function startTilePlayback(tile, videoEl) {
                 console.warn('[Playback] Autoplay blocked, forcing muted play for mobile:', e);
                 video.muted = true;
                 video.setAttribute('muted', '');
+                if (typeof tile._syncAudioUi === 'function') {
+                    tile._syncAudioUi();
+                }
                 Promise.resolve(video.play()).catch((err) => console.error('[Playback] Video play failed completely:', err));
                 showTapToUnmuteBadge(tile, video);
             }
@@ -2640,24 +2789,30 @@ function createStreamTile(id, stream, labelText, isMuted) {
 
         const muteBtn = document.createElement('button');
         muteBtn.type = 'button';
-        muteBtn.className = 'btn-icon';
+        muteBtn.className = 'btn-icon btn-mute-toggle';
         muteBtn.title = 'Silenciar / Ativar Som';
         if (typeof muteBtn.setAttribute === 'function') {
             muteBtn.setAttribute('aria-label', 'Silenciar / Ativar Som');
         }
         muteBtn.style.width = '32px';
         muteBtn.style.height = '32px';
-        muteBtn.innerHTML = '<i class="fa-solid fa-volume-high"></i>';
 
         const slider = document.createElement('input');
         slider.type = 'range';
         slider.min = '0';
         slider.max = '1';
         slider.step = '0.05';
-        slider.value = '1';
         if (typeof slider.setAttribute === 'function') {
             slider.setAttribute('aria-label', 'Volume');
         }
+
+        const syncAudioUi = () => {
+            const isCurrentlyMuted = Boolean(video.muted || video.volume === 0);
+            slider.value = isCurrentlyMuted ? '0' : String(video.volume > 0 ? video.volume : lastNonZeroVolume);
+            muteBtn.innerHTML = isCurrentlyMuted ? '<i class="fa-solid fa-volume-xmark"></i>' : '<i class="fa-solid fa-volume-high"></i>';
+        };
+        tile._syncAudioUi = syncAudioUi;
+        syncAudioUi();
 
         slider.addEventListener('input', (e) => {
             const val = parseFloat(e.target.value);
@@ -2817,4 +2972,23 @@ window.addEventListener('keydown', (e) => {
         }
     }
 });
+
+function teardownClientSession() {
+    try {
+        if (typeof stopIceRefreshTimer === 'function') stopIceRefreshTimer();
+        stopQualityMonitor();
+        if (statsUpdateInterval) {
+            clearInterval(statsUpdateInterval);
+            statsUpdateInterval = null;
+        }
+        cleanupRoomState({ silent: true });
+        if (socket && socket.connected) {
+            socket.disconnect();
+        }
+    } catch (_) {}
+}
+
+if (typeof window !== 'undefined') {
+    window.addEventListener('pagehide', teardownClientSession);
+}
 
