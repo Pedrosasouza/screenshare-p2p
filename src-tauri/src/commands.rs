@@ -122,6 +122,7 @@ impl AudioCaptureState {
     pub fn clear_session_if_generation(&self, gen: u64) {
         let mut guard = self.lock_inner();
         if guard.generation == gen {
+            guard.generation = guard.generation.wrapping_add(1);
             guard.retire_current();
         }
     }
@@ -508,6 +509,31 @@ mod tests {
                 !timed_out,
                 "wait_for_exit_signals deve retornar false após timeout sem travar"
             );
+        });
+    }
+
+    #[test]
+    fn clear_session_if_generation_before_commit_rejects_commit_and_aborts_forward_task() {
+        tauri::async_runtime::block_on(async {
+            let state = AudioCaptureState::default();
+            let stop1 = Arc::new(AtomicBool::new(false));
+            let exit1 = CaptureExitSignal::default();
+            let (gen1, _) = state.begin_session(stop1.clone(), exit1.clone()).unwrap();
+
+            // Thread de captura falha cedo e limpa a geração antes de commit_session
+            state.clear_session_if_generation(gen1);
+
+            let dropped1 = Arc::new(AtomicBool::new(false));
+            let task1 = spawn_cancellable_dummy(dropped1.clone());
+            let commit_res = state.commit_session(gen1, stop1.clone(), task1, Some(exit1));
+            assert!(
+                commit_res.is_err(),
+                "commit_session deve falhar quando clear_session_if_generation já retirou a geração"
+            );
+
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert!(stop1.load(Ordering::Acquire));
+            assert!(dropped1.load(Ordering::Relaxed));
         });
     }
 }

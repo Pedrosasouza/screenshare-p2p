@@ -7,6 +7,9 @@ let activeAudioWorkletNode = null;
 let helperAudioDestination = null;
 let desktopCaptureGeneration = 0;
 let captureStoppedUnlisten = null;
+let helperSuspendPromise = null;
+let latestStartGeneration = 0;
+let latestStopGeneration = 0;
 const audioWorkletLoadedContexts = new WeakSet();
 
 export function isDesktopApp() {
@@ -34,6 +37,16 @@ export function forwardPcmBufferToWorklet(arrayBuffer) {
 }
 
 export async function prepareHelperAudioWorklet(expectedGeneration = desktopCaptureGeneration) {
+    if (helperSuspendPromise) {
+        try {
+            await helperSuspendPromise;
+        } catch (e) {}
+    }
+
+    if (expectedGeneration !== desktopCaptureGeneration) {
+        return;
+    }
+
     if (!helperAudioContext || helperAudioContext.state === 'closed') {
         helperAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
     } else if (helperAudioContext.state === 'suspended') {
@@ -136,6 +149,7 @@ export async function startDesktopCaptureWith(startFn) {
     }
 
     const captureGen = ++desktopCaptureGeneration;
+    latestStartGeneration = captureGen;
 
     try {
         await prepareHelperAudioWorklet(captureGen);
@@ -150,6 +164,11 @@ export async function startDesktopCaptureWith(startFn) {
         });
 
         if (captureGen !== desktopCaptureGeneration) {
+            if (latestStopGeneration > captureGen && latestStartGeneration <= captureGen) {
+                if (isDesktopApp() && window.StreamGridDesktop) {
+                    window.StreamGridDesktop.stopAppAudioCapture().catch(() => {});
+                }
+            }
             throw new Error('Captura de áudio cancelada durante a inicialização.');
         }
 
@@ -185,6 +204,7 @@ export async function startExcludeDiscordCapture() {
 
 export function stopAppAudioCapture() {
     desktopCaptureGeneration += 1;
+    latestStopGeneration = desktopCaptureGeneration;
     if (isDesktopApp() && window.StreamGridDesktop) {
         window.StreamGridDesktop.stopAppAudioCapture().catch(() => {});
     }
@@ -196,7 +216,12 @@ export function stopAppAudioCapture() {
         activeAudioWorkletNode = null;
     }
     if (helperAudioContext && helperAudioContext.state !== 'closed') {
-        helperAudioContext.suspend().catch(() => {});
+        const suspendOp = Promise.resolve(helperAudioContext.suspend()).catch(() => {});
+        helperSuspendPromise = suspendOp.finally(() => {
+            if (helperSuspendPromise === suspendOp) {
+                helperSuspendPromise = null;
+            }
+        });
     }
 }
 

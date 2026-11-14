@@ -703,9 +703,295 @@ async function runTests() {
         console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
     }
 
+    // T10: room-users durante await de refreshIceServers não descarta sinais nem apaga user-joined/stream-state concorrentes
+    process.stdout.write('  [Teste] T10: room-users aplica snapshot antes do await de ICE e preserva eventos concorrentes ... ');
+    try {
+        let resolveIceGate = null;
+        const iceGate = new Promise((r) => { resolveIceGate = r; });
+
+        class MockPC {
+            constructor() {
+                this.signalingState = 'stable';
+                this.connectionState = 'connected';
+                this.remoteDescription = null;
+                this.localDescription = null;
+            }
+            async setRemoteDescription(d) { this.remoteDescription = d; }
+            async createAnswer() { return { type: 'answer', sdp: 'v=0\r\nans' }; }
+            async setLocalDescription(d) { this.localDescription = d; }
+            close() { this.signalingState = 'closed'; this.connectionState = 'closed'; }
+        }
+
+        const socketHandlers = {};
+        const peers = new Map([
+            ['old-peer', { pc: new MockPC(), stream: null, tileEl: null }]
+        ]);
+        const activeRoomPeers = new Set(['old-peer']);
+        const recentlyRemovedPeers = new Map();
+        const remoteActiveStreams = new Set(['old-peer']);
+
+        const sandbox = {
+            Map,
+            Set,
+            Array,
+            Boolean,
+            Date,
+            Promise,
+            encodeURIComponent,
+            setTimeout,
+            clearTimeout,
+            SERVER_URL: 'https://screenshare-p2p.onrender.com',
+            RTCPeerConnection: MockPC,
+            RTCSessionDescription: class { constructor(d) { Object.assign(this, d); } },
+            RTCIceCandidate: class { constructor(d) { Object.assign(this, d); } },
+            MediaStream: class { constructor() { this._t = []; } getTracks() { return this._t; } getVideoTracks() { return []; } },
+            rtcConfig: {},
+            myId: 'sock-old',
+            roomId: 'sala-antiga',
+            currentRoomPassword: '',
+            currentUserName: 'Pedro',
+            pendingRoomJoin: { roomId: 'sala-nova', password: '', userName: 'Pedro' },
+            hasRoomMembershipSnapshot: true,
+            lastJoinedSocketId: 'sock-old',
+            roomUsersGeneration: 0,
+            localStream: null,
+            peers,
+            activeRoomPeers,
+            recentlyRemovedPeers,
+            remoteActiveStreams,
+            STORAGE_KEY: 'streamgrid_last_room',
+            displayRoomId: { textContent: '', appendChild() {} },
+            memberCountText: { textContent: '' },
+            streamGrid: { querySelectorAll: () => [], appendChild() {} },
+            document: { getElementById: () => null },
+            btnStartShare: { hidden: false },
+            btnStopShare: { hidden: true },
+            btnQualityToggle: { hidden: true },
+            localStorage: { setItem() {}, removeItem() {} },
+            window: { location: { protocol: 'http:', pathname: '/' }, history: { pushState() {} } },
+            socket: {
+                id: 'sock-old',
+                on(ev, fn) { socketHandlers[ev] = fn; },
+                emit() {}
+            },
+            console: { log: () => {}, warn: () => {}, error: () => {} },
+            refreshIceServers: async () => { await iceGate; },
+            scheduleIceRefreshTimer: () => {},
+            saveSessionRoomPassword: () => {},
+            clearSessionRoomPassword: () => {},
+            closeRoomModal: () => {},
+            updateRoomModalCloseButton: () => {},
+            clearPeerTimers: () => {},
+            disposeTileElement: () => {},
+            removeStreamTile: () => {},
+            ensureRemoteStreamTile: () => {},
+            updateEchoWarningVisibility: () => {},
+            updateMemberCount: () => {},
+            updateGridState: () => {},
+            updateBackgroundTracksOptimization: () => {},
+            stopQualityMonitor: () => {},
+            stopAppAudioCapture: () => {},
+            setPeerConnectionStatus: () => {},
+            logPeerConnectionTelemetry: () => {},
+            showToast: () => {},
+            playPresenceChime: () => {},
+            optimizeSDP: (s) => s,
+            updateSendersForActivePeers: () => {}
+        };
+
+        vm.createContext(sandbox);
+        vm.runInContext([
+            extractFn(bundleSrc, 'isPeerConnectionActive'),
+            extractFn(bundleSrc, 'getOrCreatePeerConnection'),
+            extractFn(bundleSrc, 'updatePeerUserName'),
+            extractFn(bundleSrc, 'removePeerConnection'),
+            extractFn(bundleSrc, 'stopScreenShare'),
+            extractFn(bundleSrc, 'cleanupRoomState'),
+            extractSocketHandler(bundleSrc, 'room-users'),
+            extractSocketHandler(bundleSrc, 'user-joined'),
+            extractSocketHandler(bundleSrc, 'user-left'),
+            extractSocketHandler(bundleSrc, 'signal'),
+            extractSocketHandler(bundleSrc, 'stream-state')
+        ].join('\n\n'), sandbox);
+
+        // Inicia room-users (trava no await refreshIceServers)
+        const roomUsersPromise = socketHandlers['room-users']({
+            users: ['peer-b', 'sock-old'],
+            userNames: { 'peer-b': 'Bob' },
+            activeStreams: ['peer-b'],
+            socketId: 'sock-old',
+            memberCount: 2,
+            hasPassword: false
+        });
+
+        // Enquanto room-users aguarda refreshIceServers:
+        // 1) Chega oferta de peer-b (não pode ser descartada como estranho da sala antiga)
+        socketHandlers.signal({ senderId: 'peer-b', signal: { type: 'offer', sdp: 'v=0\r\noffer-from-b' } });
+        // 2) peer-c entra e começa a transmitir durante o await
+        socketHandlers['user-joined']({ socketId: 'peer-c', userName: 'Carol', memberCount: 3 });
+        socketHandlers['stream-state']({ senderId: 'peer-c', state: 'started' });
+        // 3) peer-b sai durante o await
+        socketHandlers['user-left']({ socketId: 'peer-b', memberCount: 2 });
+
+        resolveIceGate();
+        await roomUsersPromise;
+
+        assert.strictEqual(peers.has('old-peer'), false, 'old-peer deve ter sido limpo');
+        assert.strictEqual(peers.has('peer-b'), false, 'peer-b que saiu durante o await NÃO pode ser ressuscitado');
+        assert.strictEqual(peers.has('peer-c'), true, 'peer-c que entrou durante o await NÃO pode ser destruído');
+        assert.strictEqual(activeRoomPeers.has('peer-c'), true, 'peer-c deve permanecer em activeRoomPeers');
+        assert.strictEqual(remoteActiveStreams.has('peer-c'), true, 'stream-state:started de peer-c deve ser preservado');
+        assert.strictEqual(remoteActiveStreams.has('peer-b'), false, 'stream de peer-b removido deve sair de remoteActiveStreams');
+        console.log('\x1b[32mPASSOU\x1b[0m');
+    } catch (err) {
+        failures++;
+        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+    }
+
+    // T11: Reconexão Socket.IO com novo socketId recria PCs obsoletas, recalcula isPolite e re-emite stream-state:started
+    process.stdout.write('  [Teste] T11: Reconexão com novo socketId fecha PC antiga, recalcula isPolite e re-emite stream-state ... ');
+    try {
+        class MockPC {
+            constructor() {
+                this.signalingState = 'stable';
+                this.connectionState = 'connected';
+                this.closed = false;
+                this._senders = [];
+            }
+            getSenders() { return this._senders; }
+            close() { this.closed = true; this.signalingState = 'closed'; this.connectionState = 'closed'; }
+        }
+
+        const emitted = [];
+        const sentOffers = [];
+        const socketHandlers = {};
+        const oldPc = new MockPC();
+        const peers = new Map([
+            ['m-peer', { pc: oldPc, stream: null, tileEl: null, isPolite: false }]
+        ]);
+
+        const sandbox = {
+            Map,
+            Set,
+            Array,
+            Boolean,
+            Date,
+            Promise,
+            encodeURIComponent,
+            RTCPeerConnection: MockPC,
+            MediaStream: class { getTracks() { return []; } getVideoTracks() { return []; } },
+            rtcConfig: {},
+            myId: 'a-new-id', // após connect com novo socket.id ('a-new-id' < 'm-peer' => true)
+            lastJoinedSocketId: 'z-old-id', // anteriormente era 'z-old-id' ('z-old-id' < 'm-peer' => false)
+            roomUsersGeneration: 0,
+            roomId: 'sala-1',
+            pendingRoomJoin: null,
+            currentRoomPassword: '',
+            currentUserName: 'Pedro',
+            hasRoomMembershipSnapshot: true,
+            activeRoomPeers: new Set(['m-peer']),
+            recentlyRemovedPeers: new Map(),
+            remoteActiveStreams: new Set(),
+            localStream: { getTracks: () => [{ id: 'v1', kind: 'video' }], getVideoTracks: () => [{ id: 'v1', kind: 'video' }] },
+            peers,
+            displayRoomId: { textContent: '', appendChild() {} },
+            memberCountText: { textContent: '' },
+            streamGrid: { querySelectorAll: () => [], appendChild() {} },
+            socket: {
+                id: 'a-new-id',
+                on(ev, fn) { socketHandlers[ev] = fn; },
+                emit(ev, payload) { emitted.push({ ev, payload }); }
+            },
+            console: { log: () => {}, warn: () => {}, error: () => {} },
+            clearPeerTimers() {},
+            disposeTileElement() {},
+            updateEchoWarningVisibility() {},
+            updateMemberCount() {},
+            updateGridState() {},
+            updateBackgroundTracksOptimization() {},
+            updatePeerUserName() {},
+            addLocalTracksToPC() {},
+            sendOffer(id) { sentOffers.push(id); },
+            updateSendersForActivePeers() {}
+        };
+
+        vm.createContext(sandbox);
+        vm.runInContext([
+            extractFn(bundleSrc, 'getOrCreatePeerConnection'),
+            extractFn(bundleSrc, 'removePeerConnection'),
+            extractSocketHandler(bundleSrc, 'room-users')
+        ].join('\n\n'), sandbox);
+
+        await socketHandlers['room-users']({
+            users: ['m-peer', 'a-new-id'],
+            userNames: { 'm-peer': 'Maria' },
+            activeStreams: [],
+            socketId: 'a-new-id',
+            memberCount: 2,
+            hasPassword: false
+        });
+
+        assert.strictEqual(oldPc.closed, true, 'PC antiga de socket desconectado deve ser fechada');
+        const currentPeer = peers.get('m-peer');
+        assert(currentPeer && currentPeer.pc !== oldPc, 'Deve criar nova RTCPeerConnection para m-peer');
+        assert.strictEqual(currentPeer.isPolite, true, 'isPolite deve ser recalculado com o novo socketId');
+        assert(sentOffers.includes('m-peer'), 'Deve enviar nova oferta pela PC recriada');
+        assert(
+            emitted.some((e) => e.ev === 'stream-state' && e.payload && e.payload.roomId === 'sala-1' && e.payload.state === 'started'),
+            'Deve re-emitir stream-state:started ao reconectar transmitindo'
+        );
+        console.log('\x1b[32mPASSOU\x1b[0m');
+    } catch (err) {
+        failures++;
+        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+    }
+
+    // T12: updateBackgroundTracksOptimization mantém vídeo ativo para stream em Picture-in-Picture
+    process.stdout.write('  [Teste] T12: updateBackgroundTracksOptimization preserva track em Picture-in-Picture ... ');
+    try {
+        const pipTrack = { enabled: true };
+        const bgTrack = { enabled: true };
+        const pipVideoEl = { id: 'vid-pip' };
+        const bgVideoEl = { id: 'vid-bg' };
+        const pipTileEl = {
+            dataset: { peerId: 'peer-pip' },
+            contains: (el) => el === pipVideoEl,
+            querySelector: (sel) => (sel === 'video' ? pipVideoEl : null)
+        };
+        const bgTileEl = {
+            dataset: { peerId: 'peer-bg' },
+            contains: (el) => el === bgVideoEl,
+            querySelector: (sel) => (sel === 'video' ? bgVideoEl : null)
+        };
+
+        const sandbox = {
+            document: {
+                hidden: true,
+                fullscreenElement: null,
+                pictureInPictureElement: pipVideoEl,
+                querySelector: () => null
+            },
+            peers: new Map([
+                ['peer-pip', { tileEl: pipTileEl, stream: { getVideoTracks: () => [pipTrack] } }],
+                ['peer-bg', { tileEl: bgTileEl, stream: { getVideoTracks: () => [bgTrack] } }]
+            ])
+        };
+
+        vm.createContext(sandbox);
+        vm.runInContext(extractFn(bundleSrc, 'updateBackgroundTracksOptimization'), sandbox);
+
+        sandbox.updateBackgroundTracksOptimization();
+        assert.strictEqual(pipTrack.enabled, true, 'Track do vídeo em Picture-in-Picture deve permanecer ativa');
+        assert.strictEqual(bgTrack.enabled, false, 'Demais tracks em segundo plano devem pausar quando oculto');
+        console.log('\x1b[32mPASSOU\x1b[0m');
+    } catch (err) {
+        failures++;
+        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+    }
+
     console.log('\n===============================================================');
     if (failures === 0) {
-        console.log('  ✅ Todos os 9 testes de renegociação/ICE passaram!');
+        console.log('  ✅ Todos os 12 testes de renegociação/ICE passaram!');
         console.log('===============================================================\n');
     } else {
         console.log(`  ❌ ${failures} teste(s) falharam.`);

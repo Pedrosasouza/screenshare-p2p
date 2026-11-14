@@ -719,7 +719,25 @@ io.on('connection', (socket) => {
             ? rawClientId
             : null;
 
-        // Leave any previous room
+        // Check destination room capacity BEFORE leaving the socket's current room
+        const alreadyMember = socket.roomId === cleanRoomId && room.members.has(socket.id);
+        let evictableCount = 0;
+        if (clientId) {
+            for (const [existingSocketId, existingClientId] of room.members.entries()) {
+                if (existingClientId && existingClientId === clientId && existingSocketId !== socket.id) {
+                    evictableCount += 1;
+                }
+            }
+        }
+        if (!alreadyMember && (room.members.size - evictableCount) >= MAX_MEMBERS_PER_ROOM) {
+            socket.emit('join-error', {
+                error: 'room_full',
+                message: 'A sala atingiu o limite máximo de participantes.'
+            });
+            return;
+        }
+
+        // Leave any previous room only after capacity validation succeeds
         if (socket.roomId && socket.roomId !== cleanRoomId) {
             leaveCurrentRoom(socket);
         }
@@ -745,15 +763,6 @@ io.on('connection', (socket) => {
         // Re-register room in Map if eviction of sole member triggered room deletion
         if (!rooms.has(cleanRoomId)) {
             rooms.set(cleanRoomId, room);
-        }
-
-        const alreadyMember = socket.roomId === cleanRoomId && room.members.has(socket.id);
-        if (!alreadyMember && room.members.size >= MAX_MEMBERS_PER_ROOM) {
-            socket.emit('join-error', {
-                error: 'room_full',
-                message: 'A sala atingiu o limite máximo de participantes.'
-            });
-            return;
         }
 
         socket.join(cleanRoomId);

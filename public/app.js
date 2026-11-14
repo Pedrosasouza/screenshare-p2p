@@ -184,6 +184,9 @@ const peers = new Map();
 const activeRoomPeers = new Set();
 const recentlyRemovedPeers = new Map();
 let hasRoomMembershipSnapshot = false;
+let lastJoinedSocketId = '';
+let roomUsersGeneration = 0;
+let isRoomMembershipConfirmed = false;
 
 if (typeof refreshIceServers === 'function') {
     refreshIceServers(SERVER_URL, { peers });
@@ -372,7 +375,7 @@ function switchRoomView(viewName) {
 let checkCreateTimeout = null;
 function checkCreateRoomStatus(roomIdToCheck) {
     if (!createRoomStatusIndicator) return;
-    const cleanId = (roomIdToCheck || '').trim().toLowerCase();
+    const cleanId = sanitizeRoomId(roomIdToCheck);
     if (!cleanId || cleanId.length < 3) {
         createRoomStatusIndicator.textContent = '';
         createRoomStatusIndicator.className = 'room-status-indicator';
@@ -397,7 +400,7 @@ function checkCreateRoomStatus(roomIdToCheck) {
 let checkJoinTimeout = null;
 function checkJoinRoomStatus(roomIdToCheck) {
     if (!joinRoomStatusIndicator) return;
-    const cleanId = (roomIdToCheck || '').trim().toLowerCase();
+    const cleanId = sanitizeRoomId(roomIdToCheck);
     if (!cleanId || cleanId.length < 3) {
         joinRoomStatusIndicator.textContent = '';
         joinRoomStatusIndicator.className = 'room-status-indicator';
@@ -654,6 +657,8 @@ function cleanupRoomState(options = {}) {
     peers.clear();
     if (typeof activeRoomPeers !== 'undefined') activeRoomPeers.clear();
     if (typeof recentlyRemovedPeers !== 'undefined') recentlyRemovedPeers.clear();
+    if (typeof lastJoinedSocketId !== 'undefined') lastJoinedSocketId = '';
+    if (typeof isRoomMembershipConfirmed !== 'undefined') isRoomMembershipConfirmed = false;
     remoteActiveStreams.clear();
     updateEchoWarningVisibility();
 
@@ -728,6 +733,9 @@ function updateRoomModalCloseButton() {
 
 function closeRoomModal() {
     if (!roomId) return; // Cannot close if not connected to any room yet
+    if (typeof pendingRoomJoin !== 'undefined') {
+        pendingRoomJoin = null;
+    }
     clearRoomError();
     roomModal.style.display = 'none';
     roomModal.classList.add('hidden');
@@ -807,6 +815,9 @@ socket.on('connect', () => {
 
 socket.on('disconnect', (reason) => {
     console.warn('[Socket] Disconnected from server:', reason);
+    if (typeof isRoomMembershipConfirmed !== 'undefined') {
+        isRoomMembershipConfirmed = false;
+    }
     if (typeof setSignalingStatus === 'function') {
         setSignalingStatus(reason === 'io client disconnect' ? 'offline' : 'reconnecting');
     }
@@ -844,6 +855,16 @@ socket.on('join-error', ({ error, message }) => {
     const failedRoomId = (pendingRoomJoin && pendingRoomJoin.roomId) || roomId || '';
     pendingRoomJoin = null;
 
+    // If reconnecting on a fresh socket without an active server-side room, reset stale local room state
+    if (typeof isRoomMembershipConfirmed !== 'undefined' && !isRoomMembershipConfirmed && roomId) {
+        if (typeof cleanupRoomState === 'function') {
+            cleanupRoomState({ silent: true });
+        }
+        roomId = '';
+        currentRoomPassword = '';
+        updateRoomModalCloseButton();
+    }
+
     openRoomModal('join');
     if (error === 'invalid_password') {
         if (typeof clearSessionRoomPassword === 'function') {
@@ -879,16 +900,10 @@ socket.on('join-error', ({ error, message }) => {
 
 // Socket Events
 socket.on('room-users', async ({ users, userNames, activeStreams, socketId, memberCount, hasPassword }) => {
-    myId = socketId;
-    if (typeof refreshIceServers === 'function' && typeof SERVER_URL !== 'undefined') {
-        await Promise.race([
-            refreshIceServers(SERVER_URL, { peers }),
-            new Promise((resolve) => setTimeout(resolve, 1200))
-        ]);
-        if (typeof scheduleIceRefreshTimer === 'function') {
-            scheduleIceRefreshTimer(SERVER_URL, { peers });
-        }
-    }
+    const prevJoinedSocketId = typeof lastJoinedSocketId !== 'undefined' ? lastJoinedSocketId : '';
+    const joinGen = typeof roomUsersGeneration !== 'undefined' ? ++roomUsersGeneration : 0;
+
+    // Apply room membership, cleanup and stale-peer reconciliation synchronously BEFORE any await
     if (pendingRoomJoin) {
         const target = pendingRoomJoin;
         pendingRoomJoin = null;
@@ -920,6 +935,14 @@ socket.on('room-users', async ({ users, userNames, activeStreams, socketId, memb
         updateRoomModalCloseButton();
     }
 
+    myId = socketId;
+    if (typeof lastJoinedSocketId !== 'undefined') {
+        lastJoinedSocketId = socketId || '';
+    }
+    if (typeof isRoomMembershipConfirmed !== 'undefined') {
+        isRoomMembershipConfirmed = true;
+    }
+
     console.log('[Socket] Joined room. My ID:', myId, 'Other users:', users, 'Active streams:', activeStreams);
     remoteActiveStreams.clear();
     if (Array.isArray(activeStreams)) {
@@ -937,9 +960,10 @@ socket.on('room-users', async ({ users, userNames, activeStreams, socketId, memb
         activeUserSet.forEach((id) => recentlyRemovedPeers.delete(id));
     }
 
-    // Reconcile stale peers that left while disconnected (even without pendingRoomJoin)
+    // Reconcile stale peers: if socket.id changed on reconnect, old PCs are dead on remote peers and isPolite may have flipped
+    const socketChangedOnReconnect = Boolean(prevJoinedSocketId && socketId && prevJoinedSocketId !== socketId);
     for (const existingPeerId of Array.from(peers.keys())) {
-        if (!activeUserSet.has(existingPeerId)) {
+        if (socketChangedOnReconnect || !activeUserSet.has(existingPeerId)) {
             removePeerConnection(existingPeerId);
         }
     }
@@ -957,21 +981,39 @@ socket.on('room-users', async ({ users, userNames, activeStreams, socketId, memb
         displayRoomId.appendChild(icon);
     }
 
-    // Initialize peer connections for existing users
-    activeUserSet.forEach(peerId => {
+    if (typeof refreshIceServers === 'function' && typeof SERVER_URL !== 'undefined') {
+        await Promise.race([
+            refreshIceServers(SERVER_URL, { peers }),
+            new Promise((resolve) => setTimeout(resolve, 1200))
+        ]);
+        if (typeof roomUsersGeneration !== 'undefined' && roomUsersGeneration !== joinGen) {
+            return;
+        }
+        if (typeof scheduleIceRefreshTimer === 'function') {
+            scheduleIceRefreshTimer(SERVER_URL, { peers });
+        }
+    }
+
+    // Use live activeRoomPeers so concurrent user-joined / user-left during await are respected
+    const livePeerIds = typeof activeRoomPeers !== 'undefined' ? activeRoomPeers : activeUserSet;
+    livePeerIds.forEach(peerId => {
+        if (!peerId || peerId === myId) return;
         getOrCreatePeerConnection(peerId);
         if (userNames && userNames[peerId]) {
             updatePeerUserName(peerId, userNames[peerId]);
         }
     });
 
-    // If I am currently sharing screen, send offer with my tracks to all peers
+    // If I am currently sharing screen, send offer with my tracks to all peers and sync activeStreams
     if (localStream) {
         for (const [peerId, peerObj] of peers.entries()) {
             addLocalTracksToPC(peerObj.pc);
             sendOffer(peerId);
         }
         updateSendersForActivePeers();
+        if (roomId && socket && typeof socket.emit === 'function') {
+            socket.emit('stream-state', { roomId, state: 'started' });
+        }
     }
 });
 
@@ -1310,6 +1352,7 @@ async function logPeerConnectionTelemetry(peerId, pc) {
 // Otimização de GPU/CPU: pausa decodificação de faixas de vídeo quando janela estiver oculta/minimizada
 function updateBackgroundTracksOptimization() {
     const isHidden = typeof document !== 'undefined' && Boolean(document.hidden);
+    const pipEl = typeof document !== 'undefined' ? (document.pictureInPictureElement || null) : null;
     const activeFsTile = typeof document !== 'undefined'
         ? (document.querySelector('.stream-tile.pseudo-fullscreen') || (document.fullscreenElement && document.fullscreenElement.classList.contains('stream-tile') ? document.fullscreenElement : null))
         : null;
@@ -1317,11 +1360,20 @@ function updateBackgroundTracksOptimization() {
 
     for (const [peerId, peerObj] of peers.entries()) {
         if (peerObj.stream) {
+            const tileVideo = peerObj.tileEl && typeof peerObj.tileEl.querySelector === 'function'
+                ? peerObj.tileEl.querySelector('video')
+                : null;
+            const isPipActive = Boolean(
+                pipEl &&
+                peerObj.tileEl &&
+                ((typeof peerObj.tileEl.contains === 'function' && peerObj.tileEl.contains(pipEl)) || tileVideo === pipEl)
+            );
+
             peerObj.stream.getVideoTracks().forEach(track => {
                 if (isHidden) {
-                    track.enabled = false;
+                    track.enabled = isPipActive;
                 } else if (activeFsPeerId && peerId !== activeFsPeerId && activeFsPeerId !== 'local') {
-                    track.enabled = false;
+                    track.enabled = isPipActive;
                 } else {
                     track.enabled = true;
                 }

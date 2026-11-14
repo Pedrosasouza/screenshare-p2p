@@ -63,10 +63,16 @@ function createHarness(overrides = {}) {
         }
         async resume() {
             this.resumeCalls++;
+            if (overrides.onResume) {
+                await overrides.onResume(this);
+            }
             this.state = 'running';
         }
         async suspend() {
             this.suspendCalls++;
+            if (overrides.onSuspend) {
+                await overrides.onSuspend(this);
+            }
             this.state = 'suspended';
         }
         createMediaStreamDestination() {
@@ -363,6 +369,121 @@ async function runTests() {
         assert.strictEqual(typeof captureStoppedCb, 'function', 'Deve registrar listener em wasapi-capture-stopped');
         captureStoppedCb({ payload: { pid: 4321, reason: 'device_invalidated' } });
         assert(notifiedPayload && notifiedPayload.pid === 4321, 'Callback de queda inesperada deve receber payload do evento');
+    }
+    console.log('\x1b[32mPASSOU\x1b[0m');
+
+    // T6: stopAppAudioCapture during pending startFn tears down late backend capture without killing newer start
+    process.stdout.write('  [Teste] T6: cancelamento em voo durante startFn fecha backend tardio sem matar nova sessão ... ');
+    {
+        let resolveFirst;
+        let markFirstEntered;
+        const firstEntered = new Promise((r) => { markFirstEntered = r; });
+
+        const h1 = createHarness({
+            startAppAudioCapture: async (pid) => {
+                if (pid === 101) {
+                    markFirstEntered();
+                    return new Promise((resolve) => { resolveFirst = resolve; });
+                }
+                return { pid, sample_rate: 48000, channels: 2, mode: 'include' };
+            }
+        });
+
+        const p1 = h1.sandbox.startAppAudioCapture(101);
+        const p1Settled = p1.then(() => null, (err) => err);
+        await firstEntered;
+
+        h1.sandbox.stopAppAudioCapture();
+        assert.strictEqual(h1.getStopDesktopCalls(), 1, 'stopAppAudioCapture imediato deve invocar IPC stop uma vez');
+
+        resolveFirst({ pid: 101, sample_rate: 48000, channels: 2, mode: 'include' });
+        const err1 = await p1Settled;
+        assert(err1 instanceof Error, 'start cancelado em voo deve rejeitar');
+        assert.strictEqual(
+            h1.getStopDesktopCalls(),
+            2,
+            'startFn resolvendo após cancelamento deve disparar cleanup backend tardio'
+        );
+
+        // Sub-cenário: stop seguido de novo start não deve deixar start antigo matar o novo start
+        let resolveStale;
+        let markStaleEntered;
+        const staleEntered = new Promise((r) => { markStaleEntered = r; });
+        const h2 = createHarness({
+            startAppAudioCapture: async (pid) => {
+                if (pid === 303) {
+                    markStaleEntered();
+                    return new Promise((resolve) => { resolveStale = resolve; });
+                }
+                return { pid, sample_rate: 48000, channels: 2, mode: 'include' };
+            }
+        });
+
+        const pStale = h2.sandbox.startAppAudioCapture(303);
+        const pStaleSettled = pStale.then(() => null, (err) => err);
+        await staleEntered;
+
+        h2.sandbox.stopAppAudioCapture();
+        assert.strictEqual(h2.getStopDesktopCalls(), 1);
+
+        const freshTrack = await h2.sandbox.startAppAudioCapture(404);
+        assert(freshTrack && freshTrack.kind === 'audio', 'Nova captura após stop deve concluir com sucesso');
+
+        resolveStale({ pid: 303, sample_rate: 48000, channels: 2, mode: 'include' });
+        await pStaleSettled;
+        assert.strictEqual(
+            h2.getStopDesktopCalls(),
+            1,
+            'start antigo resolvendo após um novo start não deve chamar stopAppAudioCapture do backend'
+        );
+    }
+    console.log('\x1b[32mPASSOU\x1b[0m');
+
+    // T7: prepareHelperAudioWorklet aguarda suspend() em andamento antes de chamar resume()
+    process.stdout.write('  [Teste] T7: prepareHelperAudioWorklet serializa suspend em voo antes de resume ... ');
+    {
+        let releaseSuspend;
+        let suspendStarted = false;
+        const timeline = [];
+        const h = createHarness({
+            onSuspend: (ctx) => {
+                suspendStarted = true;
+                timeline.push('suspend:start');
+                return new Promise((resolve) => {
+                    releaseSuspend = () => {
+                        timeline.push('suspend:end');
+                        resolve();
+                    };
+                });
+            },
+            onResume: () => {
+                timeline.push('resume');
+            }
+        });
+
+        await h.sandbox.startAppAudioCapture(501);
+        const ctx = h.getState().helperAudioContext;
+        assert.strictEqual(ctx.state, 'running');
+
+        h.sandbox.stopAppAudioCapture();
+        assert.strictEqual(suspendStarted, true, 'stopAppAudioCapture deve iniciar suspend()');
+
+        // Start imediato enquanto suspend() ainda está pendente (ctx.state ainda 'running')
+        let restartDone = false;
+        const restartPromise = h.sandbox.startAppAudioCapture(502).then((track) => {
+            restartDone = true;
+            return track;
+        });
+
+        await Promise.resolve();
+        await Promise.resolve();
+        assert.strictEqual(restartDone, false, 'Novo start deve aguardar suspend() em andamento terminar');
+
+        releaseSuspend();
+        const track = await restartPromise;
+        assert(track && track.kind === 'audio');
+        assert.strictEqual(ctx.state, 'running', 'AudioContext deve terminar em running e não sobrescrito por suspended');
+        assert.deepStrictEqual(timeline, ['suspend:start', 'suspend:end', 'resume']);
     }
     console.log('\x1b[32mPASSOU\x1b[0m');
 

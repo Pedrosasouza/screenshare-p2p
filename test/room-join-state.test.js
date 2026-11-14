@@ -332,6 +332,56 @@ async function runTests() {
         console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
     }
 
+    // T5: checkCreateRoomStatus/checkJoinRoomStatus usam sanitizeRoomId e closeRoomModal limpa pendingRoomJoin
+    process.stdout.write('  [Teste] T5: status checkers sanitizam roomId e closeRoomModal limpa pendingRoomJoin ... ');
+    try {
+        const emitted = [];
+        const createIndicator = { textContent: '', className: '', innerHTML: '' };
+        const joinIndicator = { textContent: '', className: '', innerHTML: '' };
+        const roomModal = {
+            hidden: false,
+            style: { display: 'flex' },
+            classList: { add() {}, remove() {} }
+        };
+
+        const sandbox = {
+            socket: {
+                connected: true,
+                emit(ev, payload) { emitted.push({ ev, payload }); }
+            },
+            roomId: 'sala-atual',
+            pendingRoomJoin: { roomId: 'sala-cancelada', password: '', userName: 'Pedro' },
+            createRoomStatusIndicator: createIndicator,
+            joinRoomStatusIndicator: joinIndicator,
+            joinPasswordHint: { textContent: '', className: '' },
+            roomModal,
+            clearRoomError() {}
+        };
+
+        vm.createContext(sandbox);
+        vm.runInContext([
+            extractFn(appJs, 'sanitizeRoomId'),
+            extractFn(appJs, 'checkCreateRoomStatus'),
+            extractFn(appJs, 'checkJoinRoomStatus'),
+            extractFn(appJs, 'closeRoomModal')
+        ].join('\n\n'), sandbox);
+
+        sandbox.checkCreateRoomStatus('  Sala Teste!!  ');
+        sandbox.checkJoinRoomStatus('  Sala Outro  ');
+
+        assert.strictEqual(emitted.length, 2, 'Ambos checkers devem emitir check-room após sanitização');
+        assert.strictEqual(emitted[0].payload.roomId, sandbox.sanitizeRoomId('  Sala Teste!!  '));
+        assert.strictEqual(emitted[1].payload.roomId, sandbox.sanitizeRoomId('  Sala Outro  '));
+
+        sandbox.closeRoomModal();
+        assert.strictEqual(sandbox.pendingRoomJoin, null, 'Fechar modal deve cancelar pendingRoomJoin offline');
+
+        console.log('\x1b[32mPASSOU\x1b[0m');
+    } catch (err) {
+        failures++;
+        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+    }
+
     console.log('\n===============================================================');
     if (failures > 0) {
         console.log(`  ❌ Resultado: ${failures} teste(s) falharam.`);

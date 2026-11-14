@@ -357,6 +357,61 @@ async function runTests() {
             failures++;
             console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
         }
+
+        // Teste 4: Tentar trocar para sala cheia (room_full) preserva usuário na sala atual
+        process.stdout.write('  [Teste] T4: Troca de sala que retorna room_full preserva usuário na sala anterior ... ');
+        try {
+            const { rooms } = require('../server.js');
+            const srcRoom = 'sala-origem-cheia';
+            const fullRoom = 'sala-destino-cheia';
+
+            const user = await connectSocket(url);
+            const peerInSrc = await connectSocket(url);
+            assert.strictEqual((await tryJoin(user, srcRoom, '')).status, 'joined');
+            assert.strictEqual((await tryJoin(peerInSrc, srcRoom, '')).status, 'joined');
+
+            // Popula sala destino até o limite máximo
+            const fakeMembers = new Map();
+            const fakeNames = new Map();
+            for (let i = 0; i < 32; i++) {
+                fakeMembers.set(`ghost-sock-${i}`, `ghost-client-${i}`);
+                fakeNames.set(`ghost-sock-${i}`, `Ghost ${i}`);
+            }
+            rooms.set(fullRoom, {
+                passwordHash: null,
+                passwordSalt: null,
+                members: fakeMembers,
+                userNames: fakeNames,
+                activeStreams: new Set()
+            });
+
+            const switchRes = await tryJoin(user, fullRoom, '');
+            assert.strictEqual(switchRes.status, 'error');
+            assert.strictEqual(switchRes.data.error, 'room_full');
+
+            // Verifica que user permanece na sala de origem e ainda consegue sinalizar peerInSrc
+            const srcInfo = await checkRoom(user, srcRoom);
+            assert.strictEqual(srcInfo.memberCount, 2, 'Usuário não deve ter sido ejetado da sala de origem');
+
+            const relayPromise = new Promise((resolve, reject) => {
+                const t = setTimeout(() => reject(new Error('Sinal não retransmitido na sala de origem')), 2000);
+                peerInSrc.once('signal', (msg) => {
+                    clearTimeout(t);
+                    resolve(msg);
+                });
+            });
+            user.emit('signal', { targetId: peerInSrc.id, signal: { type: 'offer', sdp: 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n' } });
+            const relayed = await relayPromise;
+            assert.strictEqual(relayed.senderId, user.id);
+
+            rooms.delete(fullRoom);
+            user.disconnect();
+            peerInSrc.disconnect();
+            console.log('\x1b[32mPASSOU\x1b[0m');
+        } catch (err) {
+            failures++;
+            console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+        }
     } finally {
         await new Promise((resolve) => server.close(resolve));
     }
