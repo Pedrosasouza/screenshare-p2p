@@ -45,6 +45,13 @@ function getCorsOrigin() {
 }
 
 const app = express();
+app.disable('x-powered-by');
+app.use((req, res, next) => {
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    next();
+});
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
@@ -77,8 +84,37 @@ app.get('*', (req, res) => {
 const rooms = new Map();
 
 // Anti-Brute Force Protection for Password-Protected Rooms
-// Key: client IP or socket ID -> { count: number, lockedUntil: number, lastAttempt: number }
+// Key: `${clientKey}:${roomId}` -> { count: number, lockedUntil: number, lastAttempt: number }
 const loginAttempts = new Map();
+const MAX_LOGIN_ATTEMPTS_ENTRIES = 10000;
+const LOGIN_ATTEMPT_TTL_MS = 600000;
+
+function getAttemptKey(clientKey, roomId) {
+    return `${clientKey}:${roomId}`;
+}
+
+function isAttemptExpired(data, now = Date.now()) {
+    if (!data) return true;
+    const lockExpiry = typeof data.lockedUntil === 'number' ? data.lockedUntil : 0;
+    const lastAttempt = typeof data.lastAttempt === 'number' ? data.lastAttempt : 0;
+    return now >= lockExpiry && (now - lastAttempt > LOGIN_ATTEMPT_TTL_MS);
+}
+
+function setLoginAttempt(key, data, now = Date.now(), maxEntries = MAX_LOGIN_ATTEMPTS_ENTRIES) {
+    if (!loginAttempts.has(key) && loginAttempts.size >= maxEntries) {
+        for (const [existingKey, existingData] of loginAttempts.entries()) {
+            if (isAttemptExpired(existingData, now)) {
+                loginAttempts.delete(existingKey);
+            }
+        }
+        while (loginAttempts.size >= maxEntries) {
+            const oldestKey = loginAttempts.keys().next().value;
+            if (oldestKey === undefined) break;
+            loginAttempts.delete(oldestKey);
+        }
+    }
+    loginAttempts.set(key, data);
+}
 
 // Validation and sanitization helpers
 const ROOM_ID_REGEX = /^[a-z0-9_-]{3,64}$/;
@@ -168,11 +204,11 @@ function getClientIdentifier(socket) {
 setInterval(() => {
     const now = Date.now();
     for (const [key, data] of loginAttempts.entries()) {
-        if (now > data.lockedUntil && (now - data.lastAttempt > 600000)) {
+        if (isAttemptExpired(data, now)) {
             loginAttempts.delete(key);
         }
     }
-}, 600000);
+}, 600000).unref();
 
 io.on('connection', (socket) => {
     console.log(`[+] Client connected: ${socket.id}`);
@@ -213,13 +249,14 @@ io.on('connection', (socket) => {
 
         let room = rooms.get(cleanRoomId);
         const clientKey = getClientIdentifier(socket);
+        const attemptKey = getAttemptKey(clientKey, cleanRoomId);
         const now = Date.now();
-        const attemptData = loginAttempts.get(clientKey) || { count: 0, lockedUntil: 0, lastAttempt: now };
+        const attemptData = loginAttempts.get(attemptKey) || { count: 0, lockedUntil: 0, lastAttempt: now };
 
-        // Verifica se o IP/Cliente está temporariamente bloqueado por força bruta
+        // Verifica se o IP/Cliente está temporariamente bloqueado por força bruta nesta sala
         if (attemptData.lockedUntil > now) {
             const waitSeconds = Math.ceil((attemptData.lockedUntil - now) / 1000);
-            console.warn(`[Security] Bloqueio anti-força bruta ativo para ${clientKey}. Restam ${waitSeconds}s.`);
+            console.warn(`[Security] Bloqueio anti-força bruta ativo para ${clientKey} na sala "${cleanRoomId}". Restam ${waitSeconds}s.`);
             socket.emit('join-error', {
                 error: 'rate_limited',
                 message: `Muitas tentativas incorretas. Aguarde ${waitSeconds} segundos antes de tentar novamente.`
@@ -230,6 +267,9 @@ io.on('connection', (socket) => {
         let isNewRoom = false;
         if (!room) {
             const { hash, salt } = await hashPassword(cleanPassword);
+            if (!socket.connected) {
+                return;
+            }
             room = rooms.get(cleanRoomId);
             if (!room) {
                 room = {
@@ -240,7 +280,7 @@ io.on('connection', (socket) => {
                     activeStreams: new Set()
                 };
                 rooms.set(cleanRoomId, room);
-                loginAttempts.delete(clientKey);
+                loginAttempts.delete(attemptKey);
                 isNewRoom = true;
             }
         }
@@ -256,9 +296,10 @@ io.on('connection', (socket) => {
                 if (attemptData.count >= 5) {
                     const penaltySeconds = attemptData.count >= 10 ? 120 : (attemptData.count >= 7 ? 60 : 30);
                     attemptData.lockedUntil = now + (penaltySeconds * 1000);
-                    loginAttempts.set(clientKey, attemptData);
+                    setLoginAttempt(attemptKey, attemptData, now);
 
-                    console.warn(`[Security] Bloqueando ${clientKey} por ${penaltySeconds}s após ${attemptData.count} tentativas falhas.`);
+                    if (!socket.connected) return;
+                    console.warn(`[Security] Bloqueando ${clientKey} na sala "${cleanRoomId}" por ${penaltySeconds}s após ${attemptData.count} tentativas falhas.`);
                     socket.emit('join-error', {
                         error: 'rate_limited',
                         message: `Muitas tentativas incorretas. Bloqueado por ${penaltySeconds} segundos.`
@@ -266,7 +307,8 @@ io.on('connection', (socket) => {
                     return;
                 }
 
-                loginAttempts.set(clientKey, attemptData);
+                setLoginAttempt(attemptKey, attemptData, now);
+                if (!socket.connected) return;
                 const remaining = 5 - attemptData.count;
                 console.log(`[Auth] Rejected socket ${socket.id} for room "${cleanRoomId}": Invalid password (${remaining} tentativas restantes)`);
                 socket.emit('join-error', {
@@ -276,8 +318,15 @@ io.on('connection', (socket) => {
                 return;
             }
 
-            // Senha correta: limpa registro de falhas
-            loginAttempts.delete(clientKey);
+            // Senha correta: limpa registro de falhas desta sala
+            loginAttempts.delete(attemptKey);
+        }
+
+        if (!socket.connected) {
+            if (isNewRoom && room.members.size === 0) {
+                rooms.delete(cleanRoomId);
+            }
+            return;
         }
 
         // Leave any previous room
@@ -296,6 +345,7 @@ io.on('connection', (socket) => {
                         try { oldSocket.disconnect(true); } catch(e) {}
                     } else {
                         room.members.delete(existingSocketId);
+                        if (room.userNames) room.userNames.delete(existingSocketId);
                         room.activeStreams.delete(existingSocketId);
                     }
                 }
@@ -306,6 +356,8 @@ io.on('connection', (socket) => {
         if (!rooms.has(cleanRoomId)) {
             rooms.set(cleanRoomId, room);
         }
+
+        const alreadyMember = socket.roomId === cleanRoomId && room.members.has(socket.id);
 
         socket.join(cleanRoomId);
         socket.roomId = cleanRoomId;
@@ -329,12 +381,14 @@ io.on('connection', (socket) => {
             hasPassword: Boolean(room.passwordHash)
         });
 
-        // Notify existing members about new user
-        socket.to(cleanRoomId).emit('user-joined', {
-            socketId: socket.id,
-            userName: displayName,
-            memberCount: room.members.size
-        });
+        // Notify existing members about new user (avoid duplicate on same-socket re-join)
+        if (!alreadyMember) {
+            socket.to(cleanRoomId).emit('user-joined', {
+                socketId: socket.id,
+                userName: displayName,
+                memberCount: room.members.size
+            });
+        }
 
         // Broadcast updated room member count to all
         io.to(cleanRoomId).emit('room-status', {
@@ -367,7 +421,7 @@ io.on('connection', (socket) => {
     socket.on('signal', safeHandler(socket, 'signal', (data) => {
         if (!isPlainObject(data)) return;
         const targetId = typeof data.targetId === 'string' ? data.targetId.trim() : null;
-        if (!targetId || !isValidSignal(data.signal)) return;
+        if (!targetId || targetId === socket.id || !isValidSignal(data.signal)) return;
 
         const senderRoom = socket.roomId;
         if (!senderRoom) return;
@@ -483,6 +537,9 @@ module.exports = {
     server,
     io,
     rooms,
+    loginAttempts,
+    MAX_LOGIN_ATTEMPTS_ENTRIES,
+    setLoginAttempt,
     hashPassword,
     verifyPassword,
     getCorsOrigin
