@@ -3,5 +3,13 @@ dist/
 bin/
 src-tauri/target/
 .env
+.env.*
+*.pem
+*.key
 *.log
 .tmp/
+.agents/
+.vscode/
+coverage/
+.DS_Store
+Thumbs.db
