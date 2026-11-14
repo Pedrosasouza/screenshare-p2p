@@ -575,4 +575,138 @@ describe('Hardening CORS produção, rate-limit de check-room, CSP estrita e blo
             ctx.stopCleanupTimer();
         }
     });
+
+    it('T13: join-room limita criação excessiva de novas salas por IP sem bloquear entradas em salas existentes', async () => {
+        const {
+            createAttemptTracker,
+            createRoomCreationRateLimiter,
+            ROOM_CREATE_RATE_LIMIT_MAX_REQUESTS
+        } = require('../src/server/rate-limit');
+        const { registerSignalingHandlers } = require('../src/server/signaling');
+
+        const rooms = new Map([
+            ['sala-existente', {
+                passwordHash: null,
+                passwordSalt: null,
+                members: new Map([['seed-user', null]]),
+                userNames: new Map([['seed-user', 'Host']]),
+                activeStreams: new Set()
+            }]
+        ]);
+
+        let connectionHandler = null;
+        const fakeIo = {
+            sockets: { sockets: new Map() },
+            to: () => ({ emit: () => {} }),
+            on: (ev, cb) => {
+                if (ev === 'connection') connectionHandler = cb;
+            }
+        };
+
+        registerSignalingHandlers(fakeIo, {
+            rooms,
+            attemptTracker: createAttemptTracker(),
+            roomCreationRateLimiter: createRoomCreationRateLimiter(),
+            env: { TRUST_PROXY: 'false' }
+        });
+
+        const invokeJoin = (socketId, ip, roomId) => {
+            const handlers = {};
+            return new Promise((resolve) => {
+                const sock = {
+                    id: socketId,
+                    connected: true,
+                    handshake: { address: ip, headers: {} },
+                    roomId: null,
+                    join: () => {},
+                    leave: () => {},
+                    to: () => ({ emit: () => {} }),
+                    emit: (ev, payload) => {
+                        if (ev === 'room-users' || ev === 'join-error') {
+                            resolve({ event: ev, payload });
+                        }
+                    },
+                    on: (ev, fn) => { handlers[ev] = fn; }
+                };
+                fakeIo.sockets.sockets.set(socketId, sock);
+                connectionHandler(sock);
+                handlers['join-room']({ roomId, password: 'secret', userName: 'Tester' });
+            });
+        };
+
+        for (let i = 0; i < ROOM_CREATE_RATE_LIMIT_MAX_REQUESTS; i += 1) {
+            const res = await invokeJoin(`sock-c-${i}`, '203.0.113.10', `nova-sala-${i}`);
+            assert.strictEqual(res.event, 'room-users');
+        }
+
+        const blockedCreate = await invokeJoin('sock-c-over', '203.0.113.10', 'nova-sala-excedente');
+        assert.strictEqual(blockedCreate.event, 'join-error');
+        assert.strictEqual(blockedCreate.payload.error, 'rate_limited');
+        assert.strictEqual(rooms.has('nova-sala-excedente'), false);
+
+        const joinExistingRes = await invokeJoin('sock-existing', '203.0.113.10', 'sala-existente');
+        assert.strictEqual(joinExistingRes.event, 'room-users');
+
+        const otherIpRes = await invokeJoin('sock-other-ip', '198.51.100.77', 'sala-outro-ip');
+        assert.strictEqual(otherIpRes.event, 'room-users');
+    });
+
+    it('T14: limite de conexões Socket.IO simultâneas por IP bloqueia excedente e libera após disconnect', async () => {
+        const { io: ioClient } = require('socket.io-client');
+        const ts = await startTestServer({
+            env: {
+                ...process.env,
+                NODE_ENV: 'development',
+                TRUST_PROXY: 'false',
+                MAX_SOCKETS_PER_IP: '2'
+            }
+        });
+
+        const connectRaw = () => new Promise((resolve, reject) => {
+            const client = ioClient(ts.baseUrl, {
+                transports: ['websocket'],
+                reconnection: false,
+                forceNew: true
+            });
+            const timer = setTimeout(() => {
+                client.close();
+                reject(new Error('Timeout conectando socket'));
+            }, 3000);
+            client.once('connect', () => {
+                clearTimeout(timer);
+                resolve({ ok: true, client });
+            });
+            client.once('connect_error', (err) => {
+                clearTimeout(timer);
+                client.close();
+                resolve({ ok: false, error: err && err.message ? err.message : String(err) });
+            });
+        });
+
+        let c1 = null;
+        let c2 = null;
+        let c4 = null;
+        try {
+            c1 = await connectRaw();
+            c2 = await connectRaw();
+            assert.strictEqual(c1.ok, true);
+            assert.strictEqual(c2.ok, true);
+
+            const c3 = await connectRaw();
+            assert.strictEqual(c3.ok, false);
+            assert.strictEqual(c3.error, 'too_many_connections');
+
+            c1.client.disconnect();
+            c1 = null;
+            await new Promise((r) => setTimeout(r, 80));
+
+            c4 = await connectRaw();
+            assert.strictEqual(c4.ok, true);
+        } finally {
+            if (c1 && c1.client) c1.client.close();
+            if (c2 && c2.client) c2.client.close();
+            if (c4 && c4.client) c4.client.close();
+            await ts.close();
+        }
+    });
 });

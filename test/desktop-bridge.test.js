@@ -76,6 +76,13 @@ describe('Desktop Bridge (Tauri v2 IPC & Modo Web)', () => {
                         }
                         return null;
                     }
+                },
+                event: {
+                    listen: async (eventName, cb) => {
+                        calls.push({ cmd: 'listen', eventName });
+                        cb({ payload: { pid: 8888, generation: 1, mode: 'exclude_discord', reason: 'rebound' } });
+                        return () => {};
+                    }
                 }
             }
         };
@@ -118,6 +125,12 @@ describe('Desktop Bridge (Tauri v2 IPC & Modo Web)', () => {
 
         await bridge.stopAppAudioCapture();
         assert.ok(calls.some((c) => c.cmd === 'stop_capture'));
+
+        const reboundPayloads = [];
+        await bridge.onCaptureRebound((payload) => reboundPayloads.push(payload));
+        assert.strictEqual(reboundPayloads.length, 1);
+        assert.strictEqual(reboundPayloads[0].pid, 8888);
+        assert.ok(calls.some((c) => c.cmd === 'listen' && c.eventName === 'wasapi-capture-rebound'));
 
         await assert.rejects(() => bridge.startAppAudioCapture(0, () => {}), /PID inválido/i);
         await assert.rejects(() => bridge.startAppAudioCapture(4294967296, () => {}), /PID inválido/i);

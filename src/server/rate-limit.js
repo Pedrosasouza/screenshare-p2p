@@ -6,6 +6,10 @@ const MAX_ICE_RATE_ENTRIES = 10000;
 const CHECK_ROOM_RATE_LIMIT_WINDOW_MS = 60000;
 const CHECK_ROOM_RATE_LIMIT_MAX_REQUESTS = 30;
 const MAX_CHECK_ROOM_RATE_ENTRIES = 10000;
+const ROOM_CREATE_RATE_LIMIT_WINDOW_MS = 60000;
+const ROOM_CREATE_RATE_LIMIT_MAX_REQUESTS = 15;
+const MAX_ROOM_CREATE_RATE_ENTRIES = 10000;
+const DEFAULT_MAX_SOCKETS_PER_IP = 25;
 const MAX_LOGIN_ATTEMPTS_ENTRIES = 10000;
 const LOGIN_ATTEMPT_TTL_MS = 600000;
 
@@ -146,6 +150,63 @@ function createCheckRoomRateLimiter() {
     });
 }
 
+function createRoomCreationRateLimiter({
+    windowMs = ROOM_CREATE_RATE_LIMIT_WINDOW_MS,
+    maxRequests = ROOM_CREATE_RATE_LIMIT_MAX_REQUESTS,
+    maxEntries = MAX_ROOM_CREATE_RATE_ENTRIES
+} = {}) {
+    return createFixedWindowRateLimiter({
+        windowMs,
+        maxRequests,
+        maxEntries
+    });
+}
+
+function resolveMaxSocketsPerIp(env = process.env) {
+    const raw = env && env.MAX_SOCKETS_PER_IP !== undefined ? Number(env.MAX_SOCKETS_PER_IP) : NaN;
+    if (Number.isInteger(raw) && raw > 0) {
+        return raw;
+    }
+    return DEFAULT_MAX_SOCKETS_PER_IP;
+}
+
+function createIpConnectionTracker({ maxConnectionsPerIp = DEFAULT_MAX_SOCKETS_PER_IP } = {}) {
+    const activeCounts = new Map();
+
+    function tryAcquire(ip) {
+        const key = typeof ip === 'string' && ip ? ip : 'unknown';
+        const current = activeCounts.get(key) || 0;
+        if (current >= maxConnectionsPerIp) {
+            return false;
+        }
+        activeCounts.set(key, current + 1);
+        return true;
+    }
+
+    function release(ip) {
+        const key = typeof ip === 'string' && ip ? ip : 'unknown';
+        const current = activeCounts.get(key) || 0;
+        if (current <= 1) {
+            activeCounts.delete(key);
+        } else {
+            activeCounts.set(key, current - 1);
+        }
+    }
+
+    function getCount(ip) {
+        const key = typeof ip === 'string' && ip ? ip : 'unknown';
+        return activeCounts.get(key) || 0;
+    }
+
+    return {
+        activeCounts,
+        maxConnectionsPerIp,
+        tryAcquire,
+        release,
+        getCount
+    };
+}
+
 function createAttemptTracker() {
     const loginAttempts = new Map();
     const pendingAttemptLocks = new Map();
@@ -276,6 +337,10 @@ module.exports = {
     CHECK_ROOM_RATE_LIMIT_WINDOW_MS,
     CHECK_ROOM_RATE_LIMIT_MAX_REQUESTS,
     MAX_CHECK_ROOM_RATE_ENTRIES,
+    ROOM_CREATE_RATE_LIMIT_WINDOW_MS,
+    ROOM_CREATE_RATE_LIMIT_MAX_REQUESTS,
+    MAX_ROOM_CREATE_RATE_ENTRIES,
+    DEFAULT_MAX_SOCKETS_PER_IP,
     MAX_LOGIN_ATTEMPTS_ENTRIES,
     LOGIN_ATTEMPT_TTL_MS,
     getHttpClientIp,
@@ -283,6 +348,9 @@ module.exports = {
     createFixedWindowRateLimiter,
     createHttpIceRateLimiter,
     createCheckRoomRateLimiter,
+    createRoomCreationRateLimiter,
+    resolveMaxSocketsPerIp,
+    createIpConnectionTracker,
     createAttemptTracker,
     checkRateLimit,
     safeHandler

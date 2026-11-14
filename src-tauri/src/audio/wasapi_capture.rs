@@ -3,11 +3,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, Notify};
-use wasapi::{initialize_mta, AudioClient, Direction, SampleType, StreamMode, WaveFormat};
+use wasapi::{
+    initialize_mta, AudioCaptureClient, AudioClient, Direction, Handle, SampleType, StreamMode,
+    WaveFormat,
+};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::System::Threading::{
-    OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    GetCurrentProcessId, OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_SYNCHRONIZE,
 };
+
+use crate::audio::windows_enum::find_discord_root_pid;
 
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: u16 = 2;
@@ -15,6 +21,21 @@ pub const CHUNK_FRAMES: usize = 480; // 10ms @ 48kHz
 const MAX_SILENCE_BURST_FRAMES: usize = 4_800; // Max 100ms burst to prevent runaway
 const MAX_QUEUED_FRAMES: usize = (SAMPLE_RATE as usize) / 2; // 500ms cap = 24_000 frames
 const PROCESS_CHECK_INTERVAL: Duration = Duration::from_millis(250);
+const DISCORD_REACQUIRE_INTERVAL: Duration = Duration::from_millis(1500);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureTargetKind {
+    IncludeApp,
+    ExcludeApp,
+    ExcludeDiscord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureReboundInfo {
+    pub pid: u32,
+    pub mode: String,
+    pub reason: String,
+}
 
 /// Sinalizador assíncrono de encerramento da thread OS de captura WASAPI.
 #[derive(Clone, Default)]
@@ -63,6 +84,65 @@ fn target_exited_reason(pid: u32, include_tree: bool) -> String {
         format!("O processo-alvo (PID {}) foi encerrado", pid)
     } else {
         format!("O processo excluído (PID {}) foi encerrado", pid)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TargetExitAction {
+    StopUnexpected(String),
+    RebindExclude {
+        new_pid: u32,
+        mode_label: &'static str,
+        watch_target: bool,
+        in_fallback: bool,
+        reason: String,
+    },
+}
+
+fn decide_after_target_exit(
+    kind: CaptureTargetKind,
+    exited_pid: u32,
+    self_pid: u32,
+    resolved_discord_pid: Option<u32>,
+) -> TargetExitAction {
+    match kind {
+        CaptureTargetKind::IncludeApp => {
+            TargetExitAction::StopUnexpected(target_exited_reason(exited_pid, true))
+        }
+        CaptureTargetKind::ExcludeApp => TargetExitAction::RebindExclude {
+            new_pid: self_pid,
+            mode_label: "system_fallback",
+            watch_target: false,
+            in_fallback: true,
+            reason: format!(
+                "O aplicativo excluído (PID {}) foi encerrado; mantendo áudio do sistema.",
+                exited_pid
+            ),
+        },
+        CaptureTargetKind::ExcludeDiscord => {
+            if let Some(new_pid) =
+                resolved_discord_pid.filter(|p| *p != 0 && *p != exited_pid && *p != self_pid)
+            {
+                TargetExitAction::RebindExclude {
+                    new_pid,
+                    mode_label: "exclude_discord",
+                    watch_target: true,
+                    in_fallback: false,
+                    reason: format!(
+                        "Discord reiniciado (novo PID {}); exclusão atualizada automaticamente.",
+                        new_pid
+                    ),
+                }
+            } else {
+                TargetExitAction::RebindExclude {
+                    new_pid: self_pid,
+                    mode_label: "system_fallback",
+                    watch_target: false,
+                    in_fallback: true,
+                    reason: "Discord encerrado; mantendo áudio completo do sistema.".into(),
+                }
+            }
+        }
     }
 }
 
@@ -148,6 +228,11 @@ impl SilenceSyncTracker {
         }
     }
 
+    pub fn resync(&mut self, now: Instant, total_frames_sent: u64, current_queued_frames: u64) {
+        self.sync_time = now;
+        self.baseline_produced_at_sync = total_frames_sent.saturating_add(current_queued_frames);
+    }
+
     /// Calcula frames de silêncio faltantes desde a última sincronização.
     /// Quando o déficit ultrapassa `MAX_SILENCE_BURST_FRAMES`, ressincroniza o relógio
     /// com `now` e os frames já produzidos, retornando `0` apenas naquele ciclo.
@@ -227,20 +312,125 @@ fn flush_sample_chunks(
     true
 }
 
-/// Inicia captura WASAPI Application Loopback em thread dedicada com apartamento COM MTA.
-/// `include_tree`: true = INCLUDE (apenas o processo alvo); false = EXCLUDE (sistema exceto alvo).
-pub async fn start_wasapi_capture<F>(
-    pid: u32,
+struct ActiveLoopbackStream {
+    audio_client: AudioClient,
+    h_event: Handle,
+    capture_client: AudioCaptureClient,
+}
+
+impl ActiveLoopbackStream {
+    fn stop_and_drop(self) {
+        let _ = self.audio_client.stop_stream();
+    }
+}
+
+fn open_loopback_stream(
+    target_pid: u32,
     include_tree: bool,
+    desired_format: &WaveFormat,
+    stop_signal: &AtomicBool,
+) -> Result<ActiveLoopbackStream, String> {
+    let mut audio_client = AudioClient::new_application_loopback_client(target_pid, include_tree)
+        .map_err(|e| {
+        let mode_desc = if include_tree {
+            "inclusão"
+        } else {
+            "exclusão"
+        };
+        format!(
+            "Falha ao criar loopback WASAPI (modo {}) para PID {}: {:?}",
+            mode_desc, target_pid, e
+        )
+    })?;
+
+    let mode = StreamMode::EventsShared {
+        autoconvert: true,
+        buffer_duration_hns: 0,
+    };
+
+    audio_client
+        .initialize_client(desired_format, &Direction::Capture, &mode)
+        .map_err(|e| format!("Falha ao inicializar cliente WASAPI: {:?}", e))?;
+
+    let h_event = audio_client
+        .set_get_eventhandle()
+        .map_err(|e| format!("Falha ao obter evento de sincronia WASAPI: {:?}", e))?;
+
+    let capture_client = audio_client
+        .get_audiocaptureclient()
+        .map_err(|e| format!("Falha ao obter AudioCaptureClient: {:?}", e))?;
+
+    if stop_signal.load(Ordering::Acquire) {
+        return Err("Captura de áudio cancelada antes do início.".into());
+    }
+
+    audio_client
+        .start_stream()
+        .map_err(|e| format!("Falha ao iniciar stream WASAPI: {:?}", e))?;
+
+    Ok(ActiveLoopbackStream {
+        audio_client,
+        h_event,
+        capture_client,
+    })
+}
+
+struct RebindOutcome {
+    stream: ActiveLoopbackStream,
+    watcher: Option<TargetProcessWatcher>,
+    info: CaptureReboundInfo,
+}
+
+fn rebind_exclude_stream(
+    active_stream: &mut Option<ActiveLoopbackStream>,
+    new_pid: u32,
+    watch_target: bool,
+    mode_label: &str,
+    reason: String,
+    desired_format: &WaveFormat,
+    stop_signal: &AtomicBool,
+) -> Result<Option<RebindOutcome>, String> {
+    if let Some(prev) = active_stream.take() {
+        prev.stop_and_drop();
+    }
+    if stop_signal.load(Ordering::Acquire) {
+        return Ok(None);
+    }
+    let next_stream = open_loopback_stream(new_pid, false, desired_format, stop_signal)?;
+    let watcher = if watch_target {
+        TargetProcessWatcher::open(new_pid, Instant::now())
+    } else {
+        None
+    };
+    Ok(Some(RebindOutcome {
+        stream: next_stream,
+        watcher,
+        info: CaptureReboundInfo {
+            pid: new_pid,
+            mode: mode_label.to_string(),
+            reason,
+        },
+    }))
+}
+
+/// Inicia captura WASAPI Application Loopback em thread dedicada com apartamento COM MTA.
+/// Em modos de exclusão (`ExcludeApp` / `ExcludeDiscord`), preserva o fluxo de áudio de sistema
+/// caso o processo excluído seja encerrado ou reiniciado.
+pub async fn start_wasapi_capture<F, R>(
+    pid: u32,
+    target_kind: CaptureTargetKind,
     audio_tx: mpsc::Sender<Vec<u8>>,
     stop_signal: Arc<AtomicBool>,
     exit_signal: CaptureExitSignal,
     on_unexpected_stop: F,
+    mut on_target_rebound: R,
 ) -> Result<(u32, u16), String>
 where
-    F: FnOnce(String) + Send + 'static,
+    F: FnOnce(u32, String) + Send + 'static,
+    R: FnMut(CaptureReboundInfo) + Send + 'static,
 {
     let (ready_tx, ready_rx) = oneshot::channel();
+    let include_tree = target_kind == CaptureTargetKind::IncludeApp;
 
     std::thread::spawn(move || {
         // Declarado primeiro para dropar por último (após drop do AudioClient).
@@ -256,99 +446,57 @@ where
             None,
         );
         let blockalign = desired_format.get_blockalign() as usize;
-        let autoconvert = true;
+        let self_pid = unsafe { GetCurrentProcessId() };
 
-        let mut audio_client = match AudioClient::new_application_loopback_client(pid, include_tree)
-        {
-            Ok(c) => c,
-            Err(e) => {
-                let mode_desc = if include_tree {
-                    "inclusão"
-                } else {
-                    "exclusão"
-                };
-                let _ = ready_tx.send(Err(format!(
-                    "Falha ao criar loopback WASAPI (modo {}) para PID {}: {:?}",
-                    mode_desc, pid, e
-                )));
-                return;
-            }
-        };
-
-        let mode = StreamMode::EventsShared {
-            autoconvert,
-            buffer_duration_hns: 0,
-        };
-
-        if let Err(e) = audio_client.initialize_client(&desired_format, &Direction::Capture, &mode)
-        {
-            let _ = ready_tx.send(Err(format!("Falha ao inicializar cliente WASAPI: {:?}", e)));
-            return;
-        }
-
-        let h_event = match audio_client.set_get_eventhandle() {
-            Ok(h) => h,
-            Err(e) => {
-                let _ = ready_tx.send(Err(format!(
-                    "Falha ao obter evento de sincronia WASAPI: {:?}",
-                    e
-                )));
-                return;
-            }
-        };
-
-        let capture_client = match audio_client.get_audiocaptureclient() {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = ready_tx.send(Err(format!("Falha ao obter AudioCaptureClient: {:?}", e)));
-                return;
-            }
-        };
-
-        if stop_signal.load(Ordering::Acquire) {
-            let _ = ready_tx.send(Err("Captura de áudio cancelada antes do início.".into()));
-            return;
-        }
-
-        if let Err(e) = audio_client.start_stream() {
-            let _ = ready_tx.send(Err(format!("Falha ao iniciar stream WASAPI: {:?}", e)));
-            return;
-        }
+        let mut active_stream =
+            match open_loopback_stream(pid, include_tree, &desired_format, &stop_signal) {
+                Ok(stream) => Some(stream),
+                Err(err) => {
+                    let _ = ready_tx.send(Err(err));
+                    return;
+                }
+            };
 
         let _ = ready_tx.send(Ok((SAMPLE_RATE, CHANNELS)));
 
+        let mut current_pid = pid;
         let mut sample_queue: VecDeque<u8> = VecDeque::new();
         let chunk_bytes = CHUNK_FRAMES * blockalign;
         let mut silence_sync = SilenceSyncTracker::new(Instant::now());
         let mut total_frames_sent: u64 = 0;
         let mut unexpected_reason: Option<String> = None;
-        let mut process_watcher = TargetProcessWatcher::open(pid, Instant::now());
+        let mut process_watcher = TargetProcessWatcher::open(current_pid, Instant::now());
+        let mut in_discord_fallback = false;
+        let mut last_discord_probe = Instant::now();
 
         while !stop_signal.load(Ordering::Acquire) {
             let mut read_error = false;
-            while !stop_signal.load(Ordering::Acquire) {
-                match capture_client.get_next_packet_size() {
-                    Ok(Some(new_frames)) if new_frames > 0 => {
-                        sample_queue.reserve(new_frames as usize * blockalign);
+            if let Some(stream) = active_stream.as_ref() {
+                while !stop_signal.load(Ordering::Acquire) {
+                    match stream.capture_client.get_next_packet_size() {
+                        Ok(Some(new_frames)) if new_frames > 0 => {
+                            sample_queue.reserve(new_frames as usize * blockalign);
 
-                        if capture_client
-                            .read_from_device_to_deque(&mut sample_queue)
-                            .is_err()
-                        {
-                            eprintln!("[WASAPI] Read device error");
+                            if stream
+                                .capture_client
+                                .read_from_device_to_deque(&mut sample_queue)
+                                .is_err()
+                            {
+                                eprintln!("[WASAPI] Read device error");
+                                unexpected_reason =
+                                    Some("Dispositivo ou processo de áudio indisponível".into());
+                                read_error = true;
+                                break;
+                            }
+                        }
+                        Ok(_) => break,
+                        Err(_) => {
+                            eprintln!("[WASAPI] get_next_packet_size error");
                             unexpected_reason =
-                                Some("Dispositivo ou processo de áudio indisponível".into());
+                                Some("Dispositivo de áudio desconectado ou invalidado".into());
                             read_error = true;
                             break;
                         }
-                    }
-                    Ok(_) => break,
-                    Err(_) => {
-                        eprintln!("[WASAPI] get_next_packet_size error");
-                        unexpected_reason =
-                            Some("Dispositivo de áudio desconectado ou invalidado".into());
-                        read_error = true;
-                        break;
                     }
                 }
             }
@@ -360,10 +508,96 @@ where
             let now = Instant::now();
             if let Some(watcher) = process_watcher.as_mut() {
                 if watcher.poll_exited(now) {
-                    if !stop_signal.load(Ordering::Acquire) {
-                        unexpected_reason = Some(target_exited_reason(pid, include_tree));
+                    if stop_signal.load(Ordering::Acquire) {
+                        break;
                     }
-                    break;
+                    let resolved_discord = if target_kind == CaptureTargetKind::ExcludeDiscord {
+                        find_discord_root_pid()
+                    } else {
+                        None
+                    };
+                    match decide_after_target_exit(
+                        target_kind,
+                        current_pid,
+                        self_pid,
+                        resolved_discord,
+                    ) {
+                        TargetExitAction::StopUnexpected(reason) => {
+                            unexpected_reason = Some(reason);
+                            break;
+                        }
+                        TargetExitAction::RebindExclude {
+                            new_pid,
+                            mode_label,
+                            watch_target,
+                            in_fallback,
+                            reason,
+                        } => match rebind_exclude_stream(
+                            &mut active_stream,
+                            new_pid,
+                            watch_target,
+                            mode_label,
+                            reason,
+                            &desired_format,
+                            &stop_signal,
+                        ) {
+                            Ok(Some(outcome)) => {
+                                active_stream = Some(outcome.stream);
+                                current_pid = new_pid;
+                                in_discord_fallback = in_fallback;
+                                last_discord_probe = Instant::now();
+                                process_watcher = outcome.watcher;
+                                let queued = (sample_queue.len() / blockalign) as u64;
+                                silence_sync.resync(Instant::now(), total_frames_sent, queued);
+                                on_target_rebound(outcome.info);
+                            }
+                            Ok(None) => break,
+                            Err(err) => {
+                                if !stop_signal.load(Ordering::Acquire) {
+                                    unexpected_reason = Some(err);
+                                }
+                                break;
+                            }
+                        },
+                    }
+                }
+            } else if in_discord_fallback
+                && target_kind == CaptureTargetKind::ExcludeDiscord
+                && should_poll_process(last_discord_probe, now, DISCORD_REACQUIRE_INTERVAL)
+            {
+                last_discord_probe = now;
+                if let Some(new_pid) = find_discord_root_pid().filter(|p| *p != 0 && *p != self_pid)
+                {
+                    let reason = format!(
+                        "Discord detectado (PID {}); voltando a excluir chamadas.",
+                        new_pid
+                    );
+                    match rebind_exclude_stream(
+                        &mut active_stream,
+                        new_pid,
+                        true,
+                        "exclude_discord",
+                        reason,
+                        &desired_format,
+                        &stop_signal,
+                    ) {
+                        Ok(Some(outcome)) => {
+                            active_stream = Some(outcome.stream);
+                            current_pid = new_pid;
+                            in_discord_fallback = false;
+                            process_watcher = outcome.watcher;
+                            let queued = (sample_queue.len() / blockalign) as u64;
+                            silence_sync.resync(Instant::now(), total_frames_sent, queued);
+                            on_target_rebound(outcome.info);
+                        }
+                        Ok(None) => break,
+                        Err(err) => {
+                            if !stop_signal.load(Ordering::Acquire) {
+                                unexpected_reason = Some(err);
+                            }
+                            break;
+                        }
+                    }
                 }
             }
 
@@ -400,14 +634,18 @@ where
                 }
             }
 
-            let _ = h_event.wait_for_event(10);
+            if let Some(stream) = active_stream.as_ref() {
+                let _ = stream.h_event.wait_for_event(10);
+            }
         }
 
-        let _ = audio_client.stop_stream();
-        eprintln!("[WASAPI] Stream finalizado para PID {}", pid);
+        if let Some(stream) = active_stream.take() {
+            stream.stop_and_drop();
+        }
+        eprintln!("[WASAPI] Stream finalizado para PID {}", current_pid);
         if let Some(reason) = unexpected_reason {
             if !stop_signal.load(Ordering::Acquire) {
-                on_unexpected_stop(reason);
+                on_unexpected_stop(current_pid, reason);
             }
         }
     });
@@ -421,9 +659,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_missing_silence_frames, flush_sample_chunks, should_poll_process,
-        target_exited_reason, trim_sample_queue_excess, SilenceSyncTracker, TargetProcessWatcher,
-        CHUNK_FRAMES, MAX_SILENCE_BURST_FRAMES, PROCESS_CHECK_INTERVAL,
+        compute_missing_silence_frames, decide_after_target_exit, flush_sample_chunks,
+        should_poll_process, target_exited_reason, trim_sample_queue_excess, CaptureTargetKind,
+        SilenceSyncTracker, TargetExitAction, TargetProcessWatcher, CHUNK_FRAMES,
+        MAX_SILENCE_BURST_FRAMES, PROCESS_CHECK_INTERVAL,
     };
     use std::collections::VecDeque;
     use std::process::Command;
@@ -594,6 +833,75 @@ mod tests {
         assert_eq!(
             target_exited_reason(4242, false),
             "O processo excluído (PID 4242) foi encerrado"
+        );
+    }
+
+    #[test]
+    fn decide_after_target_exit_handles_include_exclude_and_discord_restart() {
+        assert_eq!(
+            decide_after_target_exit(CaptureTargetKind::IncludeApp, 1001, 9999, Some(2002)),
+            TargetExitAction::StopUnexpected("O processo-alvo (PID 1001) foi encerrado".into())
+        );
+
+        assert_eq!(
+            decide_after_target_exit(CaptureTargetKind::ExcludeApp, 1002, 9999, None),
+            TargetExitAction::RebindExclude {
+                new_pid: 9999,
+                mode_label: "system_fallback",
+                watch_target: false,
+                in_fallback: true,
+                reason:
+                    "O aplicativo excluído (PID 1002) foi encerrado; mantendo áudio do sistema."
+                        .into(),
+            }
+        );
+
+        assert_eq!(
+            decide_after_target_exit(CaptureTargetKind::ExcludeDiscord, 1003, 9999, Some(2003)),
+            TargetExitAction::RebindExclude {
+                new_pid: 2003,
+                mode_label: "exclude_discord",
+                watch_target: true,
+                in_fallback: false,
+                reason: "Discord reiniciado (novo PID 2003); exclusão atualizada automaticamente."
+                    .into(),
+            }
+        );
+
+        assert_eq!(
+            decide_after_target_exit(CaptureTargetKind::ExcludeDiscord, 1003, 9999, None),
+            TargetExitAction::RebindExclude {
+                new_pid: 9999,
+                mode_label: "system_fallback",
+                watch_target: false,
+                in_fallback: true,
+                reason: "Discord encerrado; mantendo áudio completo do sistema.".into(),
+            }
+        );
+
+        // Stale same PID should trigger system fallback rather than looping on dead PID
+        assert_eq!(
+            decide_after_target_exit(CaptureTargetKind::ExcludeDiscord, 1003, 9999, Some(1003)),
+            TargetExitAction::RebindExclude {
+                new_pid: 9999,
+                mode_label: "system_fallback",
+                watch_target: false,
+                in_fallback: true,
+                reason: "Discord encerrado; mantendo áudio completo do sistema.".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn tracker_explicit_resync_resets_clock_baseline_after_rebind() {
+        let t0 = Instant::now();
+        let mut tracker = SilenceSyncTracker::new(t0);
+        let t_rebind = t0 + Duration::from_secs(5);
+        tracker.resync(t_rebind, 10_000, 480);
+        assert_eq!(tracker.compute_missing_or_resync(t_rebind, 10_000, 480), 0);
+        assert_eq!(
+            tracker.compute_missing_or_resync(t_rebind + Duration::from_millis(10), 10_480, 0),
+            480
         );
     }
 }

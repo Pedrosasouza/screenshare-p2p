@@ -7,7 +7,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
 use windows::Win32::System::Threading::GetCurrentProcessId;
 
-use crate::audio::wasapi_capture::{start_wasapi_capture, CaptureExitSignal};
+use crate::audio::wasapi_capture::{
+    start_wasapi_capture, CaptureExitSignal, CaptureReboundInfo, CaptureTargetKind,
+};
 use crate::audio::windows_enum::{
     find_discord_root_pid, get_discord_status as fetch_discord_status, list_application_windows,
     DiscordStatus, WindowInfo,
@@ -114,6 +116,11 @@ impl AudioCaptureState {
         self.lock_inner().generation == gen
     }
 
+    pub fn is_committed_generation_active(&self, gen: u64) -> bool {
+        let guard = self.lock_inner();
+        guard.generation == gen && guard.active_committed
+    }
+
     fn clear_pending_if_generation(&self, gen: u64) {
         let mut guard = self.lock_inner();
         if guard.generation == gen {
@@ -196,6 +203,14 @@ struct CaptureStoppedEvent {
     reason: String,
 }
 
+#[derive(Serialize, Clone)]
+struct CaptureReboundEvent {
+    pid: u32,
+    generation: u64,
+    mode: String,
+    reason: String,
+}
+
 #[derive(Serialize, Debug, Clone)]
 pub struct CaptureStartedInfo {
     pub pid: u32,
@@ -209,10 +224,11 @@ pub struct CaptureStartedInfo {
 async fn start_capture_session(
     app: AppHandle,
     pid: u32,
-    include_tree: bool,
+    target_kind: CaptureTargetKind,
     on_audio: Channel<InvokeResponseBody>,
     state: &AudioCaptureState,
 ) -> Result<CaptureStartedInfo, String> {
+    let include_tree = target_kind == CaptureTargetKind::IncludeApp;
     let current_pid = unsafe { GetCurrentProcessId() };
     validate_capture_target(pid, include_tree, current_pid)?;
 
@@ -233,14 +249,15 @@ async fn start_capture_session(
     }
 
     let app_for_stop = app.clone();
+    let app_for_rebound = app.clone();
 
     let (sample_rate, channels) = match start_wasapi_capture(
         pid,
-        include_tree,
+        target_kind,
         audio_tx,
         stop_signal.clone(),
         exit_signal.clone(),
-        move |reason| {
+        move |stopped_pid, reason| {
             if app_for_stop
                 .state::<AudioCaptureState>()
                 .clear_committed_session_if_generation(gen)
@@ -248,9 +265,25 @@ async fn start_capture_session(
                 let _ = app_for_stop.emit(
                     "wasapi-capture-stopped",
                     CaptureStoppedEvent {
-                        pid,
+                        pid: stopped_pid,
                         generation: gen,
                         reason,
+                    },
+                );
+            }
+        },
+        move |info: CaptureReboundInfo| {
+            if app_for_rebound
+                .state::<AudioCaptureState>()
+                .is_committed_generation_active(gen)
+            {
+                let _ = app_for_rebound.emit(
+                    "wasapi-capture-rebound",
+                    CaptureReboundEvent {
+                        pid: info.pid,
+                        generation: gen,
+                        mode: info.mode,
+                        reason: info.reason,
                     },
                 );
             }
@@ -322,8 +355,12 @@ pub async fn start_capture(
     on_audio: Channel<InvokeResponseBody>,
     state: State<'_, AudioCaptureState>,
 ) -> Result<CaptureStartedInfo, String> {
-    let include_tree = !exclude.unwrap_or(false);
-    start_capture_session(app, pid, include_tree, on_audio, state.inner()).await
+    let target_kind = if exclude.unwrap_or(false) {
+        CaptureTargetKind::ExcludeApp
+    } else {
+        CaptureTargetKind::IncludeApp
+    };
+    start_capture_session(app, pid, target_kind, on_audio, state.inner()).await
 }
 
 #[tauri::command]
@@ -337,7 +374,14 @@ pub async fn start_exclude_discord(
         .ok()
         .flatten()
         .ok_or_else(|| "O Discord não foi encontrado em execução no Windows.".to_string())?;
-    start_capture_session(app, discord_pid, false, on_audio, state.inner()).await
+    start_capture_session(
+        app,
+        discord_pid,
+        CaptureTargetKind::ExcludeDiscord,
+        on_audio,
+        state.inner(),
+    )
+    .await
 }
 
 #[tauri::command]

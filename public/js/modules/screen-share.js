@@ -558,6 +558,13 @@ export function createScreenShareController({
         await Promise.allSettled(renegotiationPromises);
     }
 
+    function handleDesktopCaptureRebound(payload) {
+        const message = payload && payload.reason
+            ? payload.reason
+            : 'Alvo de exclusão de áudio atualizado; mantendo captura do sistema.';
+        showToast(message, 'info', 4500);
+    }
+
     function invalidateGeneration() {
         shareMeta._generation = (shareMeta._generation || 0) + 1;
     }
@@ -572,6 +579,7 @@ export function createScreenShareController({
         startScreenShare,
         stopScreenShare,
         handleDesktopCaptureStopped,
+        handleDesktopCaptureRebound,
         invalidateGeneration,
         bindEvents
     };

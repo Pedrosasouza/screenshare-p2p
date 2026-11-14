@@ -309,7 +309,11 @@ export function initApp({
         checkDiscordStatus(windowObj, documentObj);
         fetchWindowList(windowObj, documentObj);
         Promise.resolve(
-            registerDesktopCaptureListeners((payload) => screenShare.handleDesktopCaptureStopped(payload), windowObj)
+            registerDesktopCaptureListeners(
+                (payload) => screenShare.handleDesktopCaptureStopped(payload),
+                windowObj,
+                (payload) => screenShare.handleDesktopCaptureRebound(payload)
+            )
         ).then((unlisten) => {
             if (isTornDown) {
                 if (typeof unlisten === 'function') unlisten();

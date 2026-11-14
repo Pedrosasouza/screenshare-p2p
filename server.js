@@ -13,8 +13,12 @@ const {
 const {
     MAX_LOGIN_ATTEMPTS_ENTRIES,
     getHttpClientIp,
+    getClientIdentifier,
     createHttpIceRateLimiter,
     createCheckRoomRateLimiter,
+    createRoomCreationRateLimiter,
+    resolveMaxSocketsPerIp,
+    createIpConnectionTracker,
     createAttemptTracker
 } = require('./src/server/rate-limit');
 const { createIceServersResolver } = require('./src/server/ice');
@@ -65,7 +69,26 @@ function createServerApp({ env = process.env, fetchImpl = global.fetch } = {}) {
     const attemptTracker = createAttemptTracker();
     const iceRateLimiter = createHttpIceRateLimiter();
     const checkRoomRateLimiter = createCheckRoomRateLimiter();
+    const roomCreationRateLimiter = createRoomCreationRateLimiter();
+    const ipConnectionTracker = createIpConnectionTracker({
+        maxConnectionsPerIp: resolveMaxSocketsPerIp(env)
+    });
     const defaultIceServersResolver = createIceServersResolver({ env, fetchImpl });
+
+    io.use((socket, next) => {
+        const clientIp = getClientIdentifier(socket, env);
+        if (!ipConnectionTracker.tryAcquire(clientIp)) {
+            return next(new Error('too_many_connections'));
+        }
+        let released = false;
+        socket.once('disconnect', () => {
+            if (!released) {
+                released = true;
+                ipConnectionTracker.release(clientIp);
+            }
+        });
+        return next();
+    });
 
     app.get('/health', (_req, res) => {
         res.json({
@@ -129,13 +152,20 @@ function createServerApp({ env = process.env, fetchImpl = global.fetch } = {}) {
         }
     });
 
-    registerSignalingHandlers(io, { rooms, attemptTracker, checkRoomRateLimiter, env });
+    registerSignalingHandlers(io, {
+        rooms,
+        attemptTracker,
+        checkRoomRateLimiter,
+        roomCreationRateLimiter,
+        env
+    });
 
     const cleanupInterval = setInterval(() => {
         const now = Date.now();
         attemptTracker.purgeExpired(now);
         iceRateLimiter.purgeExpired(now);
         checkRoomRateLimiter.purgeExpired(now);
+        roomCreationRateLimiter.purgeExpired(now);
         for (const [roomId, room] of rooms.entries()) {
             if (!room || !room.members || room.members.size === 0) {
                 rooms.delete(roomId);
@@ -164,6 +194,8 @@ function createServerApp({ env = process.env, fetchImpl = global.fetch } = {}) {
         createIceServersResolver,
         iceRateLimitMap: iceRateLimiter.iceRateLimitMap,
         checkRoomRateLimiter,
+        roomCreationRateLimiter,
+        ipConnectionTracker,
         isValidSignal,
         stopCleanupTimer
     };

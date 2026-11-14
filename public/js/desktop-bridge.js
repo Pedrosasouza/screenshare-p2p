@@ -118,7 +118,7 @@
         return invokeCommand('stop_capture');
     }
 
-    async function onCaptureStopped(callback) {
+    async function listenDesktopEvent(eventName, callback) {
         if (!isDesktop() || typeof callback !== 'function') {
             return () => {};
         }
@@ -126,12 +126,20 @@
         if (!eventApi) {
             return () => {};
         }
-        return eventApi.listen('wasapi-capture-stopped', (event) => {
+        return eventApi.listen(eventName, (event) => {
             const payload = event && typeof event === 'object' && 'payload' in event
                 ? event.payload
                 : event;
             callback(payload);
         });
+    }
+
+    async function onCaptureStopped(callback) {
+        return listenDesktopEvent('wasapi-capture-stopped', callback);
+    }
+
+    async function onCaptureRebound(callback) {
+        return listenDesktopEvent('wasapi-capture-rebound', callback);
     }
 
     return {
@@ -144,5 +152,6 @@
         startExcludeDiscordCapture,
         stopAppAudioCapture,
         onCaptureStopped,
+        onCaptureRebound,
     };
 });

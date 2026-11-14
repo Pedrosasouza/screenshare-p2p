@@ -1,5 +1,10 @@
 const { hashPassword, verifyPassword } = require('./password');
-const { getClientIdentifier, safeHandler, createCheckRoomRateLimiter } = require('./rate-limit');
+const {
+    getClientIdentifier,
+    safeHandler,
+    createCheckRoomRateLimiter,
+    createRoomCreationRateLimiter
+} = require('./rate-limit');
 
 const ROOM_ID_REGEX = /^[a-z0-9_-]{3,64}$/;
 const MAX_ROOMS = 2000;
@@ -37,6 +42,7 @@ function registerSignalingHandlers(
         rooms,
         attemptTracker,
         checkRoomRateLimiter = createCheckRoomRateLimiter(),
+        roomCreationRateLimiter = createRoomCreationRateLimiter(),
         env = process.env
     }
 ) {
@@ -137,6 +143,13 @@ function registerSignalingHandlers(
                         socket.emit('join-error', {
                             error: 'server_busy',
                             message: 'Limite máximo de salas ativas atingido. Tente novamente em instantes.'
+                        });
+                        return;
+                    }
+                    if (roomCreationRateLimiter && !roomCreationRateLimiter.check(clientKey)) {
+                        socket.emit('join-error', {
+                            error: 'rate_limited',
+                            message: 'Muitas salas criadas recentemente. Aguarde alguns instantes antes de criar outra sala.'
                         });
                         return;
                     }

@@ -462,4 +462,60 @@ describe('Sessão Desktop WASAPI / AudioWorklet (desktop-audio.js)', () => {
             assert.deepStrictEqual(startCalls[0].options, { exclude: true });
         });
     });
+
+    it('T10: wasapi-capture-rebound atualiza PID da sessão ativa para futuros eventos de parada', async () => {
+        let onStopCb = null;
+        let onReboundCb = null;
+        let stopIpcCalls = 0;
+        const stopNotifications = [];
+        const reboundNotifications = [];
+
+        await withDesktopEnv({
+            customDesktopApi: {
+                isDesktop: () => true,
+                startExcludeDiscordCapture: async () => ({
+                    pid: 4242,
+                    generation: 3,
+                    sample_rate: 48000,
+                    channels: 2,
+                    mode: 'exclude'
+                }),
+                stopAppAudioCapture: async () => { stopIpcCalls++; },
+                onCaptureStopped: async (cb) => {
+                    onStopCb = cb;
+                    return () => {};
+                },
+                onCaptureRebound: async (cb) => {
+                    onReboundCb = cb;
+                    return () => {};
+                }
+            }
+        }, async ({ mod, windowObj }) => {
+            await mod.registerDesktopCaptureListeners(
+                (payload) => stopNotifications.push(payload),
+                windowObj,
+                (payload) => reboundNotifications.push(payload)
+            );
+            const track = await mod.startExcludeDiscordCapture(windowObj);
+            assert.ok(track && track.kind === 'audio');
+
+            // Rebound obsoleto (outra geração) deve ser ignorado
+            onReboundCb({ pid: 9991, generation: 2, mode: 'exclude_discord', reason: 'stale' });
+            assert.strictEqual(reboundNotifications.length, 0);
+
+            // Rebound da geração ativa (Discord reiniciou ou foi para fallback 9999)
+            onReboundCb({ pid: 9999, generation: 3, mode: 'system_fallback', reason: 'Discord encerrado' });
+            assert.strictEqual(reboundNotifications.length, 1);
+            assert.strictEqual(stopIpcCalls, 0);
+
+            // Stop antigo com PID anterior (4242) é ignorado porque PID ativo agora é 9999
+            onStopCb({ pid: 4242, generation: 3, reason: 'stale_pid' });
+            assert.strictEqual(stopNotifications.length, 0);
+
+            // Stop real com o PID atualizado (9999) e geração 3 encerra normalmente
+            onStopCb({ pid: 9999, generation: 3, reason: 'device_error' });
+            assert.strictEqual(stopIpcCalls, 1);
+            assert.strictEqual(stopNotifications.length, 1);
+        });
+    });
 });

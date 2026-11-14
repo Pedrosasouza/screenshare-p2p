@@ -597,3 +597,32 @@ test('T9: startScreenShare com modo app + excludeApp=true usa startExcludeAppCap
     assert.equal(wasapiCancelTrack.stopped, true);
     assert.ok(envCancel.events.some((e) => e.type === 'stopAppAudioCapture'));
 });
+
+test('T10: handleDesktopCaptureRebound exibe aviso informativo sem interromper a trilha de áudio', async () => {
+    const mods = await loadModules();
+    const excludeTrack = createMockTrack('audio', 'a-discord-excl', { _isDesktopWasapiTrack: true });
+    const screenVideo = createMockTrack('video', 'v-discord-excl');
+
+    const env = createScreenShareEnv(mods, {
+        startExcludeDiscordCapture: async () => excludeTrack
+    });
+    env.navigatorObj.mediaDevices.getDisplayMedia = async () => new MockMediaStream([screenVideo]);
+
+    await env.controller.startScreenShare('exclude_discord');
+    assert.ok(env.state.localStream);
+    assert.equal(env.state.localStream.getAudioTracks()[0], excludeTrack);
+
+    env.controller.handleDesktopCaptureRebound({
+        pid: 9999,
+        generation: 1,
+        mode: 'system_fallback',
+        reason: 'Discord encerrado; mantendo áudio completo do sistema.'
+    });
+
+    assert.equal(excludeTrack.stopped, false, 'trilha de áudio deve permanecer ativa após rebound');
+    assert.equal(env.state.localStream.getAudioTracks().length, 1);
+    assert.ok(
+        env.events.some((e) => e.type === 'toast' && e.toastType === 'info' && e.msg.includes('mantendo áudio completo do sistema')),
+        'deve exibir toast informativo sobre atualização do modo exclusão'
+    );
+});

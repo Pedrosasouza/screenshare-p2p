@@ -7,6 +7,7 @@ let activeAudioWorkletNode = null;
 let helperAudioDestination = null;
 let desktopCaptureGeneration = 0;
 let captureStoppedUnlisten = null;
+let captureReboundUnlisten = null;
 let helperSuspendPromise = null;
 let latestStartGeneration = 0;
 let latestStopGeneration = 0;
@@ -292,7 +293,12 @@ export function stopAppAudioCapture(windowObj) {
     }
 }
 
-export async function registerDesktopCaptureListeners(onUnexpectedStop, windowObj) {
+/**
+ * @param {(payload: any) => void} [onUnexpectedStop]
+ * @param {any} [windowObj]
+ * @param {(payload: any) => void} [onCaptureReboundCb]
+ */
+export async function registerDesktopCaptureListeners(onUnexpectedStop, windowObj, onCaptureReboundCb) {
     const win = getRuntimeWindow(windowObj);
     if (!isDesktopApp(win) || !win || !win.StreamGridDesktop || typeof win.StreamGridDesktop.onCaptureStopped !== 'function') {
         return () => {};
@@ -301,7 +307,12 @@ export async function registerDesktopCaptureListeners(onUnexpectedStop, windowOb
         try { captureStoppedUnlisten(); } catch (_) {}
         captureStoppedUnlisten = null;
     }
-    const unlisten = await win.StreamGridDesktop.onCaptureStopped((payload) => {
+    if (typeof captureReboundUnlisten === 'function') {
+        try { captureReboundUnlisten(); } catch (_) {}
+        captureReboundUnlisten = null;
+    }
+
+    const unlistenStop = await win.StreamGridDesktop.onCaptureStopped((payload) => {
         if (typeof activeCaptureSessionMeta !== 'undefined' && activeCaptureSessionMeta) {
             if (
                 payload &&
@@ -325,6 +336,38 @@ export async function registerDesktopCaptureListeners(onUnexpectedStop, windowOb
             onUnexpectedStop(payload);
         }
     });
-    captureStoppedUnlisten = typeof unlisten === 'function' ? unlisten : null;
-    return captureStoppedUnlisten || (() => {});
+    captureStoppedUnlisten = typeof unlistenStop === 'function' ? unlistenStop : null;
+
+    if (typeof win.StreamGridDesktop.onCaptureRebound === 'function') {
+        const unlistenRebound = await win.StreamGridDesktop.onCaptureRebound((payload) => {
+            if (typeof activeCaptureSessionMeta !== 'undefined' && activeCaptureSessionMeta) {
+                if (
+                    payload &&
+                    typeof payload.generation === 'number' &&
+                    activeCaptureSessionMeta.generation !== null &&
+                    payload.generation !== activeCaptureSessionMeta.generation
+                ) {
+                    return;
+                }
+                if (payload && typeof payload.pid === 'number') {
+                    activeCaptureSessionMeta.pid = payload.pid;
+                }
+            }
+            if (typeof onCaptureReboundCb === 'function') {
+                onCaptureReboundCb(payload);
+            }
+        });
+        captureReboundUnlisten = typeof unlistenRebound === 'function' ? unlistenRebound : null;
+    }
+
+    return () => {
+        if (typeof captureStoppedUnlisten === 'function') {
+            try { captureStoppedUnlisten(); } catch (_) {}
+            captureStoppedUnlisten = null;
+        }
+        if (typeof captureReboundUnlisten === 'function') {
+            try { captureReboundUnlisten(); } catch (_) {}
+            captureReboundUnlisten = null;
+        }
+    };
 }
