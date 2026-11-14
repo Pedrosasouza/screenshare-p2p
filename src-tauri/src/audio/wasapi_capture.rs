@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
-use tokio::sync::{mpsc, oneshot};
+use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, oneshot, Notify};
 use wasapi::{initialize_mta, AudioClient, Direction, SampleType, StreamMode, WaveFormat};
 
 pub const SAMPLE_RATE: u32 = 48_000;
@@ -10,6 +10,44 @@ pub const CHANNELS: u16 = 2;
 pub const CHUNK_FRAMES: usize = 480; // 10ms @ 48kHz
 const MAX_SILENCE_BURST_FRAMES: usize = 4_800; // Max 100ms burst to prevent runaway
 const MAX_QUEUED_FRAMES: usize = (SAMPLE_RATE as usize) / 2; // 500ms cap = 24_000 frames
+
+/// Sinalizador assíncrono de encerramento da thread OS de captura WASAPI.
+#[derive(Clone, Default)]
+pub struct CaptureExitSignal {
+    finished: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+}
+
+impl CaptureExitSignal {
+    pub fn mark_finished(&self) {
+        self.finished.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.finished.load(Ordering::Acquire)
+    }
+
+    pub async fn wait_until(&self, timeout: Duration) -> bool {
+        if self.is_finished() {
+            return true;
+        }
+        let notified = self.notify.notified();
+        if self.is_finished() {
+            return true;
+        }
+        let _ = tokio::time::timeout(timeout, notified).await;
+        self.is_finished()
+    }
+}
+
+struct ExitSignalGuard(CaptureExitSignal);
+
+impl Drop for ExitSignalGuard {
+    fn drop(&mut self) {
+        self.0.mark_finished();
+    }
+}
 
 /// Calcula quantos frames de silêncio sintetizar para manter relógio exato a 48kHz.
 pub fn compute_missing_silence_frames(
@@ -128,6 +166,7 @@ pub async fn start_wasapi_capture<F>(
     include_tree: bool,
     audio_tx: mpsc::Sender<Vec<u8>>,
     stop_signal: Arc<AtomicBool>,
+    exit_signal: CaptureExitSignal,
     on_unexpected_stop: F,
 ) -> Result<(u32, u16), String>
 where
@@ -136,6 +175,8 @@ where
     let (ready_tx, ready_rx) = oneshot::channel();
 
     std::thread::spawn(move || {
+        // Declarado primeiro para dropar por último (após drop do AudioClient).
+        let _exit_guard = ExitSignalGuard(exit_signal);
         let _ = initialize_mta();
 
         let desired_format = WaveFormat::new(

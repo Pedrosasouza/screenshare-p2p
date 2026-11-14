@@ -349,6 +349,51 @@ function runTests() {
         console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
     }
 
+    // T7: Underrun parcial com remaining === 1 atenua suavemente (sem snap imediato para 0) e retomada faz fade-in
+    process.stdout.write('  [Teste] T7: Underrun de 1 amostra não zera bruscamente e retomada aplica fade-in ... ');
+    try {
+        const proc = new ProcessorClass();
+        // 12 * 128 + 1 = 1537 frames constantes (1.0, -1.0)
+        const total = 1537;
+        const interleaved = new Float32Array(total * 2);
+        for (let i = 0; i < total; i++) {
+            interleaved[i * 2] = 1.0;
+            interleaved[i * 2 + 1] = -1.0;
+        }
+        proc.pushInterleaved(interleaved);
+
+        for (let q = 0; q < 12; q++) {
+            proc.process([], makeOutputQuantum(128), {});
+        }
+        assert.strictEqual(proc.availableFrames, 1);
+
+        const outOne = makeOutputQuantum(128);
+        proc.process([], outOne, {});
+        assert.strictEqual(proc.availableFrames, 0);
+        assert.strictEqual(proc.hasStartedPlayback, false);
+        assert(Math.abs(outOne[0][0][0] - 0.5) < 1e-6, `Underrun de 1 amostra deve atenuar para 0.5, obtido ${outOne[0][0][0]}`);
+        assert(Math.abs(outOne[0][1][0] + 0.5) < 1e-6, `Canal R deve atenuar para -0.5, obtido ${outOne[0][1][0]}`);
+        assert.strictEqual(outOne[0][0][1], 0);
+
+        // Retomada após underrun -> pre-bufferiza novamente e faz fade-in suave
+        const resumeSamples = new Float32Array(1536 * 2);
+        for (let i = 0; i < 1536; i++) {
+            resumeSamples[i * 2] = 1.0;
+            resumeSamples[i * 2 + 1] = -1.0;
+        }
+        proc.pushInterleaved(resumeSamples);
+        const outResume = makeOutputQuantum(128);
+        proc.process([], outResume, {});
+        assert.strictEqual(proc.hasStartedPlayback, true);
+        assert(outResume[0][0][0] > 0 && outResume[0][0][0] < 0.2, `Retomada pós-underrun deve iniciar com fade-in suave, obtido ${outResume[0][0][0]}`);
+        assert(outResume[0][0][127] > 0.99, `Ao fim do quantum de retomada ganho deve convergir para 1.0, obtido ${outResume[0][0][127]}`);
+
+        console.log('\x1b[32mPASSOU\x1b[0m');
+    } catch (err) {
+        failures++;
+        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+    }
+
     console.log('\n===============================================================');
     if (failures > 0) {
         console.log(`  ❌ Resultado: ${failures} teste(s) falharam.`);

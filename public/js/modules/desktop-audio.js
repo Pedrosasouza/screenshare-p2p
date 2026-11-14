@@ -164,6 +164,7 @@ export async function startDesktopCaptureWith(startFn) {
         if (!track) {
             throw new Error('Nenhuma trilha de áudio disponível no destino AudioWorklet.');
         }
+        track._isDesktopWasapiTrack = true;
         return track;
     } catch (err) {
         if (captureGen === desktopCaptureGeneration) {

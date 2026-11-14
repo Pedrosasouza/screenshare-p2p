@@ -475,9 +475,237 @@ async function runTests() {
         console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
     }
 
+    // T7: stopScreenShare aguarda sender.replaceTrack(null) resolver antes de sendOffer(peerId)
+    process.stdout.write('  [Teste] T7: stopScreenShare aguarda replaceTrack(null) resolver antes de sendOffer ... ');
+    try {
+        const sentOffers = [];
+        let resolve1, resolve2;
+        const p1 = new Promise((r) => { resolve1 = r; });
+        const p2 = new Promise((r) => { resolve2 = r; });
+
+        const s1 = { track: { id: 'v1', kind: 'video' }, replaceTrack(t) { this.track = t; return p1; } };
+        const s2 = { track: { id: 'a1', kind: 'audio' }, replaceTrack(t) { this.track = t; return p2; } };
+        const sClosed = { track: { id: 'vc', kind: 'video' }, replaceTrack() { return Promise.resolve(); } };
+
+        const pcOpen = {
+            signalingState: 'stable',
+            connectionState: 'connected',
+            getTransceivers: () => [{ sender: s1, direction: 'sendrecv' }, { sender: s2, direction: 'sendonly' }],
+            getSenders: () => [s1, s2]
+        };
+        const pcClosing = {
+            signalingState: 'stable',
+            connectionState: 'closed',
+            getTransceivers: () => [{ sender: sClosed, direction: 'sendonly' }],
+            getSenders: () => [sClosed]
+        };
+
+        const peers = new Map([
+            ['peer-open', { pc: pcOpen }],
+            ['peer-closed', { pc: pcClosing }]
+        ]);
+
+        const sandbox = {
+            Map,
+            Promise,
+            Boolean,
+            peers,
+            roomId: 'room-1',
+            localStream: { getTracks: () => [{ stop() {} }] },
+            document: { getElementById: () => null },
+            btnStartShare: { hidden: true },
+            btnStopShare: { hidden: false },
+            btnQualityToggle: { hidden: false },
+            socket: { emit() {} },
+            stopQualityMonitor() {},
+            stopAppAudioCapture() {},
+            updateGridState() {},
+            sendOffer(id) { sentOffers.push(id); }
+        };
+
+        vm.createContext(sandbox);
+        vm.runInContext(extractFn(bundleSrc, 'stopScreenShare'), sandbox);
+
+        const stopPromise = sandbox.stopScreenShare();
+        assert.strictEqual(sentOffers.length, 0, 'sendOffer não pode disparar antes de replaceTrack(null) resolver');
+
+        resolve1();
+        await delay(10);
+        assert.strictEqual(sentOffers.length, 0, 'sendOffer deve aguardar TODOS os senders de replaceTrack(null)');
+
+        resolve2();
+        await Promise.resolve(stopPromise);
+        await delay(10);
+
+        assert.deepStrictEqual(sentOffers, ['peer-open'], 'sendOffer deve disparar apenas após replaceTrack(null) e ignorar peer fechado');
+        assert.strictEqual(s1.track, null);
+        assert.strictEqual(s2.track, null);
+        console.log('\x1b[32mPASSOU\x1b[0m');
+    } catch (err) {
+        failures++;
+        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+    }
+
+    // T8: socket connect aguarda refreshIceServers concluir antes de scheduleIceRefreshTimer
+    process.stdout.write('  [Teste] T8: Timer inicial ICE usa TTL real após refreshIceServers resolver ... ');
+    try {
+        const fs = require('fs');
+        const path = require('path');
+        const iceConfigSrc = fs.readFileSync(path.resolve(__dirname, '../public/js/modules/ice-config.js'), 'utf8')
+            .replace(/^export\s+/gm, '')
+            .replace(/^import\s+[\s\S]*?;\s*$/gm, '');
+
+        let resolveFetch = null;
+        const fetchGate = new Promise((r) => { resolveFetch = r; });
+        const scheduledDelays = [];
+        const socketHandlers = {};
+
+        const sandbox = {
+            Map,
+            Set,
+            Array,
+            Number,
+            Math,
+            Date,
+            Promise,
+            AbortController: undefined,
+            SERVER_URL: 'https://screenshare-p2p.onrender.com',
+            peers: new Map(),
+            myId: '',
+            pendingRoomJoin: null,
+            roomId: '',
+            clientId: 'c1',
+            currentRoomPassword: '',
+            currentUserName: '',
+            wasSocketDisconnected: false,
+            hasShownConnectErrorToast: false,
+            console: { log: () => {}, warn: () => {}, error: () => {} },
+            setTimeout: (_fn, ms) => {
+                scheduledDelays.push(ms);
+                return scheduledDelays.length;
+            },
+            clearTimeout: () => {},
+            fetch: async () => {
+                await fetchGate;
+                return {
+                    ok: true,
+                    status: 200,
+                    async json() {
+                        return {
+                            provider: 'cloudflare',
+                            ttlSeconds: 14400,
+                            iceServers: [{ urls: 'turn:turn.cloudflare.com:3478', username: 'u', credential: 'p' }]
+                        };
+                    }
+                };
+            },
+            socket: {
+                id: 'sock-1',
+                on(ev, fn) { socketHandlers[ev] = fn; }
+            },
+            cancelColdStartNotice() {},
+            setSignalingStatus() {},
+            showToast() {},
+            document: { getElementById: () => null },
+            updateStatsDisplay() {}
+        };
+
+        vm.createContext(sandbox);
+        vm.runInContext(iceConfigSrc + '\n\n' + extractSocketHandler(bundleSrc, 'connect'), sandbox);
+
+        socketHandlers.connect();
+        assert.strictEqual(scheduledDelays.length, 0, 'Não deve agendar timer de 4 min antes de refreshIceServers resolver');
+
+        resolveFetch();
+        await delay(15);
+
+        assert.strictEqual(scheduledDelays.length, 1, 'Deve agendar timer único após refreshIceServers concluir');
+        assert(scheduledDelays[0] > 10_000_000, `Esperado delay próximo de ~3h55m para ttl=14400s, recebido ${scheduledDelays[0]}ms`);
+        console.log('\x1b[32mPASSOU\x1b[0m');
+    } catch (err) {
+        failures++;
+        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+    }
+
+    // T9: wasapi-capture-stopped remove trilha WASAPI morta, mantém vídeo e renegocia peers
+    process.stdout.write('  [Teste] T9: handleDesktopCaptureStopped remove áudio morto e renegocia peers mantendo vídeo ... ');
+    try {
+        const fs = require('fs');
+        const path = require('path');
+        const desktopAudioSrc = fs.readFileSync(path.resolve(__dirname, '../public/js/modules/desktop-audio.js'), 'utf8');
+        assert(
+            desktopAudioSrc.includes('_isDesktopWasapiTrack'),
+            'desktop-audio.js deve marcar track WASAPI com _isDesktopWasapiTrack'
+        );
+
+        const videoTrack = { id: 'v1', kind: 'video', stopped: false, stop() { this.stopped = true; } };
+        const audioTrack = { id: 'a1', kind: 'audio', _isDesktopWasapiTrack: true, stopped: false, stop() { this.stopped = true; } };
+
+        class MockLocalStream {
+            constructor(tracks) { this._tracks = [...tracks]; }
+            getTracks() { return [...this._tracks]; }
+            getVideoTracks() { return this._tracks.filter((t) => t.kind === 'video'); }
+            getAudioTracks() { return this._tracks.filter((t) => t.kind === 'audio'); }
+            removeTrack(t) { this._tracks = this._tracks.filter((x) => x !== t); }
+        }
+
+        let resolveAudioReplace;
+        const audioReplacePromise = new Promise((r) => { resolveAudioReplace = r; });
+        const videoSender = { track: videoTrack, replaceTrack() { throw new Error('Não deve limpar vídeo'); } };
+        const audioSender = { track: audioTrack, replaceTrack(t) { this.track = t; return audioReplacePromise; } };
+        const audioTransceiver = { direction: 'sendrecv', sender: audioSender };
+        const videoTransceiver = { direction: 'sendrecv', sender: videoSender };
+
+        const sentOffers = [];
+        const toasts = [];
+        const localStream = new MockLocalStream([videoTrack, audioTrack]);
+        const peers = new Map([
+            ['peer-1', {
+                pc: {
+                    signalingState: 'stable',
+                    connectionState: 'connected',
+                    getTransceivers: () => [videoTransceiver, audioTransceiver],
+                    getSenders: () => [videoSender, audioSender]
+                }
+            }]
+        ]);
+
+        const sandbox = {
+            Map,
+            Set,
+            Promise,
+            Boolean,
+            peers,
+            localStream,
+            showToast: (msg, type) => toasts.push({ msg, type }),
+            sendOffer: (id) => sentOffers.push(id)
+        };
+
+        vm.createContext(sandbox);
+        vm.runInContext(extractFn(bundleSrc, 'handleDesktopCaptureStopped', true), sandbox);
+
+        const done = sandbox.handleDesktopCaptureStopped({ pid: 4321, reason: 'process_exited' });
+        assert.strictEqual(toasts.length, 1);
+        assert.strictEqual(audioTrack.stopped, true, 'Track WASAPI morta deve ser parada');
+        assert.strictEqual(videoTrack.stopped, false, 'Track de vídeo deve continuar ativa');
+        assert.strictEqual(localStream.getAudioTracks().length, 0, 'Track WASAPI morta deve ser removida de localStream');
+        assert.strictEqual(localStream.getVideoTracks().length, 1);
+        assert.strictEqual(audioTransceiver.direction, 'recvonly');
+        assert.strictEqual(sentOffers.length, 0, 'sendOffer deve aguardar replaceTrack(null) do áudio');
+
+        resolveAudioReplace();
+        await done;
+        assert.deepStrictEqual(sentOffers, ['peer-1']);
+        assert.strictEqual(audioSender.track, null);
+        console.log('\x1b[32mPASSOU\x1b[0m');
+    } catch (err) {
+        failures++;
+        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+    }
+
     console.log('\n===============================================================');
     if (failures === 0) {
-        console.log('  ✅ Todos os 6 testes de renegociação/ICE passaram!');
+        console.log('  ✅ Todos os 9 testes de renegociação/ICE passaram!');
         console.log('===============================================================\n');
     } else {
         console.log(`  ❌ ${failures} teste(s) falharam.`);

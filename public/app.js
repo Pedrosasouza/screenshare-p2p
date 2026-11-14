@@ -51,15 +51,83 @@ import {
 
 
 
+async function handleDesktopCaptureStopped(payload) {
+    if (typeof showToast === 'function') {
+        const detail = payload && payload.reason ? ` (${payload.reason})` : '';
+        showToast(`Captura de áudio do aplicativo interrompida${detail}.`, 'warning', 5000);
+    }
+
+    if (typeof localStream === 'undefined' || !localStream || typeof localStream.getAudioTracks !== 'function') {
+        return;
+    }
+
+    const deadAudioTracks = localStream.getAudioTracks().filter((track) => track && track._isDesktopWasapiTrack);
+    if (deadAudioTracks.length === 0) {
+        return;
+    }
+
+    const deadTrackSet = new Set(deadAudioTracks);
+    deadAudioTracks.forEach((track) => {
+        try { track.stop(); } catch (_) {}
+        try {
+            if (typeof localStream.removeTrack === 'function') {
+                localStream.removeTrack(track);
+            }
+        } catch (_) {}
+    });
+
+    if (typeof peers === 'undefined' || !peers || typeof peers.entries !== 'function') {
+        return;
+    }
+
+    const renegotiationPromises = [];
+    for (const [peerId, peerObj] of peers.entries()) {
+        const pc = peerObj && peerObj.pc;
+        if (!pc || pc.connectionState === 'closed' || pc.signalingState === 'closed') continue;
+
+        const transceivers = typeof pc.getTransceivers === 'function' ? pc.getTransceivers() : null;
+        if (transceivers) {
+            transceivers.forEach((t) => {
+                if (t && t.sender && t.sender.track && deadTrackSet.has(t.sender.track)) {
+                    t.sender._kind = t.sender.track.kind;
+                    if (t.direction === 'sendrecv') t.direction = 'recvonly';
+                    else if (t.direction === 'sendonly') t.direction = 'inactive';
+                }
+            });
+        }
+
+        const replacePromises = [];
+        const senders = typeof pc.getSenders === 'function' ? pc.getSenders() : [];
+        senders.forEach((sender) => {
+            if (sender && sender.track && deadTrackSet.has(sender.track)) {
+                try {
+                    if (!sender._kind) {
+                        sender._kind = sender.track.kind;
+                    }
+                    replacePromises.push(Promise.resolve(sender.replaceTrack(null)).catch(() => {}));
+                } catch (_) {}
+            }
+        });
+
+        if (replacePromises.length > 0 && typeof sendOffer === 'function') {
+            renegotiationPromises.push(
+                Promise.allSettled(replacePromises).then(() => {
+                    const current = peers.get(peerId);
+                    if (!current || current.pc !== pc) return;
+                    if (pc.connectionState === 'closed' || pc.signalingState === 'closed') return;
+                    return sendOffer(peerId);
+                })
+            );
+        }
+    }
+
+    await Promise.allSettled(renegotiationPromises);
+}
+
 if (isDesktopApp()) {
     checkDiscordStatus();
     fetchWindowList();
-    registerDesktopCaptureListeners((payload) => {
-        if (typeof showToast === 'function') {
-            const detail = payload && payload.reason ? ` (${payload.reason})` : '';
-            showToast(`Captura de áudio do aplicativo interrompida${detail}.`, 'warning', 5000);
-        }
-    }).catch(() => {});
+    registerDesktopCaptureListeners(handleDesktopCaptureStopped).catch(() => {});
     window.addEventListener('beforeunload', () => {
         if (window.StreamGridDesktop) {
             window.StreamGridDesktop.stopAppAudioCapture().catch(() => {});
@@ -700,10 +768,13 @@ socket.on('connect', () => {
         setSignalingStatus('connected');
     }
     if (typeof refreshIceServers === 'function') {
-        refreshIceServers(SERVER_URL, { peers });
-        if (typeof scheduleIceRefreshTimer === 'function') {
-            scheduleIceRefreshTimer(SERVER_URL, { peers });
-        }
+        Promise.resolve(refreshIceServers(SERVER_URL, { peers }))
+            .catch(() => {})
+            .finally(() => {
+                if (typeof scheduleIceRefreshTimer === 'function') {
+                    scheduleIceRefreshTimer(SERVER_URL, { peers });
+                }
+            });
     }
     console.log('[Socket] Connected to server. Socket ID:', myId);
     if (typeof wasSocketDisconnected !== 'undefined' && wasSocketDisconnected) {
@@ -2411,7 +2482,7 @@ async function startScreenShare(audioMode = 'exclude_discord', targetPid = null,
     startScreenShare._isStarting = true;
 
     if (localStream) {
-        stopScreenShare();
+        await stopScreenShare();
     }
 
     let screenStream = null;
@@ -2482,11 +2553,20 @@ async function startScreenShare(audioMode = 'exclude_discord', targetPid = null,
                 let devices = await navigator.mediaDevices.enumerateDevices();
                 const hasEmptyLabels = devices.some(d => d.deviceId && d.label === '');
                 if (hasEmptyLabels) {
-                    try {
-                        const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                        tempStream.getTracks().forEach(t => t.stop());
-                        devices = await navigator.mediaDevices.enumerateDevices();
-                    } catch (permErr) {}
+                    let canProbeMicLabels = false;
+                    if (navigator.permissions && typeof navigator.permissions.query === 'function') {
+                        try {
+                            const micPerm = await navigator.permissions.query({ name: 'microphone' });
+                            canProbeMicLabels = Boolean(micPerm && micPerm.state === 'granted');
+                        } catch (_) {}
+                    }
+                    if (canProbeMicLabels) {
+                        try {
+                            const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                            tempStream.getTracks().forEach(t => t.stop());
+                            devices = await navigator.mediaDevices.enumerateDevices();
+                        } catch (permErr) {}
+                    }
                 }
 
                 const cableOutput = devices.find(d => {
@@ -2538,6 +2618,7 @@ async function startScreenShare(audioMode = 'exclude_discord', targetPid = null,
                         cableStream = null;
                     }
                     console.warn('[Audio] VB-Cable capture failed:', audioErr.message);
+                    showToast('Aviso de Áudio: Falha ao capturar pelo VB-Cable (transmitindo apenas vídeo).', 'warning', 5000);
                 }
             } else {
                 try {
@@ -2685,31 +2766,44 @@ function stopScreenShare(options = {}) {
         localStream = null;
     }
 
+    const renegotiationPromises = [];
     if (!silent) {
         // Clean up transceivers/senders across all active peer connections
         for (const [peerId, peerObj] of peers.entries()) {
-            if (peerObj && peerObj.pc) {
-                const transceivers = typeof peerObj.pc.getTransceivers === 'function' ? peerObj.pc.getTransceivers() : null;
-                if (transceivers) {
-                    transceivers.forEach(t => {
-                        if (t && t.sender && t.sender.track) {
-                            t.sender._kind = t.sender.track.kind;
-                            if (t.direction === 'sendrecv') t.direction = 'recvonly';
-                            else if (t.direction === 'sendonly') t.direction = 'inactive';
-                        }
-                    });
-                }
-                peerObj.pc.getSenders().forEach(sender => {
-                    try {
-                        if (sender.track && !sender._kind) {
-                            sender._kind = sender.track.kind;
-                        }
-                        Promise.resolve(sender.replaceTrack(null)).catch(() => {});
-                    } catch (e) {}
+            const pc = peerObj && peerObj.pc;
+            if (!pc || pc.connectionState === 'closed' || pc.signalingState === 'closed') continue;
+
+            const transceivers = typeof pc.getTransceivers === 'function' ? pc.getTransceivers() : null;
+            if (transceivers) {
+                transceivers.forEach(t => {
+                    if (t && t.sender && t.sender.track) {
+                        t.sender._kind = t.sender.track.kind;
+                        if (t.direction === 'sendrecv') t.direction = 'recvonly';
+                        else if (t.direction === 'sendonly') t.direction = 'inactive';
+                    }
                 });
-                // Renegotiate so peers drop the remote tile cleanly
-                sendOffer(peerId);
             }
+
+            const replacePromises = [];
+            const senders = typeof pc.getSenders === 'function' ? pc.getSenders() : [];
+            senders.forEach(sender => {
+                try {
+                    if (sender.track && !sender._kind) {
+                        sender._kind = sender.track.kind;
+                    }
+                    replacePromises.push(Promise.resolve(sender.replaceTrack(null)).catch(() => {}));
+                } catch (e) {}
+            });
+
+            renegotiationPromises.push(
+                Promise.allSettled(replacePromises).then(() => {
+                    const current = peers.get(peerId);
+                    if (!current || current.pc !== pc) return;
+                    if (pc.connectionState === 'closed' || pc.signalingState === 'closed') return;
+                    // Renegotiate so peers drop the remote tile cleanly after replaceTrack(null) settles
+                    return sendOffer(peerId);
+                })
+            );
         }
     }
 
@@ -2728,6 +2822,8 @@ function stopScreenShare(options = {}) {
     if (!silent) {
         socket.emit('stream-state', { roomId, state: 'stopped' });
     }
+
+    return Promise.allSettled(renegotiationPromises);
 }
 
 function startTilePlayback(tile, videoEl) {

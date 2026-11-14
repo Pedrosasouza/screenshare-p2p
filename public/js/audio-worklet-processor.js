@@ -16,6 +16,9 @@ class PCMRingBufferProcessor extends AudioWorkletProcessor {
         this.targetBufferFrames = 1440;
         this.maxBufferFrames = 4800; // 100ms max before skipping to preserve realtime sync
         this.hasStartedPlayback = false;
+        this.needsResumeFadeIn = false;
+        this.fadeInIndex = 0;
+        this.fadeInFrames = 128;
 
         this.port.onmessage = (event) => {
             const data = event.data;
@@ -74,6 +77,8 @@ class PCMRingBufferProcessor extends AudioWorkletProcessor {
         this.writeIndex = 0;
         this.availableFrames = 0;
         this.hasStartedPlayback = false;
+        this.needsResumeFadeIn = false;
+        this.fadeInIndex = 0;
     }
 
     process(inputs, outputs, parameters) {
@@ -99,8 +104,16 @@ class PCMRingBufferProcessor extends AudioWorkletProcessor {
 
         if (this.availableFrames >= quantum) {
             for (let i = 0; i < quantum; i++) {
-                outL[i] = this.bufferL[this.readIndex];
-                outR[i] = this.bufferR[this.readIndex];
+                let gain = 1;
+                if (this.needsResumeFadeIn) {
+                    gain = (this.fadeInIndex + 1) / this.fadeInFrames;
+                    this.fadeInIndex += 1;
+                    if (this.fadeInIndex >= this.fadeInFrames) {
+                        this.needsResumeFadeIn = false;
+                    }
+                }
+                outL[i] = this.bufferL[this.readIndex] * gain;
+                outR[i] = this.bufferR[this.readIndex] * gain;
                 this.readIndex = (this.readIndex + 1) % this.capacity;
             }
             this.availableFrames -= quantum;
@@ -108,8 +121,9 @@ class PCMRingBufferProcessor extends AudioWorkletProcessor {
             if (this.availableFrames > 0) {
                 // Partial underrun: drain remaining frames with smooth linear fade-out to zero
                 const remaining = this.availableFrames;
+                const fadeDenom = remaining === 1 ? 2 : remaining;
                 for (let i = 0; i < remaining; i++) {
-                    const gain = 1 - ((i + 1) / remaining);
+                    const gain = 1 - ((i + 1) / fadeDenom);
                     outL[i] = this.bufferL[this.readIndex] * gain;
                     if (outR !== outL) {
                         outR[i] = this.bufferR[this.readIndex] * gain;
@@ -127,6 +141,8 @@ class PCMRingBufferProcessor extends AudioWorkletProcessor {
                 if (outR !== outL) outR.fill(0);
             }
             this.hasStartedPlayback = false; // re-enter pre-buffering
+            this.needsResumeFadeIn = true;
+            this.fadeInIndex = 0;
         }
 
         return true;

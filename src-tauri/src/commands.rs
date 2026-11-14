@@ -1,26 +1,50 @@
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
 use windows::Win32::System::Threading::GetCurrentProcessId;
 
-use crate::audio::wasapi_capture::start_wasapi_capture;
+use crate::audio::wasapi_capture::{start_wasapi_capture, CaptureExitSignal};
 use crate::audio::windows_enum::{
     find_discord_root_pid, get_discord_status as fetch_discord_status, list_application_windows,
     DiscordStatus, WindowInfo,
 };
 
+const WASAPI_STOP_SYNC_TIMEOUT: Duration = Duration::from_millis(50);
+
+async fn wait_for_exit_signals(signals: &[CaptureExitSignal], timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut all_finished = true;
+    for sig in signals {
+        if sig.is_finished() {
+            continue;
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() || !sig.wait_until(remaining).await {
+            all_finished = false;
+        }
+    }
+    all_finished
+}
+
 struct ActiveCaptureSession {
     stop_signal: Arc<AtomicBool>,
     forward_task: tauri::async_runtime::JoinHandle<()>,
+    exit_signal: Option<CaptureExitSignal>,
 }
 
 impl ActiveCaptureSession {
-    fn stop(self) {
+    fn stop(self, stopping_exits: &mut Vec<CaptureExitSignal>) {
         self.stop_signal.store(true, Ordering::Release);
         self.forward_task.abort();
+        if let Some(exit) = self.exit_signal {
+            if !exit.is_finished() {
+                stopping_exits.push(exit);
+            }
+        }
     }
 }
 
@@ -29,6 +53,25 @@ struct CaptureCoordinatorState {
     generation: u64,
     active_session: Option<ActiveCaptureSession>,
     pending_stop: Option<Arc<AtomicBool>>,
+    pending_exit: Option<CaptureExitSignal>,
+    stopping_exits: Vec<CaptureExitSignal>,
+}
+
+impl CaptureCoordinatorState {
+    fn retire_current(&mut self) {
+        if let Some(session) = self.active_session.take() {
+            session.stop(&mut self.stopping_exits);
+        }
+        if let Some(prev_pending) = self.pending_stop.take() {
+            prev_pending.store(true, Ordering::Release);
+        }
+        if let Some(prev_exit) = self.pending_exit.take() {
+            if !prev_exit.is_finished() {
+                self.stopping_exits.push(prev_exit);
+            }
+        }
+        self.stopping_exits.retain(|exit| !exit.is_finished());
+    }
 }
 
 #[derive(Default)]
@@ -43,29 +86,25 @@ impl AudioCaptureState {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn begin_session(&self, stop_signal: Arc<AtomicBool>) -> Result<u64, String> {
+    fn begin_session(
+        &self,
+        stop_signal: Arc<AtomicBool>,
+        exit_signal: CaptureExitSignal,
+    ) -> Result<(u64, Vec<CaptureExitSignal>), String> {
         let mut guard = self.lock_inner();
 
         guard.generation = guard.generation.wrapping_add(1);
-        if let Some(session) = guard.active_session.take() {
-            session.stop();
-        }
-        if let Some(prev_pending) = guard.pending_stop.take() {
-            prev_pending.store(true, Ordering::Release);
-        }
+        guard.retire_current();
         guard.pending_stop = Some(stop_signal);
-        Ok(guard.generation)
+        guard.pending_exit = Some(exit_signal);
+        let prev_exits = std::mem::take(&mut guard.stopping_exits);
+        Ok((guard.generation, prev_exits))
     }
 
     pub fn stop_all(&self) {
         let mut guard = self.lock_inner();
         guard.generation = guard.generation.wrapping_add(1);
-        if let Some(session) = guard.active_session.take() {
-            session.stop();
-        }
-        if let Some(pending) = guard.pending_stop.take() {
-            pending.store(true, Ordering::Release);
-        }
+        guard.retire_current();
     }
 
     fn is_generation_active(&self, gen: u64) -> bool {
@@ -76,18 +115,14 @@ impl AudioCaptureState {
         let mut guard = self.lock_inner();
         if guard.generation == gen {
             guard.pending_stop = None;
+            guard.pending_exit = None;
         }
     }
 
     pub fn clear_session_if_generation(&self, gen: u64) {
         let mut guard = self.lock_inner();
         if guard.generation == gen {
-            if let Some(session) = guard.active_session.take() {
-                session.stop();
-            }
-            if let Some(pending) = guard.pending_stop.take() {
-                pending.store(true, Ordering::Release);
-            }
+            guard.retire_current();
         }
     }
 
@@ -96,6 +131,7 @@ impl AudioCaptureState {
         gen: u64,
         stop_signal: Arc<AtomicBool>,
         forward_task: tauri::async_runtime::JoinHandle<()>,
+        exit_signal: Option<CaptureExitSignal>,
     ) -> Result<(), String> {
         let mut guard = self.lock_inner();
         if guard.generation != gen {
@@ -105,11 +141,13 @@ impl AudioCaptureState {
         }
 
         guard.pending_stop = None;
+        guard.pending_exit = None;
         if let Some(prev) = guard.active_session.replace(ActiveCaptureSession {
             stop_signal,
             forward_task,
+            exit_signal,
         }) {
-            prev.stop();
+            prev.stop(&mut guard.stopping_exits);
         }
         Ok(())
     }
@@ -156,10 +194,20 @@ async fn start_capture_session(
 
     let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(100);
     let stop_signal = Arc::new(AtomicBool::new(false));
+    let exit_signal = CaptureExitSignal::default();
     let mode_str = if include_tree { "include" } else { "exclude" };
 
-    // Garante isolamento: invalida e encerra sessão/inicialização anterior antes do await.
-    let gen = state.begin_session(stop_signal.clone())?;
+    // Garante isolamento: invalida sessão anterior e aguarda brevemente a thread WASAPI soltar o AudioClient.
+    let (gen, prev_exits) = state.begin_session(stop_signal.clone(), exit_signal.clone())?;
+    if !prev_exits.is_empty() {
+        let _ = wait_for_exit_signals(&prev_exits, WASAPI_STOP_SYNC_TIMEOUT).await;
+    }
+    if !state.is_generation_active(gen) {
+        stop_signal.store(true, Ordering::Release);
+        state.clear_pending_if_generation(gen);
+        return Err("Captura de áudio cancelada durante inicialização.".into());
+    }
+
     let app_for_stop = app.clone();
 
     let (sample_rate, channels) = match start_wasapi_capture(
@@ -167,6 +215,7 @@ async fn start_capture_session(
         include_tree,
         audio_tx,
         stop_signal.clone(),
+        exit_signal.clone(),
         move |reason| {
             app_for_stop
                 .state::<AudioCaptureState>()
@@ -205,7 +254,7 @@ async fn start_capture_session(
         }
     });
 
-    state.commit_session(gen, stop_signal, forward_task)?;
+    state.commit_session(gen, stop_signal, forward_task, Some(exit_signal))?;
 
     Ok(CaptureStartedInfo {
         pid,
@@ -289,7 +338,9 @@ mod tests {
         tauri::async_runtime::block_on(async {
             let state = AudioCaptureState::default();
             let stop_signal = Arc::new(AtomicBool::new(false));
-            let gen = state.begin_session(stop_signal.clone()).unwrap();
+            let (gen, _) = state
+                .begin_session(stop_signal.clone(), CaptureExitSignal::default())
+                .unwrap();
 
             assert!(state.is_generation_active(gen));
             state.stop_all();
@@ -299,7 +350,7 @@ mod tests {
 
             let dropped = Arc::new(AtomicBool::new(false));
             let task = spawn_cancellable_dummy(dropped.clone());
-            let commit_res = state.commit_session(gen, stop_signal.clone(), task);
+            let commit_res = state.commit_session(gen, stop_signal.clone(), task, None);
 
             assert!(commit_res.is_err());
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -314,8 +365,12 @@ mod tests {
             let stop1 = Arc::new(AtomicBool::new(false));
             let stop2 = Arc::new(AtomicBool::new(false));
 
-            let gen1 = state.begin_session(stop1.clone()).unwrap();
-            let gen2 = state.begin_session(stop2.clone()).unwrap();
+            let (gen1, _) = state
+                .begin_session(stop1.clone(), CaptureExitSignal::default())
+                .unwrap();
+            let (gen2, _) = state
+                .begin_session(stop2.clone(), CaptureExitSignal::default())
+                .unwrap();
 
             assert_ne!(gen1, gen2);
             assert!(stop1.load(Ordering::Relaxed));
@@ -325,11 +380,15 @@ mod tests {
 
             let dropped1 = Arc::new(AtomicBool::new(false));
             let task1 = spawn_cancellable_dummy(dropped1.clone());
-            assert!(state.commit_session(gen1, stop1.clone(), task1).is_err());
+            assert!(state
+                .commit_session(gen1, stop1.clone(), task1, None)
+                .is_err());
 
             let dropped2 = Arc::new(AtomicBool::new(false));
             let task2 = spawn_cancellable_dummy(dropped2.clone());
-            assert!(state.commit_session(gen2, stop2.clone(), task2).is_ok());
+            assert!(state
+                .commit_session(gen2, stop2.clone(), task2, None)
+                .is_ok());
 
             tokio::time::sleep(Duration::from_millis(20)).await;
             assert!(dropped1.load(Ordering::Relaxed));
@@ -348,12 +407,14 @@ mod tests {
         tauri::async_runtime::block_on(async {
             let state = AudioCaptureState::default();
             let stop_signal = Arc::new(AtomicBool::new(false));
-            let gen = state.begin_session(stop_signal.clone()).unwrap();
+            let (gen, _) = state
+                .begin_session(stop_signal.clone(), CaptureExitSignal::default())
+                .unwrap();
 
             let dropped = Arc::new(AtomicBool::new(false));
             let task = spawn_cancellable_dummy(dropped.clone());
             state
-                .commit_session(gen, stop_signal.clone(), task)
+                .commit_session(gen, stop_signal.clone(), task, None)
                 .unwrap();
 
             assert!(!stop_signal.load(Ordering::Relaxed));
@@ -382,10 +443,14 @@ mod tests {
         tauri::async_runtime::block_on(async {
             let state = AudioCaptureState::default();
             let stop1 = Arc::new(AtomicBool::new(false));
-            let gen1 = state.begin_session(stop1.clone()).unwrap();
+            let (gen1, _) = state
+                .begin_session(stop1.clone(), CaptureExitSignal::default())
+                .unwrap();
             let dropped1 = Arc::new(AtomicBool::new(false));
             let task1 = spawn_cancellable_dummy(dropped1.clone());
-            state.commit_session(gen1, stop1.clone(), task1).unwrap();
+            state
+                .commit_session(gen1, stop1.clone(), task1, None)
+                .unwrap();
 
             // Limpar com geração diferente não deve afetar a sessão atual
             state.clear_session_if_generation(gen1.wrapping_add(1));
@@ -398,6 +463,51 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
             assert!(stop1.load(Ordering::Acquire));
             assert!(dropped1.load(Ordering::Relaxed));
+        });
+    }
+
+    #[test]
+    fn fast_restart_after_stop_all_waits_for_previous_thread_exit_and_bounds_timeout() {
+        tauri::async_runtime::block_on(async {
+            let state = AudioCaptureState::default();
+            let stop1 = Arc::new(AtomicBool::new(false));
+            let exit1 = CaptureExitSignal::default();
+            let (gen1, prev0) = state.begin_session(stop1.clone(), exit1.clone()).unwrap();
+            assert!(prev0.is_empty());
+
+            let dropped1 = Arc::new(AtomicBool::new(false));
+            let task1 = spawn_cancellable_dummy(dropped1.clone());
+            state
+                .commit_session(gen1, stop1.clone(), task1, Some(exit1.clone()))
+                .unwrap();
+
+            // Usuário pára captura e reinicia rapidamente antes da thread OS finalizar
+            state.stop_all();
+            let stop2 = Arc::new(AtomicBool::new(false));
+            let exit2 = CaptureExitSignal::default();
+            let (_gen2, prev_after_stop) = state.begin_session(stop2, exit2).unwrap();
+            assert_eq!(
+                prev_after_stop.len(),
+                1,
+                "begin_session após stop_all deve receber exit_signal da thread ainda encerrando"
+            );
+
+            let exit1_bg = exit1.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(15));
+                exit1_bg.mark_finished();
+            });
+            let waited = wait_for_exit_signals(&prev_after_stop, Duration::from_millis(80)).await;
+            assert!(waited, "Deve aguardar a finalização da thread anterior");
+            assert!(exit1.is_finished());
+
+            // Timeout limitado evita deadlock se thread anterior travar
+            let stalled = CaptureExitSignal::default();
+            let timed_out = wait_for_exit_signals(&[stalled], Duration::from_millis(20)).await;
+            assert!(
+                !timed_out,
+                "wait_for_exit_signals deve retornar false após timeout sem travar"
+            );
         });
     }
 }

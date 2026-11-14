@@ -263,6 +263,58 @@ async function runTests() {
         process.off('unhandledRejection', onUnhandled);
     }
 
+    // T4: Modo 'system' evita prompt espúrio de microfone e avisa se captura VB-Cable falhar
+    process.stdout.write('  [Teste] T4: Modo system evita getUserMedia({ audio: true }) sem permissão e avisa falha VB-Cable ... ');
+    try {
+        // 4a: labels vazias e permissão microphone = prompt -> NÃO chama getUserMedia({ audio: true })
+        let micPromptCalled = false;
+        let displayMediaAudioOpt = null;
+        const envA = createScreenShareSandbox(appJs);
+        envA.sandbox.navigator.permissions = {
+            query: async () => ({ state: 'prompt' })
+        };
+        envA.sandbox.navigator.mediaDevices.enumerateDevices = async () => [
+            { kind: 'audioinput', deviceId: 'dev-1', label: '' }
+        ];
+        envA.sandbox.navigator.mediaDevices.getUserMedia = async (constraints) => {
+            if (constraints && constraints.audio === true) {
+                micPromptCalled = true;
+            }
+            return new envA.MockMediaStream([]);
+        };
+        envA.sandbox.navigator.mediaDevices.getDisplayMedia = async (opts) => {
+            displayMediaAudioOpt = opts && opts.audio;
+            return new envA.MockMediaStream([{ id: 'v-sys', kind: 'video', stop() {} }]);
+        };
+
+        await envA.sandbox.startScreenShare('system');
+        assert.strictEqual(micPromptCalled, false, 'Modo system não deve pedir permissão de microfone quando status é prompt');
+        assert(displayMediaAudioOpt && typeof displayMediaAudioOpt === 'object', 'Deve seguir direto para getDisplayMedia com áudio do sistema');
+
+        // 4b: VB-Cable encontrado, screenStream abre (audio: false), getUserMedia(cableOutputId) falha -> exibe toast de aviso
+        const envB = createScreenShareSandbox(appJs);
+        envB.sandbox.navigator.permissions = {
+            query: async () => ({ state: 'granted' })
+        };
+        envB.sandbox.navigator.mediaDevices.enumerateDevices = async () => [
+            { kind: 'audioinput', deviceId: 'cable-1', label: 'CABLE Output (VB-Audio Virtual Cable)' }
+        ];
+        envB.sandbox.navigator.mediaDevices.getDisplayMedia = async () =>
+            new envB.MockMediaStream([{ id: 'v-cable', kind: 'video', stop() {} }]);
+        envB.sandbox.navigator.mediaDevices.getUserMedia = async () => {
+            throw new Error('NotReadableError: Device in use');
+        };
+
+        await envB.sandbox.startScreenShare('system');
+        const cableWarnToast = envB.events.find((e) => e.type === 'toast' && e.toastType === 'warning');
+        assert(cableWarnToast, 'Falha na captura VB-Cable deve exibir toast warning acionável');
+
+        console.log('\x1b[32mPASSOU\x1b[0m');
+    } catch (err) {
+        failures++;
+        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+    }
+
     console.log('\n===============================================================');
     if (failures > 0) {
         console.log(`  ❌ Resultado: ${failures} teste(s) falharam.`);

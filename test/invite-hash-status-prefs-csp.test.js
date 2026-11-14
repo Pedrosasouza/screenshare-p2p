@@ -431,13 +431,33 @@ async function runTests() {
         console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
     }
 
+    // T6 (Item B.2): Assets locais offline sem CDNs externas em index.html, tauri.conf.json e CSP
+    process.stdout.write('  [Teste] T6 (Item B.2): Inter e FontAwesome servidos localmente sem CDNs externas ... ');
+    try {
+        const html = fs.readFileSync(path.join(rootDir, 'public', 'index.html'), 'utf8');
+        const tauriConf = fs.readFileSync(path.join(rootDir, 'src-tauri', 'tauri.conf.json'), 'utf8');
+        const serverJs = fs.readFileSync(path.join(rootDir, 'server.js'), 'utf8');
+
+        assert(!html.includes('fonts.googleapis.com'), 'index.html não deve depender de fonts.googleapis.com');
+        assert(!html.includes('cdnjs.cloudflare.com'), 'index.html não deve depender de cdnjs.cloudflare.com');
+        assert(!tauriConf.includes('fonts.googleapis.com') && !tauriConf.includes('cdnjs.cloudflare.com'), 'tauri.conf.json CSP não deve precisar de CDNs externas');
+        assert(!serverJs.includes('fonts.googleapis.com') && !serverJs.includes('cdnjs.cloudflare.com'), 'server.js CSP não deve liberar CDNs externas');
+        assert(fs.existsSync(path.join(rootDir, 'public', 'vendor', 'inter', 'inter.css')), 'inter.css local deve existir');
+        assert(fs.existsSync(path.join(rootDir, 'public', 'vendor', 'fontawesome', 'css', 'all.min.css')), 'all.min.css local do FontAwesome deve existir');
+
+        console.log('\x1b[32mPASSOU\x1b[0m');
+    } catch (err) {
+        failures++;
+        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+    }
+
     console.log('\n===============================================================');
     if (failures > 0) {
         console.log(`  ❌ ${failures} teste(s) falharam.`);
         console.log('===============================================================\n');
         process.exit(1);
     } else {
-        console.log('  ✅ Todos os 5 testes passaram com sucesso!');
+        console.log('  ✅ Todos os 6 testes passaram com sucesso!');
         console.log('===============================================================\n');
         process.exit(0);
     }
