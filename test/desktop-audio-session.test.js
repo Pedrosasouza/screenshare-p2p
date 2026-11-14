@@ -487,6 +487,82 @@ async function runTests() {
     }
     console.log('\x1b[32mPASSOU\x1b[0m');
 
+    // T8: Evento tardio wasapi-capture-stopped de sessão/geração antiga é ignorado e não mata sessão 2
+    process.stdout.write('  [Teste] T8: wasapi-capture-stopped obsoleto não encerra captura WASAPI recém-iniciada ... ');
+    {
+        const desktopAudioSrcLocal = fs.readFileSync(
+            path.resolve(__dirname, '../public/js/modules/desktop-audio.js'),
+            'utf8'
+        );
+        let onStopCb = null;
+        let stopIpcCalls = 0;
+        let unexpectedNotifications = 0;
+        const cleanedModuleCode = desktopAudioSrcLocal
+            .replace(/^export\s+/gm, '')
+            .replace(/import\s+[\s\S]*?;\n/g, '');
+
+        class MockWorkletNode {
+            constructor() {
+                this.port = { postMessage() {} };
+            }
+            connect() {}
+            disconnect() { this.disconnected = true; }
+        }
+        class MockCtx {
+            constructor() {
+                this.state = 'running';
+                this.audioWorklet = { addModule: async () => {} };
+            }
+            async resume() { this.state = 'running'; }
+            async suspend() { this.state = 'suspended'; }
+            createMediaStreamDestination() {
+                return { stream: { getAudioTracks: () => [{ id: 't-active', kind: 'audio', stop() {} }] } };
+            }
+        }
+
+        const modSandbox = {
+            WeakSet,
+            ArrayBuffer,
+            Float32Array,
+            Promise,
+            Error,
+            console: { log: () => {}, warn: () => {}, error: () => {} },
+            AudioWorkletNode: MockWorkletNode,
+            window: {
+                __TAURI_INTERNALS__: {},
+                AudioContext: MockCtx,
+                StreamGridDesktop: {
+                    isDesktop: () => true,
+                    startAppAudioCapture: async (pid) => ({ pid, generation: 2, sample_rate: 48000, channels: 2, mode: 'include' }),
+                    stopAppAudioCapture: async () => { stopIpcCalls++; },
+                    onCaptureStopped: async (cb) => {
+                        onStopCb = cb;
+                        return () => {};
+                    }
+                }
+            }
+        };
+        vm.createContext(modSandbox);
+        vm.runInContext(cleanedModuleCode, modSandbox);
+
+        await modSandbox.registerDesktopCaptureListeners(() => {
+            unexpectedNotifications++;
+        });
+        const track2 = await modSandbox.startAppAudioCapture(202);
+        assert(track2 && track2.kind === 'audio');
+
+        // Entrega evento atrasado da sessão 1 (PID 101 / generation 1)
+        onStopCb({ pid: 101, generation: 1, reason: 'device_invalidated' });
+        assert.strictEqual(stopIpcCalls, 0, 'Evento wasapi-capture-stopped obsoleto não deve chamar stopAppAudioCapture');
+        assert.strictEqual(unexpectedNotifications, 0, 'Evento obsoleto não deve disparar onUnexpectedStop');
+
+        // Entrega evento real da sessão 2 (PID 202 / generation 2)
+        onStopCb({ pid: 202, generation: 2, reason: 'device_invalidated' });
+        assert.strictEqual(stopIpcCalls, 1, 'Evento da sessão ativa deve encerrar captura');
+        assert.strictEqual(unexpectedNotifications, 1, 'Evento da sessão ativa deve notificar onUnexpectedStop');
+    }
+    console.log('\x1b[32mPASSOU\x1b[0m');
+
     console.log('\n===============================================================');
     console.log('  ✅ Resultado: Todos os testes da sessão desktop passaram.');
     console.log('===============================================================\n');

@@ -10,6 +10,7 @@ let captureStoppedUnlisten = null;
 let helperSuspendPromise = null;
 let latestStartGeneration = 0;
 let latestStopGeneration = 0;
+let activeCaptureSessionMeta = null;
 const audioWorkletLoadedContexts = new WeakSet();
 
 export function isDesktopApp() {
@@ -172,6 +173,13 @@ export async function startDesktopCaptureWith(startFn) {
             throw new Error('Captura de áudio cancelada durante a inicialização.');
         }
 
+        if (typeof activeCaptureSessionMeta !== 'undefined') {
+            activeCaptureSessionMeta = {
+                pid: info && typeof info.pid === 'number' ? info.pid : null,
+                generation: info && typeof info.generation === 'number' ? info.generation : null
+            };
+        }
+
         if (info) {
             const modeDesc = info.mode === 'exclude' ? 'Exclusão do Discord' : 'Aplicativo Isolado';
             console.log(`[AudioHelper] ✅ Captura iniciada no modo [${modeDesc}] para PID ${info.pid} (${info.sample_rate}Hz, ${info.channels} canais)`);
@@ -205,6 +213,9 @@ export async function startExcludeDiscordCapture() {
 export function stopAppAudioCapture() {
     desktopCaptureGeneration += 1;
     latestStopGeneration = desktopCaptureGeneration;
+    if (typeof activeCaptureSessionMeta !== 'undefined') {
+        activeCaptureSessionMeta = null;
+    }
     if (isDesktopApp() && window.StreamGridDesktop) {
         window.StreamGridDesktop.stopAppAudioCapture().catch(() => {});
     }
@@ -234,6 +245,24 @@ export async function registerDesktopCaptureListeners(onUnexpectedStop) {
         captureStoppedUnlisten = null;
     }
     const unlisten = await window.StreamGridDesktop.onCaptureStopped((payload) => {
+        if (typeof activeCaptureSessionMeta !== 'undefined' && activeCaptureSessionMeta) {
+            if (
+                payload &&
+                typeof payload.generation === 'number' &&
+                activeCaptureSessionMeta.generation !== null &&
+                payload.generation !== activeCaptureSessionMeta.generation
+            ) {
+                return;
+            }
+            if (
+                payload &&
+                typeof payload.pid === 'number' &&
+                activeCaptureSessionMeta.pid !== null &&
+                payload.pid !== activeCaptureSessionMeta.pid
+            ) {
+                return;
+            }
+        }
         stopAppAudioCapture();
         if (typeof onUnexpectedStop === 'function') {
             onUnexpectedStop(payload);

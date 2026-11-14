@@ -412,6 +412,51 @@ async function runTests() {
             failures++;
             console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
         }
+
+        // Teste 7: join-room concorrente no mesmo socket (sala lenta com scrypt vs sala pública rápida) não dessincroniza sala
+        process.stdout.write('  [Teste] T7: join-room concorrente no mesmo socket mantém cliente e servidor na última sala ... ');
+        let ownerA = null;
+        let ownerB = null;
+        let switcher = null;
+        try {
+            const roomA = 'sala-lenta-scrypt';
+            const roomB = 'sala-rapida-pub';
+            ownerA = await connectSocket(url);
+            ownerB = await connectSocket(url);
+            switcher = await connectSocket(url);
+
+            assert.strictEqual((await tryJoin(ownerA, roomA, 'segredo-a')).status, 'joined');
+            assert.strictEqual((await tryJoin(ownerB, roomB, '')).status, 'joined');
+
+            const receivedRoomUsers = [];
+            switcher.on('room-users', (data) => {
+                receivedRoomUsers.push(data);
+            });
+
+            // Dispara join-room em sala A (passa por scryptAsync) e logo em seguida troca para sala B pública
+            switcher.emit('join-room', { roomId: roomA, password: 'segredo-a', userName: 'Switcher' });
+            switcher.emit('join-room', { roomId: roomB, password: '', userName: 'Switcher' });
+
+            await delay(300);
+
+            const infoA = await checkRoom(ownerA, roomA);
+            const infoB = await checkRoom(ownerB, roomB);
+            assert.strictEqual(infoA.memberCount, 1, `Sala A deve manter apenas ownerA (memberCount=1), recebido ${infoA.memberCount}`);
+            assert.strictEqual(infoB.memberCount, 2, `Sala B deve conter ownerB + switcher (memberCount=2), recebido ${infoB.memberCount}`);
+            assert(receivedRoomUsers.length >= 1, 'switcher deve receber room-users final da sala B');
+            const lastUsers = receivedRoomUsers[receivedRoomUsers.length - 1];
+            assert(lastUsers.users.includes(ownerB.id), 'Último room-users recebido deve ser da sala B (contendo ownerB)');
+            assert(!lastUsers.users.includes(ownerA.id), 'Último room-users recebido não deve ser da sala A');
+
+            console.log('\x1b[32mPASSOU\x1b[0m');
+        } catch (err) {
+            failures++;
+            console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+        } finally {
+            if (ownerA) ownerA.disconnect();
+            if (ownerB) ownerB.disconnect();
+            if (switcher) switcher.disconnect();
+        }
     } finally {
         await new Promise((resolve) => server.close(resolve));
     }

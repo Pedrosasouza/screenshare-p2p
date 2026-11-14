@@ -119,11 +119,14 @@ impl AudioCaptureState {
         }
     }
 
-    pub fn clear_session_if_generation(&self, gen: u64) {
+    pub fn clear_session_if_generation(&self, gen: u64) -> bool {
         let mut guard = self.lock_inner();
         if guard.generation == gen {
             guard.generation = guard.generation.wrapping_add(1);
             guard.retire_current();
+            true
+        } else {
+            false
         }
     }
 
@@ -171,12 +174,14 @@ pub fn validate_capture_target(
 #[derive(Serialize, Clone)]
 struct CaptureStoppedEvent {
     pid: u32,
+    generation: u64,
     reason: String,
 }
 
 #[derive(Serialize, Debug, Clone)]
 pub struct CaptureStartedInfo {
     pub pid: u32,
+    pub generation: u64,
     pub sample_rate: u32,
     pub channels: u16,
     pub format: String,
@@ -218,13 +223,19 @@ async fn start_capture_session(
         stop_signal.clone(),
         exit_signal.clone(),
         move |reason| {
-            app_for_stop
+            if app_for_stop
                 .state::<AudioCaptureState>()
-                .clear_session_if_generation(gen);
-            let _ = app_for_stop.emit(
-                "wasapi-capture-stopped",
-                CaptureStoppedEvent { pid, reason },
-            );
+                .clear_session_if_generation(gen)
+            {
+                let _ = app_for_stop.emit(
+                    "wasapi-capture-stopped",
+                    CaptureStoppedEvent {
+                        pid,
+                        generation: gen,
+                        reason,
+                    },
+                );
+            }
         },
     )
     .await
@@ -259,6 +270,7 @@ async fn start_capture_session(
 
     Ok(CaptureStartedInfo {
         pid,
+        generation: gen,
         sample_rate,
         channels,
         format: "f32le".to_string(),
@@ -534,6 +546,29 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
             assert!(stop1.load(Ordering::Acquire));
             assert!(dropped1.load(Ordering::Relaxed));
+        });
+    }
+
+    #[test]
+    fn clear_session_if_generation_returns_false_when_superseded() {
+        tauri::async_runtime::block_on(async {
+            let state = AudioCaptureState::default();
+            let stop1 = Arc::new(AtomicBool::new(false));
+            let exit1 = CaptureExitSignal::default();
+            let (gen1, _) = state.begin_session(stop1, exit1).unwrap();
+
+            let stop2 = Arc::new(AtomicBool::new(false));
+            let exit2 = CaptureExitSignal::default();
+            let (gen2, _) = state.begin_session(stop2, exit2).unwrap();
+
+            assert!(
+                !state.clear_session_if_generation(gen1),
+                "clear_session_if_generation deve retornar false quando sessão já foi substituída"
+            );
+            assert!(
+                state.clear_session_if_generation(gen2),
+                "clear_session_if_generation deve retornar true para a geração ativa"
+            );
         });
     }
 }

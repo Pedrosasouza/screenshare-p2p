@@ -989,6 +989,144 @@ async function runTests() {
         console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
     }
 
+    // T13: user-joined durante await de ICE não duplica sendOffer e offer inicial sincroniza setConfiguration antes de setRemoteDescription
+    process.stdout.write('  [Teste] T13: room-users evita oferta duplicada para user-joined concorrente e sincroniza TURN no signal ... ');
+    try {
+        let resolveIce;
+        const iceGate = new Promise((r) => { resolveIce = r; });
+        const socketHandlers = {};
+        const peers = new Map();
+        const sentOffers = [];
+        const opLog = [];
+        const activeRoomPeers = new Set();
+
+        class MockPcT13 {
+            constructor() {
+                this.signalingState = 'stable';
+                this.connectionState = 'new';
+                this.localDescription = null;
+                this.remoteDescription = null;
+            }
+            setConfiguration(cfg) {
+                opLog.push({ op: 'setConfiguration', urls: cfg && cfg.iceServers ? cfg.iceServers[0].urls : null });
+            }
+            async setRemoteDescription(desc) {
+                opLog.push({ op: 'setRemoteDescription', type: desc && desc.type });
+                this.remoteDescription = desc;
+            }
+            async createAnswer() {
+                return { type: 'answer', sdp: 'v=0\r\n' };
+            }
+            async setLocalDescription(desc) {
+                this.localDescription = desc;
+            }
+            getSenders() { return []; }
+            addTrack() { return {}; }
+            close() { this.connectionState = 'closed'; }
+        }
+
+        const rtcConfigObj = { iceServers: [{ urls: 'stun:fallback' }] };
+        const sandbox = {
+            Promise,
+            Set,
+            Map,
+            Math,
+            setTimeout,
+            clearTimeout,
+            RTCSessionDescription: class { constructor(d) { Object.assign(this, d); } },
+            SERVER_URL: 'https://srv.test',
+            roomId: 'sala-t13',
+            myId: null,
+            lastJoinedSocketId: '',
+            roomUsersGeneration: 0,
+            isRoomMembershipConfirmed: false,
+            hasRoomMembershipSnapshot: false,
+            activeRoomPeers,
+            recentlyRemovedPeers: new Set(),
+            pendingRoomJoin: null,
+            localStream: { getTracks: () => [{ id: 'v1', kind: 'video' }], getVideoTracks: () => [{ id: 'v1', kind: 'video' }] },
+            remoteActiveStreams: new Set(),
+            peers,
+            rtcConfig: rtcConfigObj,
+            displayRoomId: { textContent: '', appendChild() {} },
+            document: { createElement: () => ({ style: {} }) },
+            socket: {
+                id: 'me-13',
+                on(ev, fn) { socketHandlers[ev] = fn; },
+                emit() {}
+            },
+            refreshIceServers: async () => {
+                await iceGate;
+                rtcConfigObj.iceServers = [{ urls: 'turns:cf.turn:443' }];
+            },
+            scheduleIceRefreshTimer() {},
+            cleanupRoomState() {},
+            closeRoomModal() {},
+            updateRoomModalCloseButton() {},
+            updateEchoWarningVisibility() {},
+            updateMemberCount() {},
+            updatePeerUserName() {},
+            updateSendersForActivePeers() {},
+            removePeerConnection(id) { peers.delete(id); activeRoomPeers.delete(id); },
+            showToast() {},
+            playPresenceChime() {},
+            addLocalTracksToPC() {},
+            sendOffer(id) { sentOffers.push(id); },
+            isPeerConnectionActive: (id, obj, pc) => Boolean(obj && obj.pc === pc && pc.connectionState !== 'closed'),
+            getOrCreatePeerConnection(id) {
+                if (peers.has(id)) return peers.get(id).pc;
+                const pc = new MockPcT13();
+                peers.set(id, { pc, isPolite: id > 'me-13', iceCandidateQueue: [], isRemoteDescriptionSet: false });
+                return pc;
+            }
+        };
+
+        vm.createContext(sandbox);
+        vm.runInContext([
+            extractSocketHandler(bundleSrc, 'room-users'),
+            extractSocketHandler(bundleSrc, 'user-joined'),
+            extractSocketHandler(bundleSrc, 'signal')
+        ].join('\n\n'), sandbox);
+
+        // Inicia room-users com peer existente 'peer-a' (awaiting ICE)
+        const roomUsersPromise = socketHandlers['room-users']({
+            users: ['peer-a'],
+            userNames: { 'peer-a': 'Alice' },
+            activeStreams: ['peer-a'],
+            socketId: 'me-13',
+            memberCount: 2,
+            hasPassword: false
+        });
+
+        // Enquanto room-users aguarda ICE:
+        // 1) peer-a envia offer inicial via signal
+        socketHandlers['signal']({ senderId: 'peer-a', signal: { type: 'offer', sdp: 'v=0\r\n' } });
+        // 2) Novo peer-d entra na sala via user-joined
+        await socketHandlers['user-joined']({ socketId: 'peer-d', userName: 'Daniel', memberCount: 3 });
+
+        assert.strictEqual(sentOffers.filter((id) => id === 'peer-d').length, 1, 'user-joined deve enviar 1 oferta para peer-d');
+
+        resolveIce();
+        await roomUsersPromise;
+        await delay(20);
+
+        assert.strictEqual(
+            sentOffers.filter((id) => id === 'peer-d').length,
+            1,
+            `peer-d não deve receber segunda oferta duplicada após room-users retomar (total=${sentOffers.filter((id) => id === 'peer-d').length})`
+        );
+
+        const idxSetCfg = opLog.findIndex((o) => o.op === 'setConfiguration' && o.urls === 'turns:cf.turn:443');
+        const idxSetRemote = opLog.findIndex((o) => o.op === 'setRemoteDescription');
+        assert(idxSetCfg !== -1 && idxSetRemote !== -1, 'setConfiguration e setRemoteDescription devem executar para offer inicial');
+        assert(idxSetCfg < idxSetRemote, 'setConfiguration com TURN novo deve rodar antes de setRemoteDescription ao responder offer inicial');
+
+        console.log('\x1b[32mPASSOU\x1b[0m');
+    } catch (err) {
+        failures++;
+        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+    }
+
     console.log('\n===============================================================');
     if (failures === 0) {
         console.log('  ✅ Todos os 12 testes de renegociação/ICE passaram!');

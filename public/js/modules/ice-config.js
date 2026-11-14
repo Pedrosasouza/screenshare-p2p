@@ -30,9 +30,12 @@ let activeIceProvider = 'fallback';
 let iceServersExpiresAt = 0;
 let iceServersFetchPromise = null;
 let iceRefreshTimerId = null;
+let iceRefreshTimerGeneration = 0;
+let consecutiveIceRefreshFailures = 0;
 export const rtcConfig = createDefaultRtcConfig();
 
 export function stopIceRefreshTimer() {
+    iceRefreshTimerGeneration += 1;
     if (iceRefreshTimerId !== null) {
         clearTimeout(iceRefreshTimerId);
         iceRefreshTimerId = null;
@@ -41,11 +44,21 @@ export function stopIceRefreshTimer() {
 
 export function scheduleIceRefreshTimer(serverUrl = '', options = {}) {
     stopIceRefreshTimer();
+    const timerGen = iceRefreshTimerGeneration;
     const now = Date.now();
-    const delayMs = iceServersExpiresAt > now ? Math.max(15000, iceServersExpiresAt - now) : 240000;
+    let delayMs;
+    if (iceServersExpiresAt > now) {
+        delayMs = Math.max(15000, iceServersExpiresAt - now);
+    } else if (consecutiveIceRefreshFailures > 0) {
+        delayMs = Math.min(240000, 15000 * (2 ** Math.min(consecutiveIceRefreshFailures - 1, 4)));
+    } else {
+        delayMs = 240000;
+    }
     iceRefreshTimerId = setTimeout(async () => {
         iceRefreshTimerId = null;
+        if (timerGen !== iceRefreshTimerGeneration) return;
         await refreshIceServers(serverUrl, { ...options, force: true });
+        if (timerGen !== iceRefreshTimerGeneration) return;
         scheduleIceRefreshTimer(serverUrl, options);
     }, delayMs);
     if (iceRefreshTimerId && typeof iceRefreshTimerId.unref === 'function') {
@@ -94,6 +107,9 @@ export async function refreshIceServers(serverUrl = '', options = {}) {
             if (data && Array.isArray(data.iceServers) && data.iceServers.length > 0) {
                 rtcConfig.iceServers = data.iceServers;
                 activeIceProvider = typeof data.provider === 'string' ? data.provider : 'fallback';
+                if (typeof consecutiveIceRefreshFailures !== 'undefined') {
+                    consecutiveIceRefreshFailures = 0;
+                }
                 const ttlSec = Number(data.ttlSeconds) > 0 ? Number(data.ttlSeconds) : 300;
                 const refreshMarginSec = Math.min(300, Math.max(30, Math.floor(ttlSec * 0.15)));
                 iceServersExpiresAt = Date.now() + Math.max(15, ttlSec - refreshMarginSec) * 1000;
@@ -109,9 +125,14 @@ export async function refreshIceServers(serverUrl = '', options = {}) {
                         }
                     }
                 }
+            } else if (typeof consecutiveIceRefreshFailures !== 'undefined') {
+                consecutiveIceRefreshFailures += 1;
             }
             return { provider: activeIceProvider, iceServers: rtcConfig.iceServers };
         } catch (err) {
+            if (typeof consecutiveIceRefreshFailures !== 'undefined') {
+                consecutiveIceRefreshFailures += 1;
+            }
             if (typeof console !== 'undefined' && console.warn) {
                 console.warn('[ICE] Falha ao obter /ice-servers; mantendo configuração atual:', err.message || err);
             }

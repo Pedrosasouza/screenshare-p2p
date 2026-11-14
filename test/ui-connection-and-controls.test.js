@@ -79,11 +79,23 @@ function createMockElement(tagName) {
             listeners[type] = listeners[type] || [];
             listeners[type].push(fn);
         },
+        removeEventListener(type, fn) {
+            if (!listeners[type]) return;
+            listeners[type] = listeners[type].filter((f) => f !== fn);
+        },
         dispatchEvent(evt) {
             const event = typeof evt === 'string' ? { type: evt } : { ...evt };
             event.target = event.target || el;
-            event.stopPropagation = event.stopPropagation || (() => {});
+            let stopped = false;
+            const origStop = typeof event.stopPropagation === 'function' ? event.stopPropagation : null;
+            event.stopPropagation = () => {
+                stopped = true;
+                if (origStop) origStop();
+            };
             (listeners[event.type] || []).forEach((fn) => fn.call(el, event));
+            if (!stopped && el.parentNode && typeof el.parentNode.dispatchEvent === 'function') {
+                el.parentNode.dispatchEvent(event);
+            }
         },
         querySelector(sel) {
             const walk = (node) => {
@@ -286,6 +298,48 @@ function runTests() {
             hoverMatch[0].includes('color: #ffffff'),
             '.tile-controls-overlay .btn-icon:hover must brighten consistently'
         );
+    }
+    console.log('\x1b[32mPASSOU\x1b[0m');
+
+    // T4: Slider de volume em 0 não borbulha clique para tap-unmute-badge desmutar novamente
+    process.stdout.write('  [Teste] T4: slider de volume em 0 bloqueia propagação para tap-unmute-badge ... ');
+    {
+        const tileDomPath = path.resolve(__dirname, '../public/js/modules/tile-dom.js');
+        const tileDomSrc = fs.readFileSync(tileDomPath, 'utf8')
+            .replace(/^export\s+/gm, '')
+            .replace(/import\s+[\s\S]*?;\n/g, '');
+
+        const sandbox = {
+            Promise,
+            navigator: { userAgent: 'Mozilla/5.0' },
+            updateBackgroundTracksOptimization() {},
+            toggleTileFullscreen() {},
+            document: {
+                createElement: (tag) => createMockElement(tag)
+            }
+        };
+
+        vm.createContext(sandbox);
+        vm.runInContext([
+            tileDomSrc,
+            extractFn(appJs, 'createStreamTile'),
+            extractFn(appJs, 'enterPseudoFullscreen')
+        ].join('\n\n'), sandbox, { filename: 'public/app.js' });
+
+        const tile = sandbox.createStreamTile('peer-tap', { id: 's-tap' }, 'Leo', false);
+        const video = tile.querySelector('video');
+        video.muted = true;
+        video.volume = 0.6;
+        sandbox.showTapToUnmuteBadge(tile, video);
+
+        const slider = tile.querySelector('input');
+        assert(slider, 'Slider de volume deve existir no tile remoto');
+        slider.value = '0';
+        slider.dispatchEvent({ type: 'input', target: slider });
+        slider.dispatchEvent({ type: 'click', target: slider });
+
+        assert.strictEqual(video.muted, true, 'Clique no slider após arrastar para 0 não deve desmutar via tap-unmute-badge');
+        assert.strictEqual(video.volume, 0, 'Volume não deve ser resetado para 1 após clique no slider');
     }
     console.log('\x1b[32mPASSOU\x1b[0m');
 

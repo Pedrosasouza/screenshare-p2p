@@ -542,6 +542,12 @@ io.on('connection', (socket) => {
     socket.on('join-room', safeHandler(socket, 'join-room', async (data) => {
         if (!isPlainObject(data)) return;
 
+        const reqGen = (socket._joinGen || 0) + 1;
+        socket._joinGen = reqGen;
+        const prevQueue = socket._joinQueue || Promise.resolve();
+        const nextQueue = prevQueue.catch(() => {}).then(async () => {
+        if (!socket.connected) return;
+
         const rawRoomId = typeof data.roomId === 'string' ? data.roomId.trim().toLowerCase() : '';
         if (!ROOM_ID_REGEX.test(rawRoomId)) {
             socket.emit('join-error', {
@@ -589,7 +595,7 @@ io.on('connection', (socket) => {
                 return;
             }
             const { hash, salt } = await hashPassword(cleanPassword);
-            if (!socket.connected) {
+            if (!socket.connected || socket._joinGen !== reqGen) {
                 return;
             }
             room = rooms.get(cleanRoomId);
@@ -702,7 +708,7 @@ io.on('connection', (socket) => {
             }
         }
 
-        if (!socket.connected) {
+        if (!socket.connected || socket._joinGen !== reqGen) {
             if (isNewRoom && room.members.size === 0) {
                 rooms.delete(cleanRoomId);
             }
@@ -800,6 +806,9 @@ io.on('connection', (socket) => {
         io.to(cleanRoomId).emit('room-status', {
             memberCount: room.members.size
         });
+        });
+        socket._joinQueue = nextQueue;
+        return nextQueue;
     }));
 
     // Check room existence, member count & password requirement

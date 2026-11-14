@@ -382,6 +382,40 @@ async function runTests() {
         console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
     }
 
+    // T6: closeRoomModal com join-room já em voo preserva pendingRoomJoin e reconcilia room-users corretamente
+    process.stdout.write('  [Teste] T6: closeRoomModal com join-room em voo reconcilia nova sala sem vazar stream anterior ... ');
+    try {
+        const h = createRoomJoinHarness(appJs);
+        const { sandbox, socketHandlers, emittedEvents, getCleanupCalls } = h;
+        sandbox.roomId = 'sala-a';
+
+        sandbox.joinRoom('sala-b', 'senha-b', 'Pedro');
+        assert.strictEqual(emittedEvents.length, 1);
+
+        // Usuário fecha o modal antes da resposta room-users voltar do servidor
+        sandbox.closeRoomModal();
+        assert(sandbox.pendingRoomJoin !== null, 'join-room em voo não deve ser apagado ao fechar o modal');
+
+        // Resposta room-users da sala-b chega logo depois
+        await socketHandlers['room-users']({
+            users: ['peer-b'],
+            userNames: { 'peer-b': 'Ana' },
+            activeStreams: [],
+            socketId: 'sock-1',
+            memberCount: 2,
+            hasPassword: true
+        });
+
+        assert.strictEqual(getCleanupCalls(), 1, 'cleanupRoomState deve rodar ao confirmar transição em voo para sala-b');
+        assert.strictEqual(sandbox.roomId, 'sala-b', 'roomId deve atualizar para sala-b mesmo após fechar modal');
+        assert.strictEqual(sandbox.displayRoomId.textContent, 'sala-b');
+
+        console.log('\x1b[32mPASSOU\x1b[0m');
+    } catch (err) {
+        failures++;
+        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+    }
+
     console.log('\n===============================================================');
     if (failures > 0) {
         console.log(`  ❌ Resultado: ${failures} teste(s) falharam.`);

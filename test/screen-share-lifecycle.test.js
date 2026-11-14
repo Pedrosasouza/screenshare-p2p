@@ -315,6 +315,57 @@ async function runTests() {
         console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
     }
 
+    // T5: Cancelamento via stopScreenShare ou cleanupRoomState enquanto getDisplayMedia aguarda impede vazamento
+    process.stdout.write('  [Teste] T5: Cancelamento em voo de startScreenShare para tracks e não publica stream ... ');
+    try {
+        let resolveDisplay;
+        let markEntered;
+        const enteredPrompt = new Promise((r) => { markEntered = r; });
+        const emitted = [];
+        const offersSent = [];
+        const appendedTiles = [];
+
+        const lateVideoTrack = { id: 'late-v', kind: 'video', stopped: false, stop() { this.stopped = true; } };
+        const lateAudioTrack = { id: 'late-a', kind: 'audio', stopped: false, stop() { this.stopped = true; } };
+
+        const { sandbox, MockMediaStream } = createScreenShareSandbox(appJs, {
+            socket: { emit: (ev, payload) => emitted.push({ ev, payload }) },
+            sendOffer: (pid) => offersSent.push(pid),
+            streamGrid: { appendChild: (el) => appendedTiles.push(el) },
+            peers: new Map([['peer-1', { pc: { getSenders: () => [], addTrack: () => ({}) } }]])
+        });
+
+        sandbox.navigator.mediaDevices.getDisplayMedia = () => {
+            markEntered();
+            return new Promise((resolve) => { resolveDisplay = resolve; });
+        };
+
+        const sharePromise = sandbox.startScreenShare('none');
+        await enteredPrompt;
+
+        // Usuário troca de sala / cancela share antes do seletor do SO responder
+        sandbox.stopScreenShare({ silent: true });
+
+        resolveDisplay(new MockMediaStream([lateVideoTrack, lateAudioTrack]));
+        await sharePromise;
+
+        assert.strictEqual(sandbox.localStream, null, 'localStream deve continuar null após cancelamento em voo');
+        assert.strictEqual(lateVideoTrack.stopped, true, 'Track de vídeo tardia deve ser parada imediatamente');
+        assert.strictEqual(lateAudioTrack.stopped, true, 'Track de áudio tardia deve ser parada imediatamente');
+        assert.strictEqual(appendedTiles.length, 0, 'Tile local não deve ser montado após cancelamento');
+        assert.strictEqual(offersSent.length, 0, 'Ofertas WebRTC não devem ser enviadas após cancelamento');
+        assert.strictEqual(
+            emitted.filter((e) => e.ev === 'stream-state' && e.payload && e.payload.state === 'started').length,
+            0,
+            'stream-state:started não deve ser emitido após cancelamento'
+        );
+
+        console.log('\x1b[32mPASSOU\x1b[0m');
+    } catch (err) {
+        failures++;
+        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+    }
+
     console.log('\n===============================================================');
     if (failures > 0) {
         console.log(`  ❌ Resultado: ${failures} teste(s) falharam.`);

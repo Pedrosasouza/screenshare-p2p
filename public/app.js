@@ -635,6 +635,10 @@ function cleanupRoomState(options = {}) {
     const silentShareStop = options && options.silent !== undefined ? Boolean(options.silent) : true;
     console.log('[Room] Cleaning up previous room peer connections and stream tiles...');
 
+    if (typeof startScreenShare === 'function') {
+        startScreenShare._generation = (startScreenShare._generation || 0) + 1;
+    }
+
     // 1. Stop local screen share if active (silently on room switch to avoid leaking offers/stream-state into new room)
     if (localStream) {
         stopScreenShare({ silent: silentShareStop });
@@ -692,10 +696,12 @@ function joinRoom(targetRoomId, targetPass = '', targetUserName = '') {
     pendingRoomJoin = {
         roomId: newRoomId,
         password: pendingPassword,
-        userName: currentUserName
+        userName: currentUserName,
+        inFlight: false
     };
 
     if (socket && socket.connected) {
+        pendingRoomJoin.inFlight = true;
         socket.emit('join-room', {
             roomId: pendingRoomJoin.roomId,
             clientId,
@@ -733,7 +739,7 @@ function updateRoomModalCloseButton() {
 
 function closeRoomModal() {
     if (!roomId) return; // Cannot close if not connected to any room yet
-    if (typeof pendingRoomJoin !== 'undefined') {
+    if (typeof pendingRoomJoin !== 'undefined' && pendingRoomJoin && !pendingRoomJoin.inFlight) {
         pendingRoomJoin = null;
     }
     clearRoomError();
@@ -801,6 +807,7 @@ socket.on('connect', () => {
     }
     if (pendingRoomJoin) {
         console.log('[Socket] Joining pending room on connect:', pendingRoomJoin.roomId);
+        pendingRoomJoin.inFlight = true;
         socket.emit('join-room', {
             roomId: pendingRoomJoin.roomId,
             clientId,
@@ -981,11 +988,30 @@ socket.on('room-users', async ({ users, userNames, activeStreams, socketId, memb
         displayRoomId.appendChild(icon);
     }
 
+    const offeredDuringAwait = new Set();
     if (typeof refreshIceServers === 'function' && typeof SERVER_URL !== 'undefined') {
-        await Promise.race([
+        if (socket) {
+            socket._roomUsersAwaitGen = joinGen;
+            socket._roomUsersOfferedPeers = offeredDuringAwait;
+        }
+        const iceRefreshRace = Promise.race([
             refreshIceServers(SERVER_URL, { peers }),
             new Promise((resolve) => setTimeout(resolve, 1200))
         ]);
+        if (socket) {
+            socket._pendingIceRefreshPromise = iceRefreshRace;
+        }
+        try {
+            await iceRefreshRace;
+        } finally {
+            if (socket && socket._pendingIceRefreshPromise === iceRefreshRace) {
+                socket._pendingIceRefreshPromise = null;
+            }
+            if (socket && socket._roomUsersAwaitGen === joinGen) {
+                socket._roomUsersAwaitGen = 0;
+                socket._roomUsersOfferedPeers = null;
+            }
+        }
         if (typeof roomUsersGeneration !== 'undefined' && roomUsersGeneration !== joinGen) {
             return;
         }
@@ -1007,6 +1033,7 @@ socket.on('room-users', async ({ users, userNames, activeStreams, socketId, memb
     // If I am currently sharing screen, send offer with my tracks to all peers and sync activeStreams
     if (localStream) {
         for (const [peerId, peerObj] of peers.entries()) {
+            if (offeredDuringAwait.has(peerId)) continue;
             addLocalTracksToPC(peerObj.pc);
             sendOffer(peerId);
         }
@@ -1035,6 +1062,9 @@ socket.on('user-joined', async ({ socketId, userName, memberCount }) => {
     if (localStream) {
         addLocalTracksToPC(pc);
         sendOffer(socketId);
+        if (socket && socket._roomUsersOfferedPeers) {
+            socket._roomUsersOfferedPeers.add(socketId);
+        }
         updateSendersForActivePeers();
 
         // Pulso inicial de Keyframe: assegura envio de IDR frame assim que o recém-chegado negociar
@@ -1166,6 +1196,16 @@ socket.on('signal', (payload) => {
         if (!isPeerConnectionActive(senderId, peerObj, pc)) return;
 
         if (signal.type === 'offer') {
+            if (socket && socket._pendingIceRefreshPromise) {
+                try {
+                    await socket._pendingIceRefreshPromise;
+                } catch (_) {}
+                if (!isPeerConnectionActive(senderId, peerObj, pc)) return;
+                if (typeof pc.setConfiguration === 'function' && typeof rtcConfig !== 'undefined') {
+                    try { pc.setConfiguration(rtcConfig); } catch (_) {}
+                }
+            }
+
             // Check for offer collision (glare)
             const offerCollision = Boolean(peerObj.makingOffer || pc.signalingState !== 'stable');
             peerObj.ignoreOffer = !peerObj.isPolite && offerCollision;
@@ -2533,16 +2573,28 @@ async function startScreenShare(audioMode = 'exclude_discord', targetPid = null,
     if (startScreenShare._isStarting) return;
     startScreenShare._isStarting = true;
 
-    if (localStream) {
-        await stopScreenShare();
-    }
-
     let screenStream = null;
     let audioTrack = null;
     let cableStream = null;
     let captureSucceeded = false;
+    let shareGen = null;
 
     try {
+        const preStopGen = startScreenShare._generation || 0;
+        const hadLocalStream = Boolean(localStream);
+        if (hadLocalStream) {
+            await stopScreenShare();
+            if ((startScreenShare._generation || 0) > preStopGen + 1) {
+                return;
+            }
+        } else if ((startScreenShare._generation || 0) !== preStopGen) {
+            return;
+        }
+
+        shareGen = (startScreenShare._generation || 0) + 1;
+        startScreenShare._generation = shareGen;
+        const isShareCancelled = () => (startScreenShare._generation || 0) !== shareGen;
+
         let idealFps = Number(fps) || 60;
         let idealWidth = resolution === '720p' ? 1280 : 1920;
         let idealHeight = resolution === '720p' ? 720 : 1080;
@@ -2571,6 +2623,7 @@ async function startScreenShare(audioMode = 'exclude_discord', targetPid = null,
                 if (err.name === 'NotAllowedError') return;
                 throw err;
             }
+            if (isShareCancelled()) return;
 
             try {
                 audioTrack = await startExcludeDiscordCapture();
@@ -2579,6 +2632,7 @@ async function startScreenShare(audioMode = 'exclude_discord', targetPid = null,
                 console.warn('[Audio] Falha ao capturar no modo excluir Discord:', appErr.message);
                 showToast('Aviso de Áudio: ' + appErr.message + ' (Continuando transmissão apenas com vídeo)', 'warning');
             }
+            if (isShareCancelled()) return;
         } else if (audioMode === 'app' && targetPid) {
             // Mode 2: Isolated Application Audio Capture (WASAPI Process Loopback)
             try {
@@ -2590,6 +2644,7 @@ async function startScreenShare(audioMode = 'exclude_discord', targetPid = null,
                 if (err.name === 'NotAllowedError') return;
                 throw err;
             }
+            if (isShareCancelled()) return;
 
             try {
                 audioTrack = await startAppAudioCapture(targetPid);
@@ -2598,11 +2653,13 @@ async function startScreenShare(audioMode = 'exclude_discord', targetPid = null,
                 console.warn('[Audio] Failed to capture app audio:', appErr.message);
                 showToast('Aviso de Áudio: ' + appErr.message + ' (Continuando transmissão apenas com vídeo)', 'warning');
             }
+            if (isShareCancelled()) return;
         } else if (audioMode === 'system') {
             // Mode 2: System / VB-Cable Audio
             let cableOutputId = null;
             try {
                 let devices = await navigator.mediaDevices.enumerateDevices();
+                if (isShareCancelled()) return;
                 const hasEmptyLabels = devices.some(d => d.deviceId && d.label === '');
                 if (hasEmptyLabels) {
                     let canProbeMicLabels = false;
@@ -2611,6 +2668,7 @@ async function startScreenShare(audioMode = 'exclude_discord', targetPid = null,
                             const micPerm = await navigator.permissions.query({ name: 'microphone' });
                             canProbeMicLabels = Boolean(micPerm && micPerm.state === 'granted');
                         } catch (_) {}
+                        if (isShareCancelled()) return;
                     }
                     if (canProbeMicLabels) {
                         try {
@@ -2618,6 +2676,7 @@ async function startScreenShare(audioMode = 'exclude_discord', targetPid = null,
                             tempStream.getTracks().forEach(t => t.stop());
                             devices = await navigator.mediaDevices.enumerateDevices();
                         } catch (permErr) {}
+                        if (isShareCancelled()) return;
                     }
                 }
 
@@ -2644,6 +2703,7 @@ async function startScreenShare(audioMode = 'exclude_discord', targetPid = null,
                     if (err.name === 'NotAllowedError') return;
                     throw err;
                 }
+                if (isShareCancelled()) return;
 
                 try {
                     cableStream = await navigator.mediaDevices.getUserMedia({
@@ -2672,6 +2732,7 @@ async function startScreenShare(audioMode = 'exclude_discord', targetPid = null,
                     console.warn('[Audio] VB-Cable capture failed:', audioErr.message);
                     showToast('Aviso de Áudio: Falha ao capturar pelo VB-Cable (transmitindo apenas vídeo).', 'warning', 5000);
                 }
+                if (isShareCancelled()) return;
             } else {
                 try {
                     screenStream = await navigator.mediaDevices.getDisplayMedia({
@@ -2686,6 +2747,7 @@ async function startScreenShare(audioMode = 'exclude_discord', targetPid = null,
                     if (err.name === 'NotAllowedError') return;
                     throw err;
                 }
+                if (isShareCancelled()) return;
 
                 if (screenStream.getAudioTracks().length > 0) {
                     audioTrack = screenStream.getAudioTracks()[0];
@@ -2703,6 +2765,7 @@ async function startScreenShare(audioMode = 'exclude_discord', targetPid = null,
                 if (err.name === 'NotAllowedError') return;
                 throw err;
             }
+            if (isShareCancelled()) return;
         } else {
             // Mode 3: Video Only (Muted)
             try {
@@ -2714,7 +2777,10 @@ async function startScreenShare(audioMode = 'exclude_discord', targetPid = null,
                 if (err.name === 'NotAllowedError') return;
                 throw err;
             }
+            if (isShareCancelled()) return;
         }
+
+        if (isShareCancelled()) return;
 
         // --- Step 4: Build final stream ---
         const videoTrack = screenStream && screenStream.getVideoTracks()[0];
@@ -2772,8 +2838,13 @@ async function startScreenShare(audioMode = 'exclude_discord', targetPid = null,
         console.log(`[Capture] ✅ Sharing started | Video: yes | Audio: ${finalAudioTracks.length > 0 ? 'yes (' + finalAudioTracks[0].label + ')' : 'no'}`);
 
     } catch (err) {
+        console.error('[Capture] Error getting display media:', err);
+        if (err.name !== 'NotAllowedError') {
+            showToast('Não foi possível iniciar o compartilhamento: ' + err.message, 'error');
+        }
+    } finally {
         if (!captureSucceeded) {
-            if (localStream) {
+            if (localStream && (shareGen === null || (startScreenShare._generation || 0) === shareGen)) {
                 try {
                     localStream.getTracks().forEach(t => { try { t.stop(); } catch (_) {} });
                 } catch (_) {}
@@ -2792,15 +2863,11 @@ async function startScreenShare(audioMode = 'exclude_discord', targetPid = null,
             if (audioTrack) {
                 try { audioTrack.stop(); } catch (_) {}
             }
-            if (audioMode === 'exclude_discord' || audioMode === 'app') {
+            if ((audioMode === 'exclude_discord' || audioMode === 'app') &&
+                (shareGen === null || (startScreenShare._generation || 0) === shareGen)) {
                 try { stopAppAudioCapture(); } catch (_) {}
             }
         }
-        console.error('[Capture] Error getting display media:', err);
-        if (err.name !== 'NotAllowedError') {
-            showToast('Não foi possível iniciar o compartilhamento: ' + err.message, 'error');
-        }
-    } finally {
         startScreenShare._isStarting = false;
     }
 }
@@ -2810,6 +2877,9 @@ btnStopShare.addEventListener('click', stopScreenShare);
 
 function stopScreenShare(options = {}) {
     const silent = Boolean(options && options.silent === true);
+    if (typeof startScreenShare === 'function') {
+        startScreenShare._generation = (startScreenShare._generation || 0) + 1;
+    }
     stopQualityMonitor();
     stopAppAudioCapture();
 
@@ -2968,6 +3038,10 @@ function createStreamTile(id, stream, labelText, isMuted) {
         };
         tile._syncAudioUi = syncAudioUi;
         syncAudioUi();
+
+        slider.addEventListener('click', (e) => {
+            e.stopPropagation();
+        });
 
         slider.addEventListener('input', (e) => {
             const val = parseFloat(e.target.value);

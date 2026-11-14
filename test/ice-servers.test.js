@@ -388,6 +388,88 @@ async function runTests() {
         failures++;
     }
 
+    // T7: stopIceRefreshTimer impede ressurreição após fetch em voo e falha aplica backoff curto (não 240s)
+    process.stdout.write('  [Teste] T7: timer ICE não ressuscita após stopIceRefreshTimer e aplica backoff curto em falha ... ');
+    try {
+        const iceConfigPath = path.join(rootDir, 'public', 'js', 'modules', 'ice-config.js');
+        const iceConfigSrc = fs.readFileSync(iceConfigPath, 'utf8')
+            .replace(/^export\s+/gm, '')
+            .replace(/import\s+[\s\S]*?;\n/g, '');
+
+        let pendingFetchResolve;
+        let fetchShouldFail = false;
+        const timers = [];
+
+        const sandbox = {
+            Date,
+            Math,
+            Number,
+            Promise,
+            Error,
+            console: { log: () => {}, warn: () => {}, error: () => {} },
+            AbortController: global.AbortController,
+            setTimeout(fn, delay) {
+                const entry = { fn, delay, cleared: false };
+                timers.push(entry);
+                return entry;
+            },
+            clearTimeout(entry) {
+                if (entry) entry.cleared = true;
+            },
+            fetch: () => {
+                if (fetchShouldFail) {
+                    return Promise.reject(new Error('transient timeout'));
+                }
+                return new Promise((resolve) => {
+                    pendingFetchResolve = () => resolve({
+                        ok: true,
+                        status: 200,
+                        async json() {
+                            return {
+                                provider: 'cloudflare',
+                                ttlSeconds: 300,
+                                iceServers: [{ urls: 'turn:cf:3478', username: 'u', credential: 'c' }]
+                            };
+                        }
+                    });
+                });
+            }
+        };
+
+        vm.createContext(sandbox);
+        vm.runInContext(iceConfigSrc, sandbox);
+
+        const refreshTimers = () => timers.filter((t) => t.delay !== 3500);
+
+        // 7a: Callback dispara, fetch em voo é interrompido por stopIceRefreshTimer(), callback termina sem rearmar timer
+        sandbox.scheduleIceRefreshTimer('https://srv.test', {});
+        assert.strictEqual(refreshTimers().length, 1);
+        const firstTimerCb = refreshTimers()[0].fn();
+        await new Promise((r) => setTimeout(r, 5));
+        sandbox.stopIceRefreshTimer();
+        assert(pendingFetchResolve, 'fetch do timer deveria estar pendente');
+        pendingFetchResolve();
+        await firstTimerCb;
+        assert.strictEqual(refreshTimers().length, 1, 'stopIceRefreshTimer durante fetch em voo deve impedir novo agendamento');
+
+        // 7b: Falha em refresh agendado não espera 240s; agenda backoff curto (<= 30s)
+        fetchShouldFail = true;
+        sandbox.scheduleIceRefreshTimer('https://srv.test', {});
+        vm.runInContext('iceServersExpiresAt = Date.now() - 1000;', sandbox);
+        const activeTimer = refreshTimers()[refreshTimers().length - 1];
+        await activeTimer.fn();
+        const retryDelay = refreshTimers()[refreshTimers().length - 1].delay;
+        assert(
+            retryDelay >= 15000 && retryDelay <= 30000,
+            `Retry após falha com cache expirado deve usar backoff curto (15s-30s), recebido ${retryDelay}ms`
+        );
+
+        console.log('\x1b[32mPASSOU\x1b[0m');
+    } catch (err) {
+        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+        failures++;
+    }
+
     console.log('\n===============================================================');
     if (failures === 0) {
         console.log('  ✅ Todos os 5 testes de /ice-servers passaram com sucesso!');
