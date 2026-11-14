@@ -104,11 +104,14 @@ export function createScreenShareController({
     ) {
         if (startScreenShare._isStarting) return;
         startScreenShare._isStarting = true;
+        const attemptToken = (startScreenShare._attemptToken || 0) + 1;
+        startScreenShare._attemptToken = attemptToken;
 
         let screenStream = null;
         let audioTrack = null;
         let cableStream = null;
         let captureSucceeded = false;
+        let startedDesktopAudioThisAttempt = false;
         let shareGen = null;
 
         try {
@@ -154,11 +157,41 @@ export function createScreenShareController({
                 if (isShareCancelled()) return;
 
                 try {
+                    startedDesktopAudioThisAttempt = true;
                     audioTrack = await startExcludeDiscordCapture();
                     console.log('[Audio] ✅ Capturando áudio de todo o sistema excluindo o Discord (WASAPI Exclusion Loopback)');
                 } catch (appErr) {
                     console.warn('[Audio] Falha ao capturar no modo excluir Discord:', appErr.message);
-                    showToast('Aviso de Áudio: ' + appErr.message + ' (Continuando transmissão apenas com vídeo)', 'warning');
+                    showToast('Aviso de Áudio: ' + appErr.message + ' — alternando para áudio completo do sistema.', 'warning');
+                    startedDesktopAudioThisAttempt = false;
+                    try {
+                        await stopAppAudioCapture();
+                    } catch (_) {}
+                    try {
+                        const fallbackStream = await navigatorObj.mediaDevices.getDisplayMedia({
+                            video: videoConstraints,
+                            audio: {
+                                echoCancellation: false,
+                                noiseSuppression: false,
+                                autoGainControl: false
+                            }
+                        });
+                        if (isShareCancelled()) {
+                            fallbackStream.getTracks().forEach((t) => { try { t.stop(); } catch (_) {} });
+                            return;
+                        }
+                        if (fallbackStream && fallbackStream.getVideoTracks().length > 0) {
+                            if (screenStream) {
+                                screenStream.getTracks().forEach((t) => { try { t.stop(); } catch (_) {} });
+                            }
+                            screenStream = fallbackStream;
+                            audioTrack = fallbackStream.getAudioTracks()[0] || null;
+                        } else if (fallbackStream) {
+                            fallbackStream.getTracks().forEach((t) => { try { t.stop(); } catch (_) {} });
+                        }
+                    } catch (_) {
+                        // Fallback recusado ou indisponível: segue apenas com vídeo já capturado
+                    }
                 }
                 if (isShareCancelled()) return;
             } else if (audioMode === 'app' && targetPid) {
@@ -174,6 +207,7 @@ export function createScreenShareController({
                 if (isShareCancelled()) return;
 
                 try {
+                    startedDesktopAudioThisAttempt = true;
                     audioTrack = await startAppAudioCapture(targetPid);
                     console.log('[Audio] ✅ Capturing isolated application audio via WASAPI Loopback for PID:', targetPid);
                 } catch (appErr) {
@@ -347,12 +381,19 @@ export function createScreenShareController({
 
             const peers = getPeers();
             const webrtc = getWebRtc();
+            const trackSetupPromises = [];
             for (const [peerId, peerObj] of peers.entries()) {
                 if (webrtc) {
-                    webrtc.addLocalTracksToPC(peerObj.pc);
-                    webrtc.sendOffer(peerId);
+                    trackSetupPromises.push(
+                        Promise.resolve(webrtc.addLocalTracksToPC(peerObj.pc)).then(() => {
+                            const current = peers.get(peerId);
+                            if (!current || current.pc !== peerObj.pc) return;
+                            return webrtc.sendOffer(peerId);
+                        })
+                    );
                 }
             }
+            await Promise.allSettled(trackSetupPromises);
 
             const socket = getSocket();
             if (socket && typeof socket.emit === 'function') {
@@ -391,7 +432,8 @@ export function createScreenShareController({
                     try { audioTrack.stop(); } catch (_) {}
                 }
                 if ((audioMode === 'exclude_discord' || audioMode === 'app') &&
-                    (shareGen === null || (startScreenShare._generation || 0) === shareGen)) {
+                    startedDesktopAudioThisAttempt &&
+                    startScreenShare._attemptToken === attemptToken) {
                     try { stopAppAudioCapture(); } catch (_) {}
                 }
             }

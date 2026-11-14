@@ -1,5 +1,6 @@
 import {
     isDesktopApp,
+    configureDesktopAudioRuntime,
     checkDiscordStatus,
     fetchWindowList,
     startExcludeDiscordCapture,
@@ -74,11 +75,23 @@ export function initApp({
     documentObj = (typeof document !== 'undefined' ? document : null),
     navigatorObj = (typeof navigator !== 'undefined' ? navigator : null),
     storage = (typeof localStorage !== 'undefined' ? localStorage : null),
+    sessionStorageObj = (typeof sessionStorage !== 'undefined' ? sessionStorage : null),
     ioFactory = (typeof io === 'function' ? io : null),
     serverUrl: explicitServerUrl
 } = {}) {
+    configureDesktopAudioRuntime({ windowObj, documentObj });
     const dom = collectDomReferences(documentObj);
-    const serverUrl = explicitServerUrl || resolveSignalingServerUrl();
+    const serverUrl = explicitServerUrl || resolveSignalingServerUrl({
+        windowObj,
+        storage,
+        isDesktop: isDesktopApp(windowObj)
+    });
+    const boundShowToast = (msg, type, durationMs) => showToast(msg, type, durationMs, documentObj);
+    const boundSetSignalingStatus = (status, customLabel) => setSignalingStatus(status, { customLabel, documentObj });
+    const boundPlayPresenceChime = (type) => playPresenceChime(type, windowObj);
+    const boundSaveSessionRoomPassword = (roomId, password) => saveSessionRoomPassword(roomId, password, sessionStorageObj);
+    const boundGetSessionRoomPassword = (roomId) => getSessionRoomPassword(roomId, sessionStorageObj);
+    const boundClearSessionRoomPassword = () => clearSessionRoomPassword(sessionStorageObj);
     const state = {
         clientId: getOrCreateClientId(storage),
         currentUserName: loadSavedUserName(storage),
@@ -118,8 +131,8 @@ export function initApp({
             if (socket && socket.connected) return;
             if (hasShownConnectErrorToast) return;
             hasShownColdStartToast = true;
-            setSignalingStatus('waking');
-            showToast('Acordando servidor de sinalização... isso pode levar alguns segundos.', 'info', 6000);
+            boundSetSignalingStatus('waking');
+            boundShowToast('Acordando servidor de sinalização... isso pode levar alguns segundos.', 'info', 6000);
         }, COLD_START_NOTICE_DELAY_MS);
     }
 
@@ -153,7 +166,7 @@ export function initApp({
         getQualityMonitor: () => qosMonitor,
         isDesktopApp: () => isDesktopApp(windowObj),
         getServerUrl: () => serverUrl,
-        showToast,
+        showToast: boundShowToast,
         documentObj,
         windowObj,
         navigatorObj
@@ -172,10 +185,10 @@ export function initApp({
         refreshIceServers,
         scheduleIceRefreshTimer,
         registerFullscreenChangeHandler,
-        saveSessionRoomPassword,
-        clearSessionRoomPassword,
-        showToast,
-        playPresenceChime,
+        saveSessionRoomPassword: boundSaveSessionRoomPassword,
+        clearSessionRoomPassword: boundClearSessionRoomPassword,
+        showToast: boundShowToast,
+        playPresenceChime: boundPlayPresenceChime,
         documentObj,
         windowObj,
         storage
@@ -189,10 +202,10 @@ export function initApp({
         getWebRtc: () => webrtc,
         getGrid: () => grid,
         getQosMonitor: () => qosMonitor,
-        startExcludeDiscordCapture,
-        startAppAudioCapture,
-        stopAppAudioCapture,
-        showToast,
+        startExcludeDiscordCapture: () => startExcludeDiscordCapture(windowObj),
+        startAppAudioCapture: (pid) => startAppAudioCapture(pid, windowObj),
+        stopAppAudioCapture: () => stopAppAudioCapture(windowObj),
+        showToast: boundShowToast,
         documentObj,
         navigatorObj
     });
@@ -203,18 +216,15 @@ export function initApp({
         getSocket: () => socket,
         onCleanupRoomState: (opts) => webrtc.cleanupRoomState(opts),
         getMembership: () => webrtc.membership,
-        showToast,
-        getSessionRoomPassword,
-        clearSessionRoomPassword,
+        showToast: boundShowToast,
+        getSessionRoomPassword: boundGetSessionRoomPassword,
+        clearSessionRoomPassword: boundClearSessionRoomPassword,
         onThemeInit: () => initTheme({ windowObj, documentObj, storage }),
         onLoadPreferences: () => loadSavedClientPreferences({
             state,
             storage,
             onApplied: () => qosMonitor.applyQualityModeUI()
         }),
-        saveUserName,
-        sanitizeRoomId,
-        generateRandomRoomId,
         storage,
         windowObj
     });
@@ -223,8 +233,8 @@ export function initApp({
         state,
         dom,
         isDesktopApp: () => isDesktopApp(windowObj),
-        checkDiscordStatus,
-        fetchWindowList,
+        checkDiscordStatus: () => checkDiscordStatus(windowObj, documentObj),
+        fetchWindowList: () => fetchWindowList(windowObj, documentObj),
         updateEchoWarningVisibility: () => grid.updateEchoWarningVisibility(),
         onStartScreenShare: (...args) => screenShare.startScreenShare(...args),
         documentObj,
@@ -236,7 +246,7 @@ export function initApp({
         dom,
         getPeers: () => webrtc.peers,
         getServerUrl: () => serverUrl,
-        showToast,
+        showToast: boundShowToast,
         documentObj,
         windowObj,
         storage
@@ -253,7 +263,7 @@ export function initApp({
         onApplied: () => qosMonitor.applyQualityModeUI()
     });
 
-    setSignalingStatus(socket && socket.connected ? 'connected' : 'connecting');
+    boundSetSignalingStatus(socket && socket.connected ? 'connected' : 'connecting');
     scheduleColdStartNotice();
     refreshIceServers(serverUrl, { peers: webrtc.peers });
 
@@ -266,38 +276,57 @@ export function initApp({
     grid.bindCopyInviteLink();
     webrtc.bindLifecycleListeners();
 
+    let isTornDown = false;
+    let unlistenDesktopCapture = null;
+    let onBeforeUnload = null;
+    let onDomContentLoaded = null;
+    let onKeyDown = null;
+    let onPageHide = null;
+
     if (isDesktopApp(windowObj)) {
-        checkDiscordStatus();
-        fetchWindowList();
-        registerDesktopCaptureListeners((payload) => screenShare.handleDesktopCaptureStopped(payload)).catch(() => {});
-        if (windowObj) {
-            windowObj.addEventListener('beforeunload', () => {
-                if (windowObj.StreamGridDesktop) {
+        checkDiscordStatus(windowObj, documentObj);
+        fetchWindowList(windowObj, documentObj);
+        Promise.resolve(
+            registerDesktopCaptureListeners((payload) => screenShare.handleDesktopCaptureStopped(payload), windowObj)
+        ).then((unlisten) => {
+            if (isTornDown) {
+                if (typeof unlisten === 'function') unlisten();
+            } else {
+                unlistenDesktopCapture = typeof unlisten === 'function' ? unlisten : null;
+            }
+        }).catch(() => {});
+        if (windowObj && typeof windowObj.addEventListener === 'function') {
+            onBeforeUnload = () => {
+                if (windowObj.StreamGridDesktop && typeof windowObj.StreamGridDesktop.stopAppAudioCapture === 'function') {
                     windowObj.StreamGridDesktop.stopAppAudioCapture().catch(() => {});
                 }
-            });
+            };
+            windowObj.addEventListener('beforeunload', onBeforeUnload);
         }
     }
 
     // Bind Socket.IO events
     if (socket) {
         socket.on('connect', () => {
+            if (isTornDown) return;
             state.myId = socket.id;
             cancelColdStartNotice();
-            setSignalingStatus('connected');
+            boundSetSignalingStatus('connected');
             Promise.resolve(refreshIceServers(serverUrl, { peers: webrtc.peers }))
                 .catch(() => {})
                 .finally(() => {
-                    scheduleIceRefreshTimer(serverUrl, { peers: webrtc.peers });
+                    if (!isTornDown) {
+                        scheduleIceRefreshTimer(serverUrl, { peers: webrtc.peers });
+                    }
                 });
             console.log('[Socket] Connected to server. Socket ID:', state.myId);
             if (wasSocketDisconnected) {
                 wasSocketDisconnected = false;
                 hasShownConnectErrorToast = false;
-                showToast('Reconectado ao servidor de sinalização.', 'success', 3000);
+                boundShowToast('Reconectado ao servidor de sinalização.', 'success', 3000);
             } else if (hasShownConnectErrorToast) {
                 hasShownConnectErrorToast = false;
-                showToast('Conectado ao servidor de sinalização.', 'success', 3000);
+                boundShowToast('Conectado ao servidor de sinalização.', 'success', 3000);
             }
             if (state.pendingRoomJoin) {
                 console.log('[Socket] Joining pending room on connect:', state.pendingRoomJoin.roomId);
@@ -322,20 +351,20 @@ export function initApp({
         socket.on('disconnect', (reason) => {
             console.warn('[Socket] Disconnected from server:', reason);
             webrtc.membership.isRoomMembershipConfirmed = false;
-            setSignalingStatus(reason === 'io client disconnect' ? 'offline' : 'reconnecting');
+            boundSetSignalingStatus(reason === 'io client disconnect' ? 'offline' : 'reconnecting');
             if (reason !== 'io client disconnect') {
                 wasSocketDisconnected = true;
-                showToast('Conexão com o servidor perdida. Tentando reconectar...', 'warning', 5000);
+                boundShowToast('Conexão com o servidor perdida. Tentando reconectar...', 'warning', 5000);
             }
         });
 
         socket.on('connect_error', (err) => {
             cancelColdStartNotice();
-            setSignalingStatus('offline');
+            boundSetSignalingStatus('offline');
             console.warn('[Socket] Connection error:', err && err.message ? err.message : err);
             if (!hasShownConnectErrorToast) {
                 hasShownConnectErrorToast = true;
-                showToast('Não foi possível conectar ao servidor. Tentando novamente...', 'error', 5000);
+                boundShowToast('Não foi possível conectar ao servidor. Tentando novamente...', 'error', 5000);
             }
         });
 
@@ -349,14 +378,34 @@ export function initApp({
     }
 
     function teardownClientSession() {
+        isTornDown = true;
         try {
             cancelColdStartNotice();
             stopIceRefreshTimer();
             qosMonitor.stopQualityMonitor();
             statsModalCtrl.stop();
+            roomModalCtrl.cleanup();
+            grid.cleanup();
+            webrtc.unbindLifecycleListeners();
             webrtc.cleanupRoomState({ silent: true });
-            if (socket && socket.connected) {
+            if (typeof unlistenDesktopCapture === 'function') {
+                unlistenDesktopCapture();
+                unlistenDesktopCapture = null;
+            }
+            if (isDesktopApp(windowObj)) {
+                stopAppAudioCapture();
+                if (windowObj && windowObj.StreamGridDesktop && typeof windowObj.StreamGridDesktop.stopAppAudioCapture === 'function') {
+                    windowObj.StreamGridDesktop.stopAppAudioCapture().catch(() => {});
+                }
+            }
+            if (socket && typeof socket.disconnect === 'function') {
                 socket.disconnect();
+            }
+            if (windowObj && typeof windowObj.removeEventListener === 'function') {
+                if (onDomContentLoaded) windowObj.removeEventListener('DOMContentLoaded', onDomContentLoaded);
+                if (onKeyDown) windowObj.removeEventListener('keydown', onKeyDown);
+                if (onPageHide) windowObj.removeEventListener('pagehide', onPageHide);
+                if (onBeforeUnload) windowObj.removeEventListener('beforeunload', onBeforeUnload);
             }
         } catch (_) {}
     }
@@ -365,10 +414,11 @@ export function initApp({
         if (documentObj && documentObj.readyState === 'complete') {
             roomModalCtrl.applyInitialUrlAndRestore();
         } else {
-            windowObj.addEventListener('DOMContentLoaded', () => roomModalCtrl.applyInitialUrlAndRestore());
+            onDomContentLoaded = () => roomModalCtrl.applyInitialUrlAndRestore();
+            windowObj.addEventListener('DOMContentLoaded', onDomContentLoaded);
         }
 
-        windowObj.addEventListener('keydown', (e) => {
+        onKeyDown = (e) => {
             if (e.key === 'Escape') {
                 if (shareConfigCtrl.isShareConfigModalOpen()) {
                     shareConfigCtrl.closeShareConfigModal();
@@ -386,9 +436,11 @@ export function initApp({
                     }
                 }
             }
-        });
+        };
+        windowObj.addEventListener('keydown', onKeyDown);
 
-        windowObj.addEventListener('pagehide', teardownClientSession);
+        onPageHide = teardownClientSession;
+        windowObj.addEventListener('pagehide', onPageHide);
     }
 
     return {

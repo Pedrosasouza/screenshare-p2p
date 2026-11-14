@@ -707,3 +707,106 @@ test('T13: handleRoomUsers avoids duplicate offer for concurrent user-joined and
     assert.ok(idxSetCfg !== -1 && idxSetRemote !== -1);
     assert.ok(idxSetCfg < idxSetRemote, 'setConfiguration with updated TURN must run before setRemoteDescription');
 });
+
+test('T14: Polite peer glare rollback sets pendingOffer so local offer is resent after answer', async () => {
+    const { webrtcMod } = await loadModules();
+    const { mesh, state, emitted } = createMeshEnv(webrtcMod.createWebRtcMesh, {
+        myId: 'aaa-polite'
+    });
+
+    const pc = mesh.getOrCreatePeerConnection('zzz-impolite');
+    const peerObj = mesh.peers.get('zzz-impolite');
+
+    const localVideo = createMockTrack('video', 'local-v');
+    const sender = {
+        track: null,
+        _kind: 'video',
+        replaceTrack: async (t) => { sender.track = t; },
+        getParameters: () => ({ encodings: [{}] }),
+        setParameters: async () => {}
+    };
+    pc._senders = [sender];
+    pc._transceivers = [{ direction: 'inactive', sender, receiver: { track: { kind: 'video' } } }];
+    state.localStream = new MockMediaStream([localVideo]);
+
+    pc.signalingState = 'have-local-offer';
+    pc.localDescription = { type: 'offer', sdp: 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\n' };
+
+    const origSetLocal = pc.setLocalDescription.bind(pc);
+    let sawRollback = false;
+    pc.setLocalDescription = async (desc) => {
+        if (desc && desc.type === 'rollback') {
+            sawRollback = true;
+            pc.signalingState = 'stable';
+            return;
+        }
+        if (desc && desc.type === 'answer') {
+            pc.signalingState = 'stable';
+            pc.localDescription = desc;
+            return;
+        }
+        return origSetLocal(desc);
+    };
+    pc.setRemoteDescription = async (desc) => {
+        pc.remoteDescription = desc;
+        pc.signalingState = desc && desc.type === 'offer' ? 'have-remote-offer' : 'stable';
+    };
+    pc.createAnswer = async () => ({ type: 'answer', sdp: 'v=0\r\n' });
+    pc.createOffer = async () => ({ type: 'offer', sdp: 'v=0\r\n' });
+
+    await mesh.handleSignal({
+        senderId: 'zzz-impolite',
+        signal: { type: 'offer', sdp: 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\n' }
+    });
+    await new Promise((r) => setTimeout(r, 15));
+
+    assert.equal(sawRollback, true);
+    const signals = emitted.filter((e) => e.event === 'signal').map((e) => e.payload.signal.type);
+    assert.ok(signals.includes('answer'), 'Polite peer deve enviar answer para a oferta impolite');
+    assert.ok(signals.includes('offer'), 'Polite peer deve reenviar sua oferta local após rollback');
+    assert.equal(peerObj.pendingOffer, false);
+});
+
+test('T15: scheduleIceRestart keeps retrying up to 3 attempts when ICE stays failed', async () => {
+    const { webrtcMod } = await loadModules();
+    const origSetTimeout = global.setTimeout;
+    const origClearTimeout = global.clearTimeout;
+    const timers = [];
+
+    global.setTimeout = (fn, ms) => {
+        const entry = { fn, ms, cleared: false };
+        timers.push(entry);
+        return entry;
+    };
+    global.clearTimeout = (entry) => {
+        if (entry) entry.cleared = true;
+    };
+
+    try {
+        const { mesh, emitted } = createMeshEnv(webrtcMod.createWebRtcMesh, { myId: 'peer-local' });
+        const pc = mesh.getOrCreatePeerConnection('peer-remote');
+        pc.signalingState = 'stable';
+        pc.connectionState = 'failed';
+        pc.iceConnectionState = 'failed';
+        let restartIceCalls = 0;
+        pc.restartIce = () => { restartIceCalls += 1; };
+        pc.createOffer = async () => ({ type: 'offer', sdp: 'v=0\r\n' });
+        pc.setLocalDescription = async (desc) => { pc.localDescription = desc; };
+
+        pc.oniceconnectionstatechange();
+        assert.equal(timers.length, 1);
+
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            const nextTimer = timers[attempt - 1];
+            assert.ok(nextTimer && !nextTimer.cleared, `Tentativa #${attempt} deve ter timer agendado`);
+            nextTimer.fn();
+            await new Promise((r) => origSetTimeout(r, 5));
+        }
+
+        assert.equal(restartIceCalls, 3);
+        assert.equal(emitted.filter((e) => e.event === 'signal' && e.payload.signal.type === 'offer').length, 3);
+    } finally {
+        global.setTimeout = origSetTimeout;
+        global.clearTimeout = origClearTimeout;
+    }
+});

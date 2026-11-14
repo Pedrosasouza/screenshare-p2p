@@ -104,8 +104,8 @@ export function createStatsModalController({
                             primaryOutbound = telemetry.outbound;
                         }
                         if (telemetry.inbound) {
-                            totalLost += telemetry.inbound.packetsLost;
-                            totalReceived += telemetry.inbound.packetsReceived;
+                            totalLost += Math.max(0, Number(telemetry.inbound.packetsLost) || 0);
+                            totalReceived += Math.max(0, Number(telemetry.inbound.packetsReceived) || 0);
                             if (!primaryInbound) primaryInbound = telemetry.inbound;
                         }
                     } catch (_) {}

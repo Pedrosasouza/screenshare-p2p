@@ -233,4 +233,87 @@ describe('Hardening HTTP, signal relay & loginAttempts', () => {
             floodSocket.disconnect();
         }
     });
+
+    it('T7: rotas aninhadas SPA redirecionam para raiz preservando query e CSP connect-src permanece válida', async () => {
+        const res = await httpRequest(`${ts.baseUrl}/sala/demo?room=minha-sala`);
+        assert.ok(res.statusCode >= 300 && res.statusCode < 400, `Esperado redirect para raiz, veio ${res.statusCode}`);
+        assert.strictEqual(res.headers.location, '/?room=minha-sala');
+
+        const homeRes = await httpRequest(`${ts.baseUrl}/`);
+        const csp = homeRes.headers['content-security-policy'] || '';
+        assert.ok(csp.includes('http://localhost:*') && csp.includes('http://127.0.0.1:*'));
+        assert.strictEqual(csp.includes('[::1]'), false, 'Literais IPv6 com colchetes violam sintaxe CSP host-source em navegadores Chromium');
+    });
+
+    it('T8: evicção de socket zumbi ausente de io.sockets.sockets notifica stream-state stopped e user-left', () => {
+        const { registerSignalingHandlers } = require('../src/server/signaling');
+        const { hashPassword } = require('../src/server/password');
+        const { createAttemptTracker } = require('../src/server/rate-limit');
+        const rooms = new Map();
+        const attemptTracker = createAttemptTracker();
+
+        const roomEmissions = [];
+        const listenersBySocket = new Map();
+        const fakeIo = {
+            sockets: { sockets: new Map() },
+            to: (roomId) => ({
+                emit: (event, payload) => roomEmissions.push({ roomId, event, payload })
+            }),
+            on: (ev, cb) => {
+                if (ev === 'connection') listenersBySocket.set('__connection', cb);
+            }
+        };
+
+        registerSignalingHandlers(fakeIo, {
+            rooms,
+            attemptTracker,
+            hashPassword,
+            getClientIdentifier: () => '127.0.0.1',
+            checkRateLimit: () => true
+        });
+
+        // Pre-popula sala com socket zumbi já fora de io.sockets.sockets
+        rooms.set('sala-zumbi', {
+            passwordHash: null,
+            passwordSalt: null,
+            members: new Map([
+                ['zombie-sock', 'client-reconn'],
+                ['peer-stay', 'client-other']
+            ]),
+            userNames: new Map([
+                ['zombie-sock', 'Zumbi'],
+                ['peer-stay', 'Outro']
+            ]),
+            activeStreams: new Set(['zombie-sock'])
+        });
+
+        const sockHandlers = {};
+        const newSock = {
+            id: 'fresh-sock',
+            connected: true,
+            handshake: { address: '127.0.0.1', headers: {} },
+            roomId: null,
+            join: () => {},
+            leave: () => {},
+            emit: () => {},
+            to: (roomId) => ({
+                emit: (event, payload) => roomEmissions.push({ roomId, event, payload })
+            }),
+            on: (ev, fn) => { sockHandlers[ev] = fn; }
+        };
+        fakeIo.sockets.sockets.set('fresh-sock', newSock);
+        listenersBySocket.get('__connection')(newSock);
+
+        return sockHandlers['join-room']({ roomId: 'sala-zumbi', clientId: 'client-reconn', password: '', userName: 'Pedro' })
+            .then(() => {
+                assert.ok(
+                    roomEmissions.some((e) => e.event === 'stream-state' && e.payload.senderId === 'zombie-sock' && e.payload.state === 'stopped'),
+                    'Evicção de zumbi com stream ativo deve emitir stream-state: stopped'
+                );
+                assert.ok(
+                    roomEmissions.some((e) => e.event === 'user-left' && e.payload.socketId === 'zombie-sock'),
+                    'Evicção de zumbi deve emitir user-left aos peers restantes'
+                );
+            });
+    });
 });

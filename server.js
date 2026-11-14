@@ -100,8 +100,13 @@ function createServerApp({ env = process.env, fetchImpl = global.fetch } = {}) {
         return next();
     });
 
-    app.get('*', (_req, res) => {
-        res.sendFile(path.join(__dirname, 'public', 'index.html'));
+    app.get('*', (req, res) => {
+        if (req.path !== '/') {
+            const qIdx = req.originalUrl ? req.originalUrl.indexOf('?') : -1;
+            const search = qIdx >= 0 ? req.originalUrl.slice(qIdx) : '';
+            return res.redirect(302, `/${search}`);
+        }
+        return res.sendFile(path.join(__dirname, 'public', 'index.html'));
     });
 
     app.use((err, _req, res, _next) => {

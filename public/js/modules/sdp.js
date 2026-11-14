@@ -101,23 +101,44 @@ export function optimizeSDP(sdp) {
     ];
     const newLines = [];
     let inVideoSection = false;
+    let pendingVideoBandwidth = false;
+
+    const pushVideoBandwidth = () => {
+        if (!pendingVideoBandwidth) return;
+        newLines.push('b=AS:6000');
+        newLines.push('b=TIAS:6000000');
+        pendingVideoBandwidth = false;
+    };
 
     for (let i = 0; i < lines.length; i++) {
         let line = lines[i];
 
         if (line.startsWith('m=video')) {
+            pushVideoBandwidth();
             inVideoSection = true;
+            pendingVideoBandwidth = true;
             newLines.push(line);
-            newLines.push('b=AS:6000');
-            newLines.push('b=TIAS:6000000');
             continue;
         } else if (line.startsWith('m=')) {
+            pushVideoBandwidth();
             inVideoSection = false;
         }
 
         // Evitar linhas duplicadas de banda na seção de vídeo
         if (inVideoSection && (line.startsWith('b=AS:') || line.startsWith('b=TIAS:'))) {
             continue;
+        }
+
+        // RFC 4566/8866: dentro da seção m=video, c= deve preceder b=
+        if (inVideoSection && pendingVideoBandwidth) {
+            if (line.startsWith('c=')) {
+                newLines.push(line);
+                pushVideoBandwidth();
+                continue;
+            }
+            if (!line.startsWith('i=')) {
+                pushVideoBandwidth();
+            }
         }
 
         // Atualizar linhas a=fmtp existentes
@@ -163,6 +184,8 @@ export function optimizeSDP(sdp) {
             }
         }
     }
+
+    pushVideoBandwidth();
 
     return newLines.join('\r\n');
 }

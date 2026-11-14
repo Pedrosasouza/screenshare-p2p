@@ -71,9 +71,19 @@ export function createWebRtcMesh({
         );
     }
 
+    function pruneRecentlyRemovedPeers(now = Date.now()) {
+        for (const [id, ts] of recentlyRemovedPeers.entries()) {
+            if (now - ts > 30000) {
+                recentlyRemovedPeers.delete(id);
+            }
+        }
+    }
+
     function setPeerConnectionStatus(peerId, status, message) {
         const peerObj = peers.get(peerId);
-        if (!peerObj || !peerObj.tileEl) return;
+        if (!peerObj) return;
+        peerObj._connectionStatus = status === 'failed' ? { status, message } : null;
+        if (!peerObj.tileEl) return;
         let warningEl = peerObj.tileEl.querySelector('.peer-connection-warning');
         if (status === 'failed') {
             if (!warningEl && documentObj) {
@@ -125,9 +135,12 @@ export function createWebRtcMesh({
         const doc = documentObj;
         const isHidden = Boolean(doc && doc.hidden);
         const pipEl = doc ? (doc.pictureInPictureElement || null) : null;
+        const activeFsEl = doc
+            ? (doc.fullscreenElement || doc.webkitFullscreenElement || null)
+            : null;
         const activeFsTile = doc
             ? (doc.querySelector('.stream-tile.pseudo-fullscreen') ||
-                (doc.fullscreenElement && doc.fullscreenElement.classList.contains('stream-tile') ? doc.fullscreenElement : null))
+                (activeFsEl && activeFsEl.classList.contains('stream-tile') ? activeFsEl : null))
             : null;
         const activeFsPeerId = activeFsTile ? activeFsTile.dataset.peerId : null;
 
@@ -156,10 +169,11 @@ export function createWebRtcMesh({
     }
 
     function addLocalTracksToPC(pc) {
-        if (!pc || !state.localStream) return;
+        if (!pc || !state.localStream) return Promise.resolve([]);
         const qm = getQosMonitor();
         const senders = pc.getSenders();
         const transceivers = typeof pc.getTransceivers === 'function' ? pc.getTransceivers() : null;
+        const replacePromises = [];
         state.localStream.getTracks().forEach((track) => {
             let existingSender = null;
             let matchedTransceiver = null;
@@ -189,7 +203,9 @@ export function createWebRtcMesh({
             if (existingSender) {
                 existingSender._kind = track.kind;
                 if (existingSender.track !== track) {
-                    try { Promise.resolve(existingSender.replaceTrack(track)).catch(() => {}); } catch (_) {}
+                    try {
+                        replacePromises.push(Promise.resolve(existingSender.replaceTrack(track)).catch(() => {}));
+                    } catch (_) {}
                 }
                 if (qm) qm.configureSenderParams(existingSender, track.kind);
             } else {
@@ -198,6 +214,7 @@ export function createWebRtcMesh({
                 if (qm) qm.configureSenderParams(sender, track.kind);
             }
         });
+        return Promise.allSettled(replacePromises);
     }
 
     async function sendOffer(peerId) {
@@ -278,6 +295,10 @@ export function createWebRtcMesh({
                     console.log(`[WebRTC] Triggering ICE restart #${peerObj._iceRestartAttempts} for: ${peerId}`);
                     if (typeof pc.restartIce === 'function') pc.restartIce();
                     sendOffer(peerId);
+                    if ((pc.iceConnectionState === 'failed' || pc.connectionState === 'failed') &&
+                        (peerObj._iceRestartAttempts || 0) < 3) {
+                        scheduleIceRestart();
+                    }
                 }
             }, delayMs);
         };
@@ -313,6 +334,9 @@ export function createWebRtcMesh({
                 const label = peerObj.userName || `Participante ${peerId.substr(0, 5)}`;
                 peerObj.tileEl = grid.createStreamTile(peerId, peerObj.stream, label, false);
                 if (dom.streamGrid) dom.streamGrid.appendChild(peerObj.tileEl);
+                if (peerObj._connectionStatus) {
+                    setPeerConnectionStatus(peerId, peerObj._connectionStatus.status, peerObj._connectionStatus.message);
+                }
             }
 
             if (peerObj.tileEl) {
@@ -460,6 +484,9 @@ export function createWebRtcMesh({
             const label = peerObj.userName || `Participante ${peerId.substr(0, 5)}`;
             peerObj.tileEl = grid.createStreamTile(peerId, peerObj.stream, label, false);
             if (dom.streamGrid) dom.streamGrid.appendChild(peerObj.tileEl);
+            if (peerObj._connectionStatus) {
+                setPeerConnectionStatus(peerId, peerObj._connectionStatus.status, peerObj._connectionStatus.message);
+            }
         }
         if (peerObj.tileEl) {
             const videoEl = typeof peerObj.tileEl.querySelector === 'function'
@@ -498,6 +525,7 @@ export function createWebRtcMesh({
     function cleanupRoomState(options = {}) {
         const silentShareStop = options && options.silent !== undefined ? Boolean(options.silent) : true;
         console.log('[Room] Cleaning up previous room peer connections and stream tiles...');
+        membership.roomUsersGeneration += 1;
 
         const screenShare = getScreenShare();
         if (screenShare) {
@@ -510,8 +538,11 @@ export function createWebRtcMesh({
         for (const [peerId, peerObj] of peers.entries()) {
             try {
                 clearPeerTimers(peerObj);
+                if (peerObj.stream) {
+                    peerObj.stream.getTracks().forEach((track) => track.stop());
+                }
                 if (peerObj.pc) peerObj.pc.close();
-                if (peerObj.tileEl) disposeTileElement(peerObj.tileEl);
+                if (peerObj.tileEl) disposeTileElement(peerObj.tileEl, documentObj);
             } catch (e) {
                 console.warn('[Room] Error closing peer:', peerId, e);
             }
@@ -528,7 +559,7 @@ export function createWebRtcMesh({
 
         if (dom.streamGrid && typeof dom.streamGrid.querySelectorAll === 'function') {
             const remoteTiles = dom.streamGrid.querySelectorAll('.stream-tile:not(#localStreamTile)');
-            remoteTiles.forEach((tile) => tile.remove());
+            remoteTiles.forEach((tile) => disposeTileElement(tile, documentObj));
         }
 
         if (grid) {
@@ -581,7 +612,9 @@ export function createWebRtcMesh({
                     return;
                 }
 
+                let hadLocalOfferRollback = false;
                 if (offerCollision) {
+                    hadLocalOfferRollback = pc.signalingState === 'have-local-offer';
                     console.log('[WebRTC] Glare collision: Polite peer rolling back for:', senderId);
                     peerObj.iceCandidateQueue = [];
                     try {
@@ -617,7 +650,8 @@ export function createWebRtcMesh({
                 if (!isPeerConnectionActive(senderId, peerObj, pc)) return;
 
                 if (state.localStream) {
-                    addLocalTracksToPC(pc);
+                    await addLocalTracksToPC(pc);
+                    if (!isPeerConnectionActive(senderId, peerObj, pc)) return;
                 }
 
                 let answer = await pc.createAnswer();
@@ -629,6 +663,10 @@ export function createWebRtcMesh({
                 await pc.setLocalDescription(answer);
                 if (!isPeerConnectionActive(senderId, peerObj, pc)) return;
                 if (socket) socket.emit('signal', { targetId: senderId, signal: pc.localDescription });
+
+                if (hadLocalOfferRollback) {
+                    peerObj.pendingOffer = true;
+                }
 
                 if (peerObj.pendingOffer && pc.signalingState === 'stable') {
                     peerObj.pendingOffer = false;
@@ -803,11 +841,17 @@ export function createWebRtcMesh({
         });
 
         if (state.localStream) {
+            const trackPromises = [];
             for (const [peerId, peerObj] of peers.entries()) {
                 if (offeredDuringAwait.has(peerId)) continue;
-                addLocalTracksToPC(peerObj.pc);
-                sendOffer(peerId);
+                trackPromises.push(
+                    Promise.resolve(addLocalTracksToPC(peerObj.pc)).then(() => {
+                        if (!isPeerConnectionActive(peerId, peerObj, peerObj.pc)) return;
+                        return sendOffer(peerId);
+                    })
+                );
             }
+            await Promise.allSettled(trackPromises);
             if (qm) qm.updateSendersForActivePeers();
             if (state.roomId && socket && typeof socket.emit === 'function') {
                 socket.emit('stream-state', { roomId: state.roomId, state: 'started' });
@@ -815,7 +859,7 @@ export function createWebRtcMesh({
         }
     }
 
-    function handleUserJoined({ socketId, userName, memberCount }) {
+    async function handleUserJoined({ socketId, userName, memberCount }) {
         if (!socketId || (state.myId && socketId === state.myId)) return;
         console.log('[Socket] User joined:', socketId, userName);
         const grid = getGrid();
@@ -834,7 +878,8 @@ export function createWebRtcMesh({
         if (userName && grid) grid.updatePeerUserName(socketId, userName);
 
         if (state.localStream) {
-            addLocalTracksToPC(pc);
+            await addLocalTracksToPC(pc);
+            if (!isPeerConnectionActive(socketId, peerObj, pc)) return;
             sendOffer(socketId);
             if (socket && socket._roomUsersOfferedPeers) {
                 socket._roomUsersOfferedPeers.add(socketId);
@@ -868,7 +913,10 @@ export function createWebRtcMesh({
         showToast(`${displayName} saiu da sala.`, 'info');
         playPresenceChime('leave');
         activeRoomPeers.delete(socketId);
-        if (socketId) recentlyRemovedPeers.set(socketId, Date.now());
+        if (socketId) {
+            pruneRecentlyRemovedPeers();
+            recentlyRemovedPeers.set(socketId, Date.now());
+        }
         removePeerConnection(socketId);
         if (grid) grid.updateMemberCount(memberCount);
         if (state.localStream && qm) {
@@ -892,9 +940,25 @@ export function createWebRtcMesh({
         if (documentObj && typeof documentObj.addEventListener === 'function') {
             documentObj.addEventListener('visibilitychange', updateBackgroundTracksOptimization);
             documentObj.addEventListener('fullscreenchange', updateBackgroundTracksOptimization);
+            documentObj.addEventListener('webkitfullscreenchange', updateBackgroundTracksOptimization);
+            documentObj.addEventListener('enterpictureinpicture', updateBackgroundTracksOptimization);
+            documentObj.addEventListener('leavepictureinpicture', updateBackgroundTracksOptimization);
         }
         if (typeof registerFullscreenChangeHandler === 'function') {
             registerFullscreenChangeHandler(updateBackgroundTracksOptimization);
+        }
+    }
+
+    function unbindLifecycleListeners() {
+        if (documentObj && typeof documentObj.removeEventListener === 'function') {
+            documentObj.removeEventListener('visibilitychange', updateBackgroundTracksOptimization);
+            documentObj.removeEventListener('fullscreenchange', updateBackgroundTracksOptimization);
+            documentObj.removeEventListener('webkitfullscreenchange', updateBackgroundTracksOptimization);
+            documentObj.removeEventListener('enterpictureinpicture', updateBackgroundTracksOptimization);
+            documentObj.removeEventListener('leavepictureinpicture', updateBackgroundTracksOptimization);
+        }
+        if (typeof registerFullscreenChangeHandler === 'function') {
+            registerFullscreenChangeHandler(null);
         }
     }
 
@@ -920,6 +984,7 @@ export function createWebRtcMesh({
         handleUserJoined,
         handleUserLeft,
         handleStreamState,
-        bindLifecycleListeners
+        bindLifecycleListeners,
+        unbindLifecycleListeners
     };
 }

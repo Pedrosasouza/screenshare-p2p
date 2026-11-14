@@ -248,7 +248,13 @@ describe('Dynamic TURN (/ice-servers & client ICE)', () => {
         assert.strictEqual(staleWhileValid.iceServers[1].username, 'u-live');
         assert.ok(staleWhileValid.ttlSeconds <= 250 && staleWhileValid.ttlSeconds >= 240);
 
-        nowMs += 300 * 1000;
+        // Durante janela de backoff de 30s não deve martelar o endpoint Cloudflare a cada requisição
+        nowMs += 5 * 1000;
+        const backedOff = await resolver();
+        assert.strictEqual(calls, 2, 'Soft-refresh falho deve aplicar backoff antes de consultar Cloudflare novamente');
+        assert.strictEqual(backedOff.provider, 'cloudflare');
+
+        nowMs += 295 * 1000;
         const expiredFallback = await resolver();
         assert.strictEqual(expiredFallback.provider, 'fallback');
 

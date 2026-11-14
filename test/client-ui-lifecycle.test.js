@@ -287,3 +287,72 @@ test('T4: Anti-reentrancy and generation guards on startQualityMonitor / openSta
         global.clearInterval = origClearInterval;
     }
 });
+
+test('T5: teardownClientSession disconnects offline sockets, stops desktop listeners, and removes window/document listeners', async () => {
+    const mods = await loadModules();
+    const { initApp } = await import(`${pathToFileURL(path.join(ROOT_DIR, 'public/app.js')).href}?teardown=${Date.now()}`);
+
+    const windowListeners = new Map();
+    const docListeners = new Map();
+    let disconnectCalls = 0;
+    let desktopStopCalls = 0;
+    let unlistenCalled = 0;
+
+    const fakeDoc = createMockDocument({}, { createElement: (tag) => createMockElement(tag) });
+    fakeDoc.addEventListener = (type, fn) => {
+        if (!docListeners.has(type)) docListeners.set(type, new Set());
+        docListeners.get(type).add(fn);
+    };
+    fakeDoc.removeEventListener = (type, fn) => {
+        const set = docListeners.get(type);
+        if (set) set.delete(fn);
+    };
+
+    const fakeWindow = {
+        __TAURI_INTERNALS__: {},
+        StreamGridDesktop: {
+            isDesktop: () => true,
+            getDiscordStatus: async () => ({ detected: false, pid: 0 }),
+            listWindows: async () => [],
+            stopAppAudioCapture: async () => { desktopStopCalls += 1; },
+            onCaptureStopped: async () => () => { unlistenCalled += 1; }
+        },
+        location: { protocol: 'http:', origin: 'http://tauri.localhost', pathname: '/', search: '', hash: '' },
+        addEventListener: (type, fn) => {
+            if (!windowListeners.has(type)) windowListeners.set(type, new Set());
+            windowListeners.get(type).add(fn);
+        },
+        removeEventListener: (type, fn) => {
+            const set = windowListeners.get(type);
+            if (set) set.delete(fn);
+        },
+        matchMedia: () => ({ matches: false })
+    };
+
+    const socket = {
+        id: '',
+        connected: false,
+        on() {},
+        emit() {},
+        disconnect() { disconnectCalls += 1; }
+    };
+
+    const app = initApp({
+        windowObj: fakeWindow,
+        documentObj: fakeDoc,
+        navigatorObj: { clipboard: { writeText: async () => {} } },
+        storage: createMockStorage(),
+        ioFactory: () => socket,
+        serverUrl: 'http://localhost:3000'
+    });
+
+    await new Promise((r) => setTimeout(r, 20));
+    app.teardownClientSession();
+
+    assert.equal(disconnectCalls, 1, 'teardownClientSession deve chamar disconnect mesmo com socket offline reconectando');
+    assert.equal(unlistenCalled, 1, 'teardownClientSession deve remover listener wasapi-capture-stopped');
+    assert.ok(desktopStopCalls >= 1, 'teardownClientSession deve garantir stopAppAudioCapture');
+    assert.equal((windowListeners.get('keydown') || new Set()).size, 0, 'listener keydown deve ser removido');
+    assert.equal((windowListeners.get('pagehide') || new Set()).size, 0, 'listener pagehide deve ser removido');
+    assert.equal((docListeners.get('visibilitychange') || new Set()).size, 0, 'listener visibilitychange deve ser removido');
+});

@@ -321,4 +321,30 @@ describe('AudioWorklet Ring Buffer & PCM Bridge', () => {
         assert.ok(outResume[0][0][0] > 0 && outResume[0][0][0] < 0.2);
         assert.ok(outResume[0][0][127] > 0.99);
     });
+
+    it('T8: saída mono faz downmix (L+R)*0.5 sem sobrescrever canal e mensagem stop encerra process()', () => {
+        const proc = new ProcessorClass();
+        const total = 1536;
+        const interleaved = new Float32Array(total * 2);
+        for (let i = 0; i < total; i++) {
+            interleaved[i * 2] = 0.8;
+            interleaved[i * 2 + 1] = 0.2;
+        }
+        proc.pushInterleaved(interleaved);
+
+        const monoOut = [[new Float32Array(128)]];
+        assert.strictEqual(proc.process([], monoOut, {}), true);
+        assert.strictEqual(proc.hasStartedPlayback, true);
+        assert.ok(
+            Math.abs(monoOut[0][0][0] - 0.5) < 1e-6,
+            `Saída mono deve misturar (0.8 + 0.2) * 0.5 = 0.5, veio ${monoOut[0][0][0]}`
+        );
+
+        proc.port.onmessage({ data: { type: 'stop' } });
+        assert.strictEqual(
+            proc.process([], makeOutputQuantum(128), {}),
+            false,
+            'Após mensagem stop, process() deve retornar false para encerrar AudioWorklet'
+        );
+    });
 });

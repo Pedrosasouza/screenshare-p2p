@@ -329,3 +329,140 @@ test('T5: In-flight cancellation via stopScreenShare stops late tracks and avoid
     assert.equal(env.offersSent.length, 0);
     assert.equal(env.emitted.filter((e) => e.ev === 'stream-state' && e.payload.state === 'started').length, 0);
 });
+
+test('T6: In-flight WASAPI capture cancelled by invalidateGeneration calls stopAppAudioCapture in finally', async () => {
+    const mods = await loadModules();
+    let resolveWasapi;
+    let markEnteredWasapi;
+    const enteredWasapi = new Promise((r) => { markEnteredWasapi = r; });
+
+    const videoTrack = createMockTrack('video', 'v-wasapi-cancel');
+    const wasapiTrack = createMockTrack('audio', 'a-wasapi-cancel', { _isDesktopWasapiTrack: true });
+
+    const env = createScreenShareEnv(mods, {
+        startExcludeDiscordCapture: () => {
+            markEnteredWasapi();
+            return new Promise((resolve) => { resolveWasapi = resolve; });
+        }
+    });
+    env.navigatorObj.mediaDevices.getDisplayMedia = async () => new MockMediaStream([videoTrack]);
+
+    const sharePromise = env.controller.startScreenShare('exclude_discord');
+    await enteredWasapi;
+
+    // Simula cleanupRoomState chamando invalidateGeneration antes de localStream ser criado
+    env.controller.invalidateGeneration();
+    resolveWasapi(wasapiTrack);
+    await sharePromise;
+
+    assert.equal(env.state.localStream, null);
+    assert.equal(videoTrack.stopped, true);
+    assert.equal(wasapiTrack.stopped, true);
+    assert.ok(env.events.some((e) => e.type === 'stopAppAudioCapture'), 'stopAppAudioCapture deve encerrar sessão WASAPI órfã');
+});
+
+test('T7: startScreenShare awaits async replaceTrack in addLocalTracksToPC before sendOffer and QoS update', async () => {
+    const mods = await loadModules();
+    const eventsOrder = [];
+    let resolveReplace;
+    const replacePromise = new Promise((r) => { resolveReplace = r; });
+
+    const sender = {
+        track: null,
+        _kind: 'video',
+        replaceTrack(t) {
+            eventsOrder.push('replaceTrack:start');
+            return replacePromise.then(() => {
+                sender.track = t;
+                eventsOrder.push('replaceTrack:done');
+            });
+        },
+        getParameters: () => ({ encodings: [{}] }),
+        setParameters: async () => {}
+    };
+    const pc = createMockPeerConnection({ senders: [sender], transceivers: [{ direction: 'inactive', sender, receiver: { track: { kind: 'video' } } }] });
+    const peers = new Map([['peer-1', { pc }]]);
+    const state = { roomId: 'r1', localStream: null, selectedVideoResolution: '1080p', selectedVideoFps: 60, contentHintMode: 'motion' };
+    const doc = createMockDocument({ streamGrid: createMockElement('div', { id: 'streamGrid' }) });
+    let mesh;
+    mesh = mods.createWebRtcMesh({
+        state,
+        dom: { streamGrid: doc.getElementById('streamGrid') },
+        getSocket: () => ({ emit: () => {} }),
+        getQosMonitor: () => ({
+            configureSenderParams: () => {},
+            updateSendersForActivePeers: () => eventsOrder.push('qosUpdate')
+        }),
+        RTCPeerConnectionCtor: function () { return pc; },
+        RTCSessionDescriptionCtor: MockRTCSessionDescription,
+        RTCIceCandidateCtor: MockRTCIceCandidate,
+        MediaStreamCtor: MockMediaStream,
+        documentObj: doc,
+        windowObj: { addEventListener() {} },
+        storage: createMockStorage()
+    });
+    mesh.peers.set('peer-1', { pc, stream: new MockMediaStream(), iceCandidateQueue: [], _signalChain: Promise.resolve() });
+    const origSendOffer = mesh.sendOffer;
+    const wrappedWebRtc = {
+        addLocalTracksToPC: mesh.addLocalTracksToPC,
+        sendOffer: (pid) => { eventsOrder.push('sendOffer'); return origSendOffer(pid); }
+    };
+
+    const controller = mods.createScreenShareController({
+        state,
+        dom: { streamGrid: doc.getElementById('streamGrid'), btnStartShare: createMockElement('button'), btnStopShare: createMockElement('button'), btnQualityToggle: createMockElement('button') },
+        getSocket: () => ({ emit: () => {} }),
+        getPeers: () => mesh.peers,
+        getWebRtc: () => wrappedWebRtc,
+        getGrid: () => ({ createStreamTile: () => createMockElement('div', { id: 'localStreamTile' }), startTilePlayback: () => {}, updateGridState: () => {} }),
+        getQosMonitor: () => ({ startQualityMonitor: () => {}, stopQualityMonitor: () => {}, applyQualityModeUI: () => {}, updateSendersForActivePeers: () => eventsOrder.push('qosUpdate') }),
+        navigatorObj: { mediaDevices: { getDisplayMedia: async () => new MockMediaStream([createMockTrack('video', 'new-v')]) } },
+        documentObj: doc,
+        MediaStreamCtor: MockMediaStream
+    });
+
+    const sharePromise = controller.startScreenShare('none');
+    await new Promise((r) => setTimeout(r, 15));
+    assert.equal(eventsOrder.includes('sendOffer'), false, 'sendOffer não pode rodar antes de replaceTrack resolver');
+    resolveReplace();
+    await sharePromise;
+
+    const doneIdx = eventsOrder.indexOf('replaceTrack:done');
+    const offerIdx = eventsOrder.indexOf('sendOffer');
+    assert.ok(doneIdx !== -1 && offerIdx > doneIdx, 'sendOffer deve ocorrer somente após replaceTrack resolver');
+});
+
+test('T8: exclude_discord faz fallback para áudio do sistema quando exclusão do Discord falha', async () => {
+    const mods = await loadModules();
+    const videoOnlyTrack = createMockTrack('video', 'v-initial');
+    const fallbackVideoTrack = createMockTrack('video', 'v-fallback');
+    const fallbackAudioTrack = createMockTrack('audio', 'a-fallback-sys');
+    const getDisplayCalls = [];
+
+    const env = createScreenShareEnv(mods, {
+        startExcludeDiscordCapture: async () => {
+            throw new Error('Discord não encontrado');
+        }
+    });
+
+    env.navigatorObj.mediaDevices.getDisplayMedia = async (constraints) => {
+        getDisplayCalls.push(constraints);
+        if (getDisplayCalls.length === 1) {
+            return new MockMediaStream([videoOnlyTrack]);
+        }
+        return new MockMediaStream([fallbackVideoTrack, fallbackAudioTrack]);
+    };
+
+    await env.controller.startScreenShare('exclude_discord');
+
+    assert.equal(getDisplayCalls.length, 2, 'Deve tentar getDisplayMedia com áudio do sistema como fallback');
+    assert.equal(Boolean(getDisplayCalls[1].audio), true, 'Segunda chamada deve solicitar áudio do sistema');
+    assert.equal(videoOnlyTrack.stopped, true, 'Track de vídeo inicial sem áudio deve ser encerrada ao assumir stream fallback');
+    assert.ok(env.state.localStream, 'localStream deve permanecer ativo após fallback');
+    assert.equal(env.state.localStream.getVideoTracks()[0], fallbackVideoTrack);
+    assert.equal(env.state.localStream.getAudioTracks()[0], fallbackAudioTrack);
+    assert.ok(
+        env.events.some((e) => e.type === 'toast' && e.toastType === 'warning'),
+        'Deve avisar o usuário via toast ao fazer fallback do modo excluir Discord'
+    );
+});

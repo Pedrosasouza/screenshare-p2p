@@ -62,9 +62,13 @@ jobs:
         run: npm run test:e2e
 
       - name: Check Rust Formatting & Clippy Lints (src-tauri)
+        shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           cargo fmt --manifest-path src-tauri/Cargo.toml --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run Rust Audio & Window Tests (src-tauri)
         run: cargo test --manifest-path src-tauri/Cargo.toml

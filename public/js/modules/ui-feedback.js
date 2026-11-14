@@ -2,7 +2,7 @@ export const THEME_KEY = 'streamgrid_theme';
 
 
 
-export function setSignalingStatus(status, customLabel) {
+export function setSignalingStatus(status, customLabelOrOptions, maybeDoc) {
     const labels = {
         connecting: 'Conectando...',
         waking: 'Acordando...',
@@ -10,13 +10,17 @@ export function setSignalingStatus(status, customLabel) {
         reconnecting: 'Reconectando...',
         offline: 'Offline'
     };
+    const isOptsObj = customLabelOrOptions && typeof customLabelOrOptions === 'object';
+    const customLabel = isOptsObj ? customLabelOrOptions.customLabel : customLabelOrOptions;
+    const doc = (isOptsObj ? customLabelOrOptions.documentObj : maybeDoc)
+        || (typeof document !== 'undefined' ? document : null);
     const normalized = Object.prototype.hasOwnProperty.call(labels, status)
         ? status
         : 'connecting';
     const label = customLabel || labels[normalized];
-    if (typeof document === 'undefined' || typeof document.getElementById !== 'function') return;
-    const pill = document.getElementById('connectionStatusPill');
-    const textEl = document.getElementById('connectionStatusText');
+    if (!doc || typeof doc.getElementById !== 'function') return;
+    const pill = doc.getElementById('connectionStatusPill');
+    const textEl = doc.getElementById('connectionStatusText');
     if (pill) {
         if (pill.dataset) {
             pill.dataset.status = normalized;
@@ -87,14 +91,16 @@ export function showToast(message, type = 'info', durationMs = 4000, doc) {
     container.appendChild(toast);
 }
 
-export function playPresenceChime(type = 'join') {
+export function playPresenceChime(type = 'join', windowObj = (typeof window !== 'undefined' ? window : null)) {
     try {
-        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        const win = windowObj || (typeof window !== 'undefined' ? window : null);
+        if (!win) return;
+        const AudioCtx = win.AudioContext || win.webkitAudioContext;
         if (!AudioCtx) return;
-        if (!window._presenceAudioCtx) {
-            window._presenceAudioCtx = new AudioCtx();
+        if (!win._presenceAudioCtx) {
+            win._presenceAudioCtx = new AudioCtx();
         }
-        const ctx = window._presenceAudioCtx;
+        const ctx = win._presenceAudioCtx;
         if (ctx.state === 'suspended') {
             ctx.resume().catch(() => {});
         }

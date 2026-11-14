@@ -67,11 +67,14 @@ export function createRoomModalController({
         if (socket && socket.connected) {
             socket.emit('check-room', { roomId: cleanId }, (res) => {
                 if (!res) return;
+                if (dom.inputCreateRoomId && sanitizeRoomId(dom.inputCreateRoomId.value) !== cleanId) {
+                    return;
+                }
                 if (res.exists) {
                     indicator.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> Sala já existe (${res.memberCount} online)`;
                     indicator.className = 'room-status-indicator active';
                 } else {
-                    indicator.innerHTML = `<i class="fa-solid fa-sparkles"></i> Código disponível!`;
+                    indicator.innerHTML = `<i class="fa-solid fa-wand-magic-sparkles"></i> Código disponível!`;
                     indicator.className = 'room-status-indicator new';
                 }
             });
@@ -97,6 +100,9 @@ export function createRoomModalController({
         if (socket && socket.connected) {
             socket.emit('check-room', { roomId: cleanId }, (res) => {
                 if (!res) return;
+                if (dom.inputJoinRoomId && sanitizeRoomId(dom.inputJoinRoomId.value) !== cleanId) {
+                    return;
+                }
                 if (res.exists) {
                     const count = res.memberCount;
                     const lockBadge = res.hasPassword ? ' &bull; <i class="fa-solid fa-lock" title="Protegida por senha"></i> Com senha' : '';
@@ -288,6 +294,12 @@ export function createRoomModalController({
             onCleanupRoomState({ silent: true });
             state.roomId = '';
             state.currentRoomPassword = '';
+            if (dom.displayRoomId) {
+                dom.displayRoomId.textContent = '------';
+            }
+            if (storage) {
+                try { storage.removeItem(STORAGE_KEY); } catch (_) {}
+            }
             updateRoomModalCloseButton();
         }
 
@@ -473,6 +485,17 @@ export function createRoomModalController({
         if (dom.btnChangeRoom) dom.btnChangeRoom.addEventListener('click', () => openRoomModal('choice'));
     }
 
+    function cleanup() {
+        if (checkCreateTimeout) {
+            clearTimeout(checkCreateTimeout);
+            checkCreateTimeout = null;
+        }
+        if (checkJoinTimeout) {
+            clearTimeout(checkJoinTimeout);
+            checkJoinTimeout = null;
+        }
+    }
+
     return {
         showRoomError,
         clearRoomError,
@@ -489,6 +512,7 @@ export function createRoomModalController({
         handleConfirmJoin,
         handleJoinError,
         applyInitialUrlAndRestore,
-        bindEvents
+        bindEvents,
+        cleanup
     };
 }

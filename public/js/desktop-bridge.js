@@ -92,7 +92,7 @@
 
     async function startAppAudioCapture(pid, onPcmBuffer) {
         const numericPid = Number(pid);
-        if (!Number.isInteger(numericPid) || numericPid <= 0) {
+        if (!Number.isInteger(numericPid) || numericPid <= 0 || numericPid > 4294967295) {
             throw new Error('PID inválido para captura de áudio.');
         }
         const onAudio = createAudioChannel(onPcmBuffer);

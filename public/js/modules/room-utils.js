@@ -14,8 +14,11 @@ export function generateRandomRoomId() {
     const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
     let code = '';
     const array = new Uint8Array(8);
-    if (window.crypto && window.crypto.getRandomValues) {
-        window.crypto.getRandomValues(array);
+    const cryptoObj = (typeof globalThis !== 'undefined' && globalThis.crypto)
+        || (typeof window !== 'undefined' && window.crypto)
+        || null;
+    if (cryptoObj && typeof cryptoObj.getRandomValues === 'function') {
+        cryptoObj.getRandomValues(array);
     } else {
         for (let i = 0; i < 8; i++) array[i] = Math.floor(Math.random() * 256);
     }

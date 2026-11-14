@@ -52,6 +52,7 @@ impl ActiveCaptureSession {
 struct CaptureCoordinatorState {
     generation: u64,
     active_session: Option<ActiveCaptureSession>,
+    active_committed: bool,
     pending_stop: Option<Arc<AtomicBool>>,
     pending_exit: Option<CaptureExitSignal>,
     stopping_exits: Vec<CaptureExitSignal>,
@@ -59,6 +60,7 @@ struct CaptureCoordinatorState {
 
 impl CaptureCoordinatorState {
     fn retire_current(&mut self) {
+        self.active_committed = false;
         if let Some(session) = self.active_session.take() {
             session.stop(&mut self.stopping_exits);
         }
@@ -95,6 +97,7 @@ impl AudioCaptureState {
 
         guard.generation = guard.generation.wrapping_add(1);
         guard.retire_current();
+        guard.active_committed = false;
         guard.pending_stop = Some(stop_signal);
         guard.pending_exit = Some(exit_signal);
         let prev_exits = std::mem::take(&mut guard.stopping_exits);
@@ -114,17 +117,31 @@ impl AudioCaptureState {
     fn clear_pending_if_generation(&self, gen: u64) {
         let mut guard = self.lock_inner();
         if guard.generation == gen {
+            guard.active_committed = false;
             guard.pending_stop = None;
             guard.pending_exit = None;
         }
     }
 
+    #[cfg(test)]
     pub fn clear_session_if_generation(&self, gen: u64) -> bool {
         let mut guard = self.lock_inner();
         if guard.generation == gen {
             guard.generation = guard.generation.wrapping_add(1);
             guard.retire_current();
             true
+        } else {
+            false
+        }
+    }
+
+    pub fn clear_committed_session_if_generation(&self, gen: u64) -> bool {
+        let mut guard = self.lock_inner();
+        if guard.generation == gen {
+            let was_committed = guard.active_committed;
+            guard.generation = guard.generation.wrapping_add(1);
+            guard.retire_current();
+            was_committed
         } else {
             false
         }
@@ -146,6 +163,7 @@ impl AudioCaptureState {
 
         guard.pending_stop = None;
         guard.pending_exit = None;
+        guard.active_committed = true;
         if let Some(prev) = guard.active_session.replace(ActiveCaptureSession {
             stop_signal,
             forward_task,
@@ -225,7 +243,7 @@ async fn start_capture_session(
         move |reason| {
             if app_for_stop
                 .state::<AudioCaptureState>()
-                .clear_session_if_generation(gen)
+                .clear_committed_session_if_generation(gen)
             {
                 let _ = app_for_stop.emit(
                     "wasapi-capture-stopped",
@@ -314,7 +332,10 @@ pub async fn start_exclude_discord(
     on_audio: Channel<InvokeResponseBody>,
     state: State<'_, AudioCaptureState>,
 ) -> Result<CaptureStartedInfo, String> {
-    let discord_pid = find_discord_root_pid()
+    let discord_pid = tauri::async_runtime::spawn_blocking(find_discord_root_pid)
+        .await
+        .ok()
+        .flatten()
         .ok_or_else(|| "O Discord não foi encontrado em execução no Windows.".to_string())?;
     start_capture_session(app, discord_pid, false, on_audio, state.inner()).await
 }
@@ -568,6 +589,46 @@ mod tests {
             assert!(
                 state.clear_session_if_generation(gen2),
                 "clear_session_if_generation deve retornar true para a geração ativa"
+            );
+        });
+    }
+
+    #[test]
+    fn pre_commit_clear_committed_session_returns_false_and_rejects_late_commit() {
+        tauri::async_runtime::block_on(async {
+            let state = AudioCaptureState::default();
+            let stop_pre = Arc::new(AtomicBool::new(false));
+            let exit_pre = CaptureExitSignal::default();
+            let (gen_pre, _) = state
+                .begin_session(stop_pre.clone(), exit_pre.clone())
+                .unwrap();
+
+            assert!(
+                !state.clear_committed_session_if_generation(gen_pre),
+                "Limpeza pré-commit não deve sinalizar evento wasapi-capture-stopped"
+            );
+
+            let dropped = Arc::new(AtomicBool::new(false));
+            let task = spawn_cancellable_dummy(dropped.clone());
+            assert!(
+                state
+                    .commit_session(gen_pre, stop_pre.clone(), task, Some(exit_pre))
+                    .is_err(),
+                "commit_session tardio após erro pré-commit deve falhar"
+            );
+
+            let stop_post = Arc::new(AtomicBool::new(false));
+            let exit_post = CaptureExitSignal::default();
+            let (gen_post, _) = state
+                .begin_session(stop_post.clone(), exit_post.clone())
+                .unwrap();
+            let task_post = spawn_cancellable_dummy(Arc::new(AtomicBool::new(false)));
+            state
+                .commit_session(gen_post, stop_post, task_post, Some(exit_post))
+                .unwrap();
+            assert!(
+                state.clear_committed_session_if_generation(gen_post),
+                "Limpeza pós-commit deve sinalizar evento wasapi-capture-stopped"
             );
         });
     }

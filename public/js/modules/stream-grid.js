@@ -289,6 +289,13 @@ export function createStreamGridController({
         });
     }
 
+    function cleanup() {
+        if (copyLinkResetTimer) {
+            clearTimeout(copyLinkResetTimer);
+            copyLinkResetTimer = null;
+        }
+    }
+
     return {
         startTilePlayback,
         createStreamTile,
@@ -296,6 +303,7 @@ export function createStreamGridController({
         updateMemberCount,
         updatePeerUserName,
         updateEchoWarningVisibility,
-        bindCopyInviteLink
+        bindCopyInviteLink,
+        cleanup
     };
 }

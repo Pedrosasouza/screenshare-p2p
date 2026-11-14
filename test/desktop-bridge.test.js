@@ -106,6 +106,7 @@ describe('Desktop Bridge (Tauri v2 IPC & Modo Web)', () => {
         assert.ok(calls.some((c) => c.cmd === 'stop_capture'));
 
         await assert.rejects(() => bridge.startAppAudioCapture(0, () => {}), /PID inválido/i);
+        await assert.rejects(() => bridge.startAppAudioCapture(4294967296, () => {}), /PID inválido/i);
     });
 
     it('T3: client modules e index.html usam desktop-bridge sem legado Neutralino/WS 45454', () => {

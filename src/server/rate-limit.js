@@ -1,38 +1,74 @@
+const net = require('net');
+
 const ICE_RATE_LIMIT_WINDOW_MS = 600000;
 const ICE_RATE_LIMIT_MAX_REQUESTS = 30;
 const MAX_ICE_RATE_ENTRIES = 10000;
 const MAX_LOGIN_ATTEMPTS_ENTRIES = 10000;
 const LOGIN_ATTEMPT_TTL_MS = 600000;
 
+function normalizeIpv6Prefix(ip) {
+    const noZone = ip.split('%')[0];
+    let work = noZone;
+    const lastColon = work.lastIndexOf(':');
+    const tail = lastColon >= 0 ? work.slice(lastColon + 1) : '';
+    if (tail.includes('.') && net.isIPv4(tail)) {
+        const octets = tail.split('.').map(Number);
+        const high = ((octets[0] << 8) | octets[1]).toString(16).padStart(4, '0');
+        const low = ((octets[2] << 8) | octets[3]).toString(16).padStart(4, '0');
+        work = `${work.slice(0, lastColon)}:${high}:${low}`;
+    }
+    const halves = work.split('::');
+    const left = halves[0] ? halves[0].split(':').filter(Boolean) : [];
+    const right = halves.length > 1 && halves[1] ? halves[1].split(':').filter(Boolean) : [];
+    const missing = Math.max(0, 8 - left.length - right.length);
+    const groups = [
+        ...left,
+        ...Array(missing).fill('0'),
+        ...right
+    ].slice(0, 8).map((g) => g.toLowerCase().padStart(4, '0'));
+    if (groups.length < 4) return noZone.toLowerCase();
+    return `${groups.slice(0, 4).join(':')}::/64`;
+}
+
+function normalizeClientIp(rawIp) {
+    if (typeof rawIp !== 'string') return '';
+    const cleaned = rawIp.trim().replace(/^::ffff:/i, '');
+    if (!cleaned) return '';
+    if (net.isIPv6(cleaned.split('%')[0])) {
+        return normalizeIpv6Prefix(cleaned);
+    }
+    return cleaned;
+}
+
+function extractRightmostForwardedIp(forwarded) {
+    if (typeof forwarded !== 'string' || !forwarded.trim()) return '';
+    const parts = forwarded.split(',').map((part) => part.trim()).filter(Boolean);
+    if (parts.length === 0) return '';
+    return normalizeClientIp(parts[parts.length - 1]);
+}
+
 function getHttpClientIp(req, env = process.env) {
     const trustProxy = env.TRUST_PROXY === 'true' || env.TRUST_PROXY === '1';
     if (trustProxy && req && req.headers) {
-        const forwarded = req.headers['x-forwarded-for'];
-        if (typeof forwarded === 'string' && forwarded.trim()) {
-            const parts = forwarded.split(',');
-            const safeIp = parts[parts.length - 1].trim().replace(/^::ffff:/, '');
-            if (safeIp) return safeIp;
-        }
+        const safeIp = extractRightmostForwardedIp(req.headers['x-forwarded-for']);
+        if (safeIp) return safeIp;
     }
     const rawAddress = (req && req.socket && req.socket.remoteAddress) || (req && req.ip) || 'unknown';
-    return String(rawAddress).trim().replace(/^::ffff:/, '') || 'unknown';
+    return normalizeClientIp(String(rawAddress)) || 'unknown';
 }
 
 function getClientIdentifier(socket, env = process.env) {
     const trustProxy = env.TRUST_PROXY === 'true' || env.TRUST_PROXY === '1';
 
-    if (trustProxy) {
-        const forwarded = socket.handshake.headers['x-forwarded-for'];
-        if (typeof forwarded === 'string' && forwarded.trim()) {
-            const parts = forwarded.split(',');
-            const safeIp = parts[parts.length - 1].trim().replace(/^::ffff:/, '');
-            if (safeIp) return safeIp;
-        }
+    if (trustProxy && socket && socket.handshake && socket.handshake.headers) {
+        const safeIp = extractRightmostForwardedIp(socket.handshake.headers['x-forwarded-for']);
+        if (safeIp) return safeIp;
     }
 
-    const rawAddress = socket.handshake.address;
-    if (typeof rawAddress === 'string' && rawAddress.trim()) {
-        return rawAddress.trim().replace(/^::ffff:/, '');
+    const rawAddress = socket && socket.handshake ? socket.handshake.address : '';
+    const normalized = normalizeClientIp(rawAddress);
+    if (normalized) {
+        return normalized;
     }
 
     return socket.id;
@@ -88,7 +124,7 @@ function createAttemptTracker() {
     function withAttemptLock(key, fn) {
         const prev = pendingAttemptLocks.get(key) || Promise.resolve();
         const run = prev.catch(() => {}).then(fn);
-        const tail = run.finally(() => {
+        const tail = run.catch(() => {}).finally(() => {
             if (pendingAttemptLocks.get(key) === tail) {
                 pendingAttemptLocks.delete(key);
             }

@@ -19,12 +19,16 @@ class PCMRingBufferProcessor extends AudioWorkletProcessor {
         this.needsResumeFadeIn = false;
         this.fadeInIndex = 0;
         this.fadeInFrames = 128;
+        this.stopped = false;
 
         this.port.onmessage = (event) => {
             const data = event.data;
             if (data instanceof Float32Array) {
                 this.pushInterleaved(data);
             } else if (data && data.type === 'flush') {
+                this.flush();
+            } else if (data && data.type === 'stop') {
+                this.stopped = true;
                 this.flush();
             }
         };
@@ -82,6 +86,7 @@ class PCMRingBufferProcessor extends AudioWorkletProcessor {
     }
 
     process(inputs, outputs, parameters) {
+        if (this.stopped) return false;
         if (!outputs || outputs.length === 0) return true;
         const output = outputs[0];
         if (!output || output.length === 0) return true;
@@ -112,8 +117,14 @@ class PCMRingBufferProcessor extends AudioWorkletProcessor {
                         this.needsResumeFadeIn = false;
                     }
                 }
-                outL[i] = this.bufferL[this.readIndex] * gain;
-                outR[i] = this.bufferR[this.readIndex] * gain;
+                const sampleL = this.bufferL[this.readIndex] * gain;
+                const sampleR = this.bufferR[this.readIndex] * gain;
+                if (outR === outL) {
+                    outL[i] = (sampleL + sampleR) * 0.5;
+                } else {
+                    outL[i] = sampleL;
+                    outR[i] = sampleR;
+                }
                 this.readIndex = (this.readIndex + 1) % this.capacity;
             }
             this.availableFrames -= quantum;
@@ -124,9 +135,13 @@ class PCMRingBufferProcessor extends AudioWorkletProcessor {
                 const fadeDenom = remaining === 1 ? 2 : remaining;
                 for (let i = 0; i < remaining; i++) {
                     const gain = 1 - ((i + 1) / fadeDenom);
-                    outL[i] = this.bufferL[this.readIndex] * gain;
-                    if (outR !== outL) {
-                        outR[i] = this.bufferR[this.readIndex] * gain;
+                    const sampleL = this.bufferL[this.readIndex] * gain;
+                    const sampleR = this.bufferR[this.readIndex] * gain;
+                    if (outR === outL) {
+                        outL[i] = (sampleL + sampleR) * 0.5;
+                    } else {
+                        outL[i] = sampleL;
+                        outR[i] = sampleR;
                     }
                     this.readIndex = (this.readIndex + 1) % this.capacity;
                 }

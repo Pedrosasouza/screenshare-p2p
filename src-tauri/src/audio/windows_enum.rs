@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use wasapi::{initialize_mta, DeviceEnumerator, Direction};
 use windows::core::PWSTR;
@@ -35,20 +35,44 @@ pub fn should_exclude_process_exe(exe_name: &str) -> bool {
     lower.contains("streamgrid") || lower.contains("msedgewebview2") || lower.contains("neutralino")
 }
 
-/// Seleciona o processo raiz do Discord cujo processo pai não é outro processo do Discord.
+/// Seleciona o processo raiz do Discord cujo processo pai não é outro processo do Discord,
+/// priorizando o candidato que comanda a maior subárvore ativa (evita órfãos sem filhos).
 pub fn select_discord_root_pid(discord_procs: &[(u32, u32)]) -> Option<u32> {
     if discord_procs.is_empty() {
         return None;
     }
 
     let pids: HashSet<u32> = discord_procs.iter().map(|(pid, _)| *pid).collect();
-    for (pid, parent_pid) in discord_procs {
-        if !pids.contains(parent_pid) {
-            return Some(*pid);
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for &(pid, parent_pid) in discord_procs {
+        children.entry(parent_pid).or_default().push(pid);
+    }
+
+    let mut best_root: Option<(u32, usize)> = None;
+    for &(pid, parent_pid) in discord_procs {
+        if pids.contains(&parent_pid) {
+            continue;
+        }
+        let mut subtree_size = 0usize;
+        let mut stack = vec![pid];
+        let mut visited = HashSet::new();
+        while let Some(curr) = stack.pop() {
+            if !visited.insert(curr) {
+                continue;
+            }
+            subtree_size += 1;
+            if let Some(child_pids) = children.get(&curr) {
+                stack.extend(child_pids.iter().copied());
+            }
+        }
+        if best_root.is_none_or(|(_, best_size)| subtree_size > best_size) {
+            best_root = Some((pid, subtree_size));
         }
     }
 
-    Some(discord_procs[0].0)
+    best_root
+        .map(|(pid, _)| pid)
+        .or_else(|| Some(discord_procs[0].0))
 }
 
 /// Decodifica um buffer UTF-16 terminando no primeiro caractere NUL (`\0`), ignorando lixo residual.
@@ -299,5 +323,11 @@ mod tests {
         assert_eq!(bounded_window_text_len(0), None);
         assert_eq!(bounded_window_text_len(42), Some(42));
         assert_eq!(bounded_window_text_len(i32::MAX), Some(4096));
+    }
+
+    #[test]
+    fn selects_root_with_largest_subtree_ignoring_orphan_discord_process() {
+        let procs = vec![(999, 1), (102, 100), (100, 1), (103, 102)];
+        assert_eq!(select_discord_root_pid(&procs), Some(100));
     }
 }

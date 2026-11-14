@@ -290,7 +290,20 @@ function registerSignalingHandlers(io, { rooms, attemptTracker, env = process.en
                             } else {
                                 room.members.delete(existingSocketId);
                                 if (room.userNames) room.userNames.delete(existingSocketId);
-                                room.activeStreams.delete(existingSocketId);
+                                const hadStream = room.activeStreams.delete(existingSocketId);
+                                if (hadStream) {
+                                    io.to(cleanRoomId).emit('stream-state', {
+                                        senderId: existingSocketId,
+                                        state: 'stopped'
+                                    });
+                                }
+                                io.to(cleanRoomId).emit('user-left', {
+                                    socketId: existingSocketId,
+                                    memberCount: room.members.size
+                                });
+                                io.to(cleanRoomId).emit('room-status', {
+                                    memberCount: room.members.size
+                                });
                             }
                         }
                     }
@@ -398,10 +411,10 @@ function registerSignalingHandlers(io, { rooms, attemptTracker, env = process.en
             });
         }));
 
-        socket.on('disconnect', safeHandler(socket, 'disconnect', () => {
+        socket.on('disconnect', () => {
             console.log(`[-] Client disconnected: ${socket.id}`);
             leaveCurrentRoom(socket);
-        }));
+        });
     });
 }
 

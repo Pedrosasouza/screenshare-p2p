@@ -345,3 +345,38 @@ test('T6: closeRoomModal preserves in-flight join-room and reconciles on room-us
     assert.equal(h.state.roomId, 'sala-b');
     assert.equal(h.dom.displayRoomId.textContent, 'sala-b');
 });
+
+test('T7: Reconnect handleJoinError clears displayRoomId & STORAGE_KEY, and stale check-room responses are ignored', async () => {
+    const mods = await loadModules();
+    const h = createRoomJoinHarness(mods);
+
+    // Parte 1: erro de reconexão quando membership não está confirmado limpa UI e storage
+    h.state.roomId = 'sala-expirada';
+    h.state.currentRoomPassword = 'segredo';
+    h.dom.displayRoomId.textContent = 'sala-expirada';
+    h.storage.setItem(h.STORAGE_KEY, 'sala-expirada');
+    h.mesh.membership.isRoomMembershipConfirmed = false;
+
+    h.roomModalCtrl.handleJoinError({ error: 'invalid_password', message: 'Senha alterada' });
+    assert.equal(h.state.roomId, '');
+    assert.equal(h.dom.displayRoomId.textContent, '------');
+    assert.equal(h.storage.getItem(h.STORAGE_KEY), null);
+
+    // Parte 2: resposta stale de check-room é ignorada quando input mudou
+    const callbacks = [];
+    h.socket.emit = (ev, payload, cb) => {
+        if (ev === 'check-room' && typeof cb === 'function') {
+            callbacks.push({ roomId: payload.roomId, cb });
+        }
+    };
+    h.dom.inputJoinRoomId.value = 'sala-velha';
+    h.roomModalCtrl.checkJoinRoomStatus('sala-velha');
+    h.dom.inputJoinRoomId.value = 'sala-nova';
+    h.roomModalCtrl.checkJoinRoomStatus('sala-nova');
+
+    callbacks[0].cb({ exists: true, memberCount: 5, hasPassword: true });
+    assert.equal(h.dom.joinRoomStatusIndicator.innerHTML, '', 'Resposta antiga não pode sobrescrever input novo');
+
+    callbacks[1].cb({ exists: false, memberCount: 0, hasPassword: false });
+    assert.match(h.dom.joinRoomStatusIndicator.innerHTML, /Sala vazia/);
+});

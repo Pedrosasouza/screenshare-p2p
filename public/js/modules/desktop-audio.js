@@ -12,9 +12,24 @@ let latestStartGeneration = 0;
 let latestStopGeneration = 0;
 let activeCaptureSessionMeta = null;
 const audioWorkletLoadedContexts = new WeakSet();
+let runtimeWindowObj = null;
+let runtimeDocumentObj = null;
+
+export function configureDesktopAudioRuntime({ windowObj = null, documentObj = null } = {}) {
+    runtimeWindowObj = windowObj;
+    runtimeDocumentObj = documentObj;
+}
+
+function getRuntimeWindow(overrideWin) {
+    return overrideWin || runtimeWindowObj || (typeof window !== 'undefined' ? window : null);
+}
+
+function getRuntimeDocument(overrideDoc) {
+    return overrideDoc || runtimeDocumentObj || (typeof document !== 'undefined' ? document : null);
+}
 
 export function isDesktopApp(windowObj) {
-    const win = windowObj || (typeof window !== 'undefined' ? window : null);
+    const win = getRuntimeWindow(windowObj);
     if (!win) return false;
     if (win.StreamGridDesktop && typeof win.StreamGridDesktop.isDesktop === 'function') {
         return win.StreamGridDesktop.isDesktop();
@@ -50,8 +65,10 @@ export async function prepareHelperAudioWorklet(expectedGeneration = desktopCapt
         return;
     }
 
+    const win = getRuntimeWindow();
     if (!helperAudioContext || helperAudioContext.state === 'closed') {
-        helperAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+        const AudioCtx = win && (win.AudioContext || win.webkitAudioContext);
+        helperAudioContext = new AudioCtx({ sampleRate: 48000 });
     } else if (helperAudioContext.state === 'suspended') {
         await helperAudioContext.resume();
     }
@@ -62,33 +79,41 @@ export async function prepareHelperAudioWorklet(expectedGeneration = desktopCapt
 
     if (!audioWorkletLoadedContexts.has(helperAudioContext)) {
         await helperAudioContext.audioWorklet.addModule('js/audio-worklet-processor.js');
+        if (helperAudioContext.state !== 'closed') {
+            audioWorkletLoadedContexts.add(helperAudioContext);
+        }
         if (expectedGeneration !== desktopCaptureGeneration) {
             return;
         }
     }
 
     if (activeAudioWorkletNode) {
-        try { activeAudioWorkletNode.disconnect(); } catch (e) {}
+        try {
+            activeAudioWorkletNode.port.postMessage({ type: 'stop' });
+            activeAudioWorkletNode.disconnect();
+        } catch (e) {}
     }
 
-    const node = new AudioWorkletNode(helperAudioContext, 'pcm-ring-buffer-processor', {
+    const AudioWorkletCtor = (win && win.AudioWorkletNode) || (typeof AudioWorkletNode !== 'undefined' ? AudioWorkletNode : null);
+    const node = new AudioWorkletCtor(helperAudioContext, 'pcm-ring-buffer-processor', {
         numberOfInputs: 0,
         numberOfOutputs: 1,
         outputChannelCount: [2]
     });
-    if (helperAudioContext.state !== 'closed') {
-        audioWorkletLoadedContexts.add(helperAudioContext);
-    }
     activeAudioWorkletNode = node;
     helperAudioDestination = helperAudioContext.createMediaStreamDestination();
     activeAudioWorkletNode.connect(helperAudioDestination);
 }
 
-export async function checkDiscordStatus() {
-    if (!isDesktopApp() || !window.StreamGridDesktop) return;
+export async function checkDiscordStatus(windowObj, documentObj) {
+    const win = getRuntimeWindow(windowObj);
+    const doc = getRuntimeDocument(documentObj);
+    if (!isDesktopApp(win) || !win || !win.StreamGridDesktop) return;
     try {
-        const msg = await window.StreamGridDesktop.getDiscordStatus();
-        const badge = document.getElementById('discordStatusBadge');
+        const msg = await win.StreamGridDesktop.getDiscordStatus();
+        const badge = doc && typeof doc.getElementById === 'function'
+            ? doc.getElementById('discordStatusBadge')
+            : null;
         if (badge && msg) {
             if (msg.detected) {
                 badge.style.color = '#3ba55d';
@@ -103,19 +128,23 @@ export async function checkDiscordStatus() {
     }
 }
 
-export async function fetchWindowList() {
-    if (!isDesktopApp() || !window.StreamGridDesktop) return;
+export async function fetchWindowList(windowObj, documentObj) {
+    const win = getRuntimeWindow(windowObj);
+    const doc = getRuntimeDocument(documentObj);
+    if (!isDesktopApp(win) || !win || !win.StreamGridDesktop) return;
     try {
-        const windows = await window.StreamGridDesktop.listWindows();
+        const windows = await win.StreamGridDesktop.listWindows();
         availableWindows = Array.isArray(windows) ? windows : [];
-        updateAudioAppSelect(availableWindows);
+        updateAudioAppSelect(availableWindows, doc);
     } catch (err) {
         console.warn('[AudioHelper] Erro ao listar janelas compatíveis:', err);
         availableWindows = [];
-        const select = document.getElementById('selectAudioApp');
+        const select = doc && typeof doc.getElementById === 'function'
+            ? doc.getElementById('selectAudioApp')
+            : null;
         if (select) {
             select.innerHTML = '';
-            const opt = document.createElement('option');
+            const opt = doc.createElement('option');
             opt.value = '';
             opt.textContent = 'Erro ao carregar janelas de áudio';
             select.appendChild(opt);
@@ -123,31 +152,43 @@ export async function fetchWindowList() {
     }
 }
 
-export function updateAudioAppSelect(windows) {
-    const select = document.getElementById('selectAudioApp');
-    if (!select) return;
+export function updateAudioAppSelect(windows, documentObj) {
+    const doc = getRuntimeDocument(documentObj);
+    const select = doc && typeof doc.getElementById === 'function'
+        ? doc.getElementById('selectAudioApp')
+        : null;
+    if (!select || !doc) return;
 
+    const prevValue = String(select.value || '');
     select.innerHTML = '';
     if (!windows || windows.length === 0) {
-        const opt = document.createElement('option');
+        const opt = doc.createElement('option');
         opt.value = '';
         opt.textContent = 'Nenhuma janela compatível encontrada';
         select.appendChild(opt);
         return;
     }
 
+    let preserved = false;
     windows.forEach(w => {
-        const opt = document.createElement('option');
+        const opt = doc.createElement('option');
         opt.value = w.pid;
         const exeInfo = w.exe ? ` [${w.exe}]` : '';
         const titleTrimmed = w.title.length > 40 ? w.title.substring(0, 37) + '...' : w.title;
         opt.textContent = `${titleTrimmed}${exeInfo}`;
         select.appendChild(opt);
+        if (prevValue && String(w.pid) === prevValue) {
+            preserved = true;
+        }
     });
+    if (preserved) {
+        select.value = prevValue;
+    }
 }
 
-export async function startDesktopCaptureWith(startFn) {
-    if (!isDesktopApp() || !window.StreamGridDesktop) {
+export async function startDesktopCaptureWith(startFn, windowObj) {
+    const win = getRuntimeWindow(windowObj);
+    if (!isDesktopApp(win) || !win || !win.StreamGridDesktop) {
         throw new Error('Captura WASAPI por processo está disponível apenas no aplicativo Desktop.');
     }
 
@@ -168,8 +209,8 @@ export async function startDesktopCaptureWith(startFn) {
 
         if (captureGen !== desktopCaptureGeneration) {
             if (latestStopGeneration > captureGen && latestStartGeneration <= captureGen) {
-                if (isDesktopApp() && window.StreamGridDesktop) {
-                    window.StreamGridDesktop.stopAppAudioCapture().catch(() => {});
+                if (isDesktopApp(win) && win.StreamGridDesktop) {
+                    win.StreamGridDesktop.stopAppAudioCapture().catch(() => {});
                 }
             }
             throw new Error('Captura de áudio cancelada durante a inicialização.');
@@ -197,33 +238,37 @@ export async function startDesktopCaptureWith(startFn) {
         return track;
     } catch (err) {
         if (captureGen === desktopCaptureGeneration) {
-            stopAppAudioCapture();
+            stopAppAudioCapture(win);
         }
         const message = (err && err.message) ? err.message : String(err);
         throw new Error(message);
     }
 }
 
-export async function startAppAudioCapture(pid) {
-    return startDesktopCaptureWith((onPcm) => window.StreamGridDesktop.startAppAudioCapture(pid, onPcm));
+export async function startAppAudioCapture(pid, windowObj) {
+    const win = getRuntimeWindow(windowObj);
+    return startDesktopCaptureWith((onPcm) => win.StreamGridDesktop.startAppAudioCapture(pid, onPcm), win);
 }
 
-export async function startExcludeDiscordCapture() {
-    return startDesktopCaptureWith((onPcm) => window.StreamGridDesktop.startExcludeDiscordCapture(onPcm));
+export async function startExcludeDiscordCapture(windowObj) {
+    const win = getRuntimeWindow(windowObj);
+    return startDesktopCaptureWith((onPcm) => win.StreamGridDesktop.startExcludeDiscordCapture(onPcm), win);
 }
 
-export function stopAppAudioCapture() {
+export function stopAppAudioCapture(windowObj) {
+    const win = getRuntimeWindow(windowObj);
     desktopCaptureGeneration += 1;
     latestStopGeneration = desktopCaptureGeneration;
     if (typeof activeCaptureSessionMeta !== 'undefined') {
         activeCaptureSessionMeta = null;
     }
-    if (isDesktopApp() && window.StreamGridDesktop) {
-        window.StreamGridDesktop.stopAppAudioCapture().catch(() => {});
+    if (isDesktopApp(win) && win && win.StreamGridDesktop) {
+        win.StreamGridDesktop.stopAppAudioCapture().catch(() => {});
     }
     if (activeAudioWorkletNode) {
         try {
             activeAudioWorkletNode.port.postMessage({ type: 'flush' });
+            activeAudioWorkletNode.port.postMessage({ type: 'stop' });
             activeAudioWorkletNode.disconnect();
         } catch (e) {}
         activeAudioWorkletNode = null;
@@ -238,15 +283,16 @@ export function stopAppAudioCapture() {
     }
 }
 
-export async function registerDesktopCaptureListeners(onUnexpectedStop) {
-    if (!isDesktopApp() || !window.StreamGridDesktop || typeof window.StreamGridDesktop.onCaptureStopped !== 'function') {
+export async function registerDesktopCaptureListeners(onUnexpectedStop, windowObj) {
+    const win = getRuntimeWindow(windowObj);
+    if (!isDesktopApp(win) || !win || !win.StreamGridDesktop || typeof win.StreamGridDesktop.onCaptureStopped !== 'function') {
         return () => {};
     }
     if (typeof captureStoppedUnlisten === 'function') {
         try { captureStoppedUnlisten(); } catch (_) {}
         captureStoppedUnlisten = null;
     }
-    const unlisten = await window.StreamGridDesktop.onCaptureStopped((payload) => {
+    const unlisten = await win.StreamGridDesktop.onCaptureStopped((payload) => {
         if (typeof activeCaptureSessionMeta !== 'undefined' && activeCaptureSessionMeta) {
             if (
                 payload &&
@@ -265,7 +311,7 @@ export async function registerDesktopCaptureListeners(onUnexpectedStop) {
                 return;
             }
         }
-        stopAppAudioCapture();
+        stopAppAudioCapture(win);
         if (typeof onUnexpectedStop === 'function') {
             onUnexpectedStop(payload);
         }

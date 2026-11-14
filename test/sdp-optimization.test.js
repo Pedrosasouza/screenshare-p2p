@@ -80,7 +80,7 @@ describe('Otimização e parsing de SDP WebRTC (sdp.js)', () => {
         assert.ok(vp8Fmtp.includes('x-google-max-bitrate=6000'), 'Linha VP8 injetada deve ter x-google-max-bitrate=6000');
     });
 
-    it('T4: inclui limites b=AS:6000 e b=TIAS:6000000 sem duplicações', async () => {
+    it('T4: inclui limites b=AS:6000 e b=TIAS:6000000 sem duplicações e após c= conforme RFC 4566', async () => {
         const { optimizeSDP } = await loadSdpModule();
         const optimized = optimizeSDP(SAMPLE_SDP_CHROME);
         const lines = optimized.split('\r\n');
@@ -90,6 +90,14 @@ describe('Otimização e parsing de SDP WebRTC (sdp.js)', () => {
 
         assert.strictEqual(asCount, 1, 'Deveria existir exatamente 1 linha b=AS:6000');
         assert.strictEqual(tiasCount, 1, 'Deveria existir exatamente 1 linha b=TIAS:6000000');
+
+        const mVideoIdx = lines.findIndex((l) => l.startsWith('m=video'));
+        const cVideoIdx = lines.findIndex((l, idx) => idx > mVideoIdx && l.startsWith('c='));
+        const asIdx = lines.indexOf('b=AS:6000');
+        const tiasIdx = lines.indexOf('b=TIAS:6000000');
+        assert.ok(cVideoIdx > mVideoIdx, 'c= deve existir após m=video');
+        assert.ok(asIdx > cVideoIdx, 'b=AS deve aparecer após c= conforme RFC 4566');
+        assert.ok(tiasIdx > cVideoIdx, 'b=TIAS deve aparecer após c= conforme RFC 4566');
     });
 
     it('T5: garante idempotência ao executar optimizeSDP duas vezes seguidas', async () => {

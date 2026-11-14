@@ -27,10 +27,17 @@ export function disposeTileElement(tileEl, documentObj = (typeof document !== 'u
         ? tileEl.querySelector('video')
         : null;
     if (videoEl) {
+        if (documentObj && documentObj.pictureInPictureElement === videoEl && typeof documentObj.exitPictureInPicture === 'function') {
+            Promise.resolve(documentObj.exitPictureInPicture()).catch(() => {});
+        }
         videoEl.srcObject = null;
     }
-    if (documentObj && documentObj.fullscreenElement === tileEl && typeof documentObj.exitFullscreen === 'function') {
-        Promise.resolve(documentObj.exitFullscreen()).catch(() => {});
+    if (documentObj && (documentObj.fullscreenElement === tileEl || documentObj.webkitFullscreenElement === tileEl)) {
+        if (typeof documentObj.exitFullscreen === 'function') {
+            Promise.resolve(documentObj.exitFullscreen()).catch(() => {});
+        } else if (typeof documentObj.webkitExitFullscreen === 'function') {
+            Promise.resolve(documentObj.webkitExitFullscreen()).catch(() => {});
+        }
     }
     if (typeof tileEl.remove === 'function') {
         tileEl.remove();

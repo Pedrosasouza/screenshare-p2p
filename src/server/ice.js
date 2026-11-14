@@ -100,6 +100,7 @@ function createIceServersResolver({ env = process.env, fetchImpl = global.fetch,
                 } catch (err) {
                     const failNow = nowFn();
                     if (cachedPayload && failNow < hardExpiresAt) {
+                        cacheExpiresAt = Math.min(hardExpiresAt, failNow + 30000);
                         const remainingTtl = Math.max(1, Math.floor((hardExpiresAt - failNow) / 1000));
                         console.warn('[ICE] Refresh Cloudflare falhou; mantendo cache ainda válido:', err && err.message ? err.message : err);
                         return { ...cachedPayload, ttlSeconds: remainingTtl };

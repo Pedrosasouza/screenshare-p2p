@@ -11,7 +11,7 @@ export const SESSION_PASS_STORAGE_KEY = 'streamgrid_room_pass';
 
 
 
-export function resolveSignalingServerUrl() {
+export function resolveSignalingServerUrl(options = {}) {
     const isLoopbackHost = (hostname) => (
         hostname === 'localhost' ||
         hostname === '127.0.0.1' ||
@@ -19,10 +19,20 @@ export function resolveSignalingServerUrl() {
         hostname === '::1'
     );
 
-    const desktopMode = isDesktopApp();
-    const hasWindow = typeof window !== 'undefined' && window.location;
-    const pageProtocol = hasWindow ? (window.location.protocol || '') : '';
-    const pageOrigin = hasWindow ? (window.location.origin || '') : '';
+    const win = options && options.windowObj !== undefined
+        ? options.windowObj
+        : (typeof window !== 'undefined' ? window : null);
+    const store = options && options.storage !== undefined
+        ? options.storage
+        : (typeof localStorage !== 'undefined' ? localStorage : null);
+    const desktopMode = options && options.isDesktop !== undefined
+        ? Boolean(options.isDesktop)
+        : isDesktopApp(win);
+    const hasWindow = Boolean(win && win.location);
+    const pageProtocol = hasWindow ? (win.location.protocol || '') : '';
+    const pageOrigin = hasWindow ? (win.location.origin || '') : '';
+    const pageHostname = hasWindow ? (win.location.hostname || '') : '';
+    const pageSearch = hasWindow ? (win.location.search || '') : '';
 
     const parseSafeServerUrl = (raw) => {
         if (typeof raw !== 'string') return null;
@@ -61,7 +71,7 @@ export function resolveSignalingServerUrl() {
     };
 
     try {
-        const params = new URLSearchParams(window.location.search);
+        const params = new URLSearchParams(pageSearch);
         const paramServer = params.get('server');
         if (paramServer) {
             const validParam = parseSafeServerUrl(paramServer);
@@ -70,43 +80,52 @@ export function resolveSignalingServerUrl() {
             }
         }
 
-        const savedServer = localStorage.getItem(SERVER_URL_STORAGE_KEY);
-        if (savedServer) {
-            const validSaved = parseSafeServerUrl(savedServer);
-            if (validSaved) {
-                return validSaved;
+        if (store && typeof store.getItem === 'function') {
+            const savedServer = store.getItem(SERVER_URL_STORAGE_KEY);
+            if (savedServer) {
+                const validSaved = parseSafeServerUrl(savedServer);
+                if (validSaved) {
+                    return validSaved;
+                }
+                try { store.removeItem(SERVER_URL_STORAGE_KEY); } catch (_) {}
             }
-            try { localStorage.removeItem(SERVER_URL_STORAGE_KEY); } catch (_) {}
         }
     } catch (_) {}
 
-    return (window.location.protocol.startsWith('http') && !window.location.hostname.includes('localhost') && window.location.hostname !== '127.0.0.1')
-        ? window.location.origin
+    return (pageProtocol.startsWith('http') && !pageHostname.includes('localhost') && pageHostname !== '127.0.0.1')
+        ? pageOrigin
         : 'https://screenshare-p2p.onrender.com';
 }
 
-export function saveSessionRoomPassword(targetRoomId, password) {
-    if (typeof sessionStorage === 'undefined') return;
+export function saveSessionRoomPassword(
+    targetRoomId,
+    password,
+    sessionStore = (typeof sessionStorage !== 'undefined' ? sessionStorage : null)
+) {
+    if (!sessionStore) return;
     try {
         const cleanRoom = typeof sanitizeRoomId === 'function'
             ? sanitizeRoomId(targetRoomId)
             : String(targetRoomId || '').trim().toLowerCase();
         const cleanPass = typeof password === 'string' ? password.trim() : '';
         if (!cleanRoom || !cleanPass) {
-            sessionStorage.removeItem(SESSION_PASS_STORAGE_KEY);
+            sessionStore.removeItem(SESSION_PASS_STORAGE_KEY);
             return;
         }
-        sessionStorage.setItem(SESSION_PASS_STORAGE_KEY, JSON.stringify({
+        sessionStore.setItem(SESSION_PASS_STORAGE_KEY, JSON.stringify({
             roomId: cleanRoom,
             password: cleanPass
         }));
     } catch (_) {}
 }
 
-export function getSessionRoomPassword(targetRoomId) {
-    if (typeof sessionStorage === 'undefined') return '';
+export function getSessionRoomPassword(
+    targetRoomId,
+    sessionStore = (typeof sessionStorage !== 'undefined' ? sessionStorage : null)
+) {
+    if (!sessionStore) return '';
     try {
-        const raw = sessionStorage.getItem(SESSION_PASS_STORAGE_KEY);
+        const raw = sessionStore.getItem(SESSION_PASS_STORAGE_KEY);
         if (!raw) return '';
         const parsed = JSON.parse(raw);
         if (!parsed || typeof parsed !== 'object') return '';
@@ -120,10 +139,12 @@ export function getSessionRoomPassword(targetRoomId) {
     return '';
 }
 
-export function clearSessionRoomPassword() {
-    if (typeof sessionStorage === 'undefined') return;
+export function clearSessionRoomPassword(
+    sessionStore = (typeof sessionStorage !== 'undefined' ? sessionStorage : null)
+) {
+    if (!sessionStore) return;
     try {
-        sessionStorage.removeItem(SESSION_PASS_STORAGE_KEY);
+        sessionStore.removeItem(SESSION_PASS_STORAGE_KEY);
     } catch (_) {}
 }
 
