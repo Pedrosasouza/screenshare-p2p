@@ -12,3 +12,7 @@ services:
         value: production
       - key: TRUST_PROXY
         value: "true"
+      - key: CF_TURN_TOKEN_ID
+        sync: false
+      - key: CF_TURN_API_TOKEN
+        sync: false

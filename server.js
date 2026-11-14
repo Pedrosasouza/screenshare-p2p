@@ -3,7 +3,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
 const os = require('os');
-const { scrypt, randomBytes, timingSafeEqual } = require('crypto');
+const { scrypt, randomBytes, timingSafeEqual, createHmac } = require('crypto');
 const { promisify } = require('util');
 const scryptAsync = promisify(scrypt);
 
@@ -70,6 +70,209 @@ const io = new Server(server, {
 // Serve static files from public directory
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Dynamic ICE / TURN Credential Resolver (Cloudflare Realtime TURN -> Coturn HMAC -> Fallback)
+const FALLBACK_ICE_SERVERS = [
+    { urls: 'stun:stun.cloudflare.com:3478' },
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:global.stun.twilio.com:3478' },
+    {
+        urls: 'turn:openrelay.metered.ca:80',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+    },
+    {
+        urls: 'turn:openrelay.metered.ca:443',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+    },
+    {
+        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+    }
+];
+
+function cloneFallbackIceServers() {
+    return FALLBACK_ICE_SERVERS.map((entry) => ({ ...entry }));
+}
+
+function parseTurnUrls(rawUrls) {
+    if (typeof rawUrls !== 'string') return [];
+    return rawUrls
+        .split(',')
+        .map((u) => u.trim())
+        .filter((u) => /^(?:turns?|stuns?):[^\s]+$/i.test(u));
+}
+
+function createIceServersResolver({ env = process.env, fetchImpl = global.fetch, nowFn = Date.now } = {}) {
+    let cachedPayload = null;
+    let cacheExpiresAt = 0;
+    let inFlightPromise = null;
+
+    return async function resolveIceServers() {
+        const cfTokenId = typeof env.CF_TURN_TOKEN_ID === 'string' ? env.CF_TURN_TOKEN_ID.trim() : '';
+        const cfApiToken = typeof env.CF_TURN_API_TOKEN === 'string' ? env.CF_TURN_API_TOKEN.trim() : '';
+
+        if (cfTokenId && cfApiToken) {
+            const now = nowFn();
+            if (cachedPayload && now < cacheExpiresAt) {
+                return cachedPayload;
+            }
+            if (inFlightPromise) {
+                return inFlightPromise;
+            }
+
+            const rawTtl = Number(env.CF_TURN_TTL_SECONDS);
+            const ttlSeconds = Number.isFinite(rawTtl) && rawTtl >= 60 ? Math.min(86400, Math.floor(rawTtl)) : 14400;
+
+            inFlightPromise = (async () => {
+                try {
+                    if (typeof fetchImpl !== 'function') {
+                        throw new Error('fetch indisponível');
+                    }
+                    const url = `https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(cfTokenId)}/credentials/generate-ice-servers`;
+                    const signal = (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function')
+                        ? AbortSignal.timeout(4000)
+                        : undefined;
+                    const response = await fetchImpl(url, {
+                        method: 'POST',
+                        headers: {
+                            Authorization: `Bearer ${cfApiToken}`,
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ ttl: ttlSeconds }),
+                        signal
+                    });
+                    if (!response || !response.ok) {
+                        throw new Error(`Cloudflare TURN HTTP ${response ? response.status : 'unknown'}`);
+                    }
+                    const json = await response.json();
+                    const iceServers = Array.isArray(json && json.iceServers)
+                        ? json.iceServers
+                        : (json && json.result && Array.isArray(json.result.iceServers) ? json.result.iceServers : null);
+                    if (!iceServers || iceServers.length === 0) {
+                        throw new Error('Resposta Cloudflare TURN sem iceServers válidos');
+                    }
+
+                    const payload = {
+                        provider: 'cloudflare',
+                        ttlSeconds,
+                        iceServers
+                    };
+                    const refreshMarginSec = Math.min(300, Math.max(60, Math.floor(ttlSeconds * 0.15)));
+                    cachedPayload = payload;
+                    cacheExpiresAt = nowFn() + Math.max(30, ttlSeconds - refreshMarginSec) * 1000;
+                    return payload;
+                } catch (err) {
+                    console.warn('[ICE] Falha ao consultar Cloudflare TURN, usando fallback:', err && err.message ? err.message : err);
+                    return {
+                        provider: 'fallback',
+                        ttlSeconds: 60,
+                        degraded: true,
+                        iceServers: cloneFallbackIceServers()
+                    };
+                } finally {
+                    inFlightPromise = null;
+                }
+            })();
+
+            return inFlightPromise;
+        }
+
+        const turnUrls = parseTurnUrls(env.TURN_URLS);
+        const turnSecret = typeof env.TURN_SECRET === 'string' ? env.TURN_SECRET.trim() : '';
+        if (turnUrls.length > 0 && turnSecret) {
+            const rawTtl = Number(env.TURN_TTL_SECONDS);
+            const ttlSeconds = Number.isFinite(rawTtl) && rawTtl >= 60 ? Math.min(86400, Math.floor(rawTtl)) : 14400;
+            const expiryEpoch = Math.floor(nowFn() / 1000) + ttlSeconds;
+            const username = `${expiryEpoch}:streamgrid`;
+            const credential = createHmac('sha1', turnSecret).update(username).digest('base64');
+            return {
+                provider: 'coturn',
+                ttlSeconds,
+                iceServers: [
+                    { urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'] },
+                    { urls: turnUrls, username, credential }
+                ]
+            };
+        }
+
+        return {
+            provider: 'fallback',
+            ttlSeconds: 300,
+            iceServers: cloneFallbackIceServers()
+        };
+    };
+}
+
+const defaultIceServersResolver = createIceServersResolver();
+const iceRateLimitMap = new Map();
+const ICE_RATE_LIMIT_WINDOW_MS = 600000;
+const ICE_RATE_LIMIT_MAX_REQUESTS = 30;
+const MAX_ICE_RATE_ENTRIES = 10000;
+
+function getHttpClientIp(req) {
+    const trustProxy = process.env.TRUST_PROXY === 'true' || process.env.TRUST_PROXY === '1';
+    if (trustProxy && req && req.headers) {
+        const forwarded = req.headers['x-forwarded-for'];
+        if (typeof forwarded === 'string' && forwarded.trim()) {
+            const parts = forwarded.split(',');
+            const safeIp = parts[parts.length - 1].trim().replace(/^::ffff:/, '');
+            if (safeIp) return safeIp;
+        }
+    }
+    const rawAddress = (req && req.socket && req.socket.remoteAddress) || (req && req.ip) || 'unknown';
+    return String(rawAddress).trim().replace(/^::ffff:/, '') || 'unknown';
+}
+
+function checkHttpIceRateLimit(clientIp, now = Date.now()) {
+    const existing = iceRateLimitMap.get(clientIp);
+    if (!existing || now - existing.windowStart >= ICE_RATE_LIMIT_WINDOW_MS) {
+        if (!existing && iceRateLimitMap.size >= MAX_ICE_RATE_ENTRIES) {
+            for (const [k, v] of iceRateLimitMap.entries()) {
+                if (now - v.windowStart >= ICE_RATE_LIMIT_WINDOW_MS) {
+                    iceRateLimitMap.delete(k);
+                }
+            }
+            while (iceRateLimitMap.size >= MAX_ICE_RATE_ENTRIES) {
+                const oldest = iceRateLimitMap.keys().next().value;
+                if (oldest === undefined) break;
+                iceRateLimitMap.delete(oldest);
+            }
+        }
+        iceRateLimitMap.set(clientIp, { count: 1, windowStart: now });
+        return true;
+    }
+    if (existing.count >= ICE_RATE_LIMIT_MAX_REQUESTS) {
+        return false;
+    }
+    existing.count += 1;
+    return true;
+}
+
+function setIceEndpointCorsHeaders(req, res) {
+    const rawAllowed = process.env.ALLOWED_ORIGINS;
+    const reqOrigin = req && req.headers ? req.headers.origin : '';
+    if (typeof rawAllowed !== 'string' || !rawAllowed.trim()) {
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        return true;
+    }
+    const allowed = rawAllowed.split(',').map((s) => s.trim()).filter(Boolean);
+    if (allowed.length === 0) {
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        return true;
+    }
+    if (!reqOrigin || allowed.includes(reqOrigin)) {
+        if (reqOrigin) {
+            res.setHeader('Access-Control-Allow-Origin', reqOrigin);
+            res.setHeader('Vary', 'Origin');
+        }
+        return true;
+    }
+    return false;
+}
+
 // Healthcheck endpoint for hosting platforms (e.g. Render)
 app.get('/health', (req, res) => {
     res.json({
@@ -77,6 +280,23 @@ app.get('/health', (req, res) => {
         rooms: rooms.size,
         uptime: Math.floor(process.uptime())
     });
+});
+
+// Dynamic ICE / TURN endpoint (returns ephemeral credentials without exposing backend secrets)
+app.get('/ice-servers', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    if (!setIceEndpointCorsHeaders(req, res)) {
+        return res.status(403).json({ error: 'origin_not_allowed' });
+    }
+    const clientIp = getHttpClientIp(req);
+    if (!checkHttpIceRateLimit(clientIp)) {
+        return res.status(429).json({
+            error: 'rate_limited',
+            message: 'Muitas solicitações de servidores ICE. Tente novamente em alguns minutos.'
+        });
+    }
+    const payload = await defaultIceServersResolver();
+    return res.json(payload);
 });
 
 // Fallback route to ensure index.html is always served
@@ -546,5 +766,7 @@ module.exports = {
     setLoginAttempt,
     hashPassword,
     verifyPassword,
-    getCorsOrigin
+    getCorsOrigin,
+    createIceServersResolver,
+    iceRateLimitMap
 };

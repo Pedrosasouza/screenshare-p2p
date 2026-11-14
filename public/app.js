@@ -39,6 +39,12 @@ import {
     enterPseudoFullscreen,
     showTapToUnmuteBadge
 } from './js/modules/tile-dom.js';
+import {
+    rtcConfig,
+    refreshIceServers,
+    getActiveIceProvider,
+    getIceProviderDisplayLabel
+} from './js/modules/ice-config.js';
 
 
 
@@ -96,32 +102,9 @@ if (typeof setSignalingStatus === 'function') {
 }
 scheduleColdStartNotice();
 
-// STUN + TURN servers for high NAT/CGNAT penetration (essential for Brazilian fiber ISPs)
-const rtcConfig = {
-    iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' },
-        { urls: 'stun:global.stun.twilio.com:3478' },
-        // Free TURN relay (Metered.ca Open Relay) — fallback when STUN fails behind symmetric NAT/CGNAT
-        {
-            urls: 'turn:openrelay.metered.ca:80',
-            username: 'openrelayproject',
-            credential: 'openrelayproject'
-        },
-        {
-            urls: 'turn:openrelay.metered.ca:443',
-            username: 'openrelayproject',
-            credential: 'openrelayproject'
-        },
-        {
-            urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-            username: 'openrelayproject',
-            credential: 'openrelayproject'
-        }
-    ],
-    iceCandidatePoolSize: 4
-};
+if (typeof refreshIceServers === 'function') {
+    refreshIceServers(SERVER_URL);
+}
 
 // Application State
 const STORAGE_KEY = 'streamgrid_last_room';
@@ -704,6 +687,9 @@ socket.on('connect', () => {
     if (typeof setSignalingStatus === 'function') {
         setSignalingStatus('connected');
     }
+    if (typeof refreshIceServers === 'function') {
+        refreshIceServers(SERVER_URL);
+    }
     console.log('[Socket] Connected to server. Socket ID:', myId);
     if (typeof wasSocketDisconnected !== 'undefined' && wasSocketDisconnected) {
         wasSocketDisconnected = false;
@@ -808,6 +794,12 @@ socket.on('join-error', ({ error, message }) => {
 // Socket Events
 socket.on('room-users', async ({ users, userNames, activeStreams, socketId, memberCount, hasPassword }) => {
     myId = socketId;
+    if (typeof refreshIceServers === 'function' && typeof SERVER_URL !== 'undefined') {
+        await Promise.race([
+            refreshIceServers(SERVER_URL),
+            new Promise((resolve) => setTimeout(resolve, 1200))
+        ]);
+    }
     if (pendingRoomJoin) {
         const target = pendingRoomJoin;
         pendingRoomJoin = null;
@@ -2116,6 +2108,11 @@ async function updateStatsDisplay() {
 
         if (elIceRoute) {
             elIceRoute.textContent = iceRoutes.length > 0 ? iceRoutes.join(', ') : '--';
+        }
+
+        const elIceProvider = document.getElementById('statsIceProvider');
+        if (elIceProvider && typeof getActiveIceProvider === 'function' && typeof getIceProviderDisplayLabel === 'function') {
+            elIceProvider.textContent = getIceProviderDisplayLabel(getActiveIceProvider());
         }
 
         const elServerUrl = document.getElementById('statsServerUrl');

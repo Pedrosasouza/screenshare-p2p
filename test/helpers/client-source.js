@@ -5,6 +5,7 @@ const PUBLIC_DIR = path.resolve(__dirname, '../../public');
 const MODULES_DIR = path.join(PUBLIC_DIR, 'js', 'modules');
 
 const MODULE_ORDER = [
+    'ice-config.js',
     'room-utils.js',
     'signaling-url.js',
     'desktop-audio.js',

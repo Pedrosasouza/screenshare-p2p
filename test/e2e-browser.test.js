@@ -224,6 +224,14 @@ async function runTests() {
         const tab2 = await createIsolatedTab(cdp, 'Tab2');
         tabs.push(tab1, tab2);
 
+        // Direciona ambas as abas isoladas ao servidor local de teste (evita depender do Render externo)
+        await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
+            source: `try { if (location.origin === ${JSON.stringify(baseUrl)}) { localStorage.setItem('streamgrid_server_url', ${JSON.stringify(baseUrl)}); } } catch (_) {}`
+        }, tab1.sessionId);
+        await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
+            source: `try { if (location.origin === ${JSON.stringify(baseUrl)}) { localStorage.setItem('streamgrid_server_url', ${JSON.stringify(baseUrl)}); } } catch (_) {}`
+        }, tab2.sessionId);
+
         // Step 1: Verify ES Module entrypoint & clean boot in Tab1
         process.stdout.write('  [E2E] T1: Carrega index.html com <script type="module">, CSP válida e status Conectado ... ');
         await cdp.send('Page.navigate', { url: baseUrl }, tab1.sessionId);
@@ -336,8 +344,24 @@ async function runTests() {
         assert.strictEqual(afterReload.quality, 'Nítido', 'Preferência de modo Nítido deve persistir após F5');
         console.log('\x1b[32mPASSOU\x1b[0m');
 
-        // Step 5: Zero erros de console/CSP/rede
-        process.stdout.write('  [E2E] T5: Zero erros de console, exceções ou violações CSP/rede em ambas as abas ... ');
+        // Step 5: Modal de estatísticas exibe provedor ICE obtido via /ice-servers
+        process.stdout.write('  [E2E] T5: Modal de estatísticas exibe #statsIceProvider carregado via /ice-servers ... ');
+        await cdp.evalInSession(tab2.sessionId, `document.getElementById('btnToggleStats')?.click()`);
+        const iceProviderText = await waitFor(() => cdp.evalInSession(tab2.sessionId, `
+            (() => {
+                const modal = document.getElementById('statsModal');
+                const el = document.getElementById('statsIceProvider');
+                const isOpen = modal && !modal.hasAttribute('hidden') && modal.style.display !== 'none';
+                const val = el?.textContent?.trim();
+                return isOpen && val && val !== '--' ? val : null;
+            })()
+        `), { label: '#statsIceProvider populado em statsModal' });
+        assert.strictEqual(iceProviderText, 'Fallback (STUN/OpenRelay)');
+        await cdp.evalInSession(tab2.sessionId, `document.getElementById('btnCloseStatsModal')?.click()`);
+        console.log('\x1b[32mPASSOU\x1b[0m');
+
+        // Step 6: Zero erros de console/CSP/rede
+        process.stdout.write('  [E2E] T6: Zero erros de console, exceções ou violações CSP/rede em ambas as abas ... ');
         const allErrors = [
             ...tab1.errors,
             ...tab2.errors,
@@ -348,7 +372,7 @@ async function runTests() {
         console.log('\x1b[32mPASSOU\x1b[0m');
 
         console.log('\n===============================================================');
-        console.log('  ✅ Todos os 5 testes E2E em navegador real passaram!');
+        console.log('  ✅ Todos os 6 testes E2E em navegador real passaram!');
         console.log('===============================================================\n');
     } catch (err) {
         for (const t of tabs) {
