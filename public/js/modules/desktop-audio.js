@@ -13,11 +13,13 @@ let latestStopGeneration = 0;
 let activeCaptureSessionMeta = null;
 const audioWorkletLoadedContexts = new WeakSet();
 
-export function isDesktopApp() {
-    if (window.StreamGridDesktop && typeof window.StreamGridDesktop.isDesktop === 'function') {
-        return window.StreamGridDesktop.isDesktop();
+export function isDesktopApp(windowObj) {
+    const win = windowObj || (typeof window !== 'undefined' ? window : null);
+    if (!win) return false;
+    if (win.StreamGridDesktop && typeof win.StreamGridDesktop.isDesktop === 'function') {
+        return win.StreamGridDesktop.isDesktop();
     }
-    return typeof window !== 'undefined' && Boolean(window.__TAURI_INTERNALS__ || window.__TAURI__);
+    return Boolean(win.__TAURI_INTERNALS__ || win.__TAURI__);
 }
 
 export function forwardPcmBufferToWorklet(arrayBuffer) {

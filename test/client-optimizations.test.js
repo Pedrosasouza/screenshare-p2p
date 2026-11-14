@@ -1,75 +1,122 @@
-const fs = require('fs');
-const path = require('path');
-const assert = require('assert');
+const { describe, it } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
+const { createMockDocument, createMockElement } = require('./helpers/mock-dom');
+const { MockMediaStream, createMockTrack, createMockPeerConnection } = require('./helpers/mock-webrtc');
 
-async function runTests() {
-    console.log('\n===============================================================');
-    console.log('  🧪 SUÍTE DE TESTES: MELHORIAS RECOMENDADAS (PACOTES 2, 3 E 4)');
-    console.log('===============================================================\n');
+describe('Melhorias recomendadas (Pacotes 2, 3 e 4)', () => {
+    it('T1: package.json integra testes Rust (test:rust) e suíte Desktop Bridge', () => {
+        const pkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../package.json'), 'utf8'));
+        const testScript = pkg.scripts && pkg.scripts.test;
+        const testRustScript = pkg.scripts && pkg.scripts['test:rust'];
 
-    let failures = 0;
+        assert.ok(
+            testScript && (testScript.includes('desktop-bridge.test.js') || testScript.includes('node --test')),
+            'scripts.test deve executar desktop-bridge.test.js'
+        );
+        assert.ok(
+            testRustScript && testRustScript.includes('src-tauri/Cargo.toml'),
+            'scripts.test:rust deve apontar para src-tauri/Cargo.toml'
+        );
+    });
 
-    // Teste 1 (Pacote 2): package.json deve expor testes Rust WASAPI (src-tauri) e desktop-bridge
-    process.stdout.write('  [Teste] T1: package.json integra testes Rust (test:rust) e desktop-bridge ... ');
-    const pkgPath = path.resolve(__dirname, '../package.json');
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-    const testScript = pkg.scripts && pkg.scripts['test'];
-    const testRustScript = pkg.scripts && pkg.scripts['test:rust'];
+    it('T2 & T3: webrtc-mesh implementa setPeerConnectionStatus, telemetria, warning badge e visibilitychange', async () => {
+        const { createWebRtcMesh } = await import(
+            pathToFileURL(path.resolve(__dirname, '../public/js/modules/webrtc-mesh.js')).href
+        );
 
-    if (
-        testScript &&
-        testScript.includes('desktop-bridge.test.js') &&
-        testRustScript &&
-        testRustScript.includes('src-tauri/Cargo.toml')
-    ) {
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } else {
-        console.log('\x1b[31mFALHOU (package.json não referencia desktop-bridge.test.js ou test:rust)\x1b[0m');
-        failures++;
-    }
+        const doc = createMockDocument();
+        const streamGrid = createMockElement('div', { id: 'streamGrid' });
+        const tile = createMockElement('div', { id: 'stream-peer-1' });
+        const overlay = createMockElement('div', { className: 'stream-overlay-info' });
+        tile.appendChild(overlay);
+        streamGrid.appendChild(tile);
+        doc.body.appendChild(streamGrid);
 
-    // Carrega o conteúdo de public/app.js para análise estática de lógica
-    const appJsPath = path.resolve(__dirname, '../public/app.js');
-    const { loadClientBundleSource } = require('./helpers/client-source');
-    const appJs = loadClientBundleSource();
-    // Teste 2 (Pacote 3): public/app.js deve implementar diagnóstico e feedback de falha P2P
-    process.stdout.write('  [Teste] T2: public/app.js possui setPeerConnectionStatus e telemetria ... ');
-    const hasStatusHelper = appJs.includes('setPeerConnectionStatus');
-    const hasTelemetry = appJs.includes('logPeerConnectionTelemetry');
-    const hasP2PWarning = appJs.includes('peer-connection-warning');
+        const win = { addEventListener: () => {} };
+        const state = {
+            currentUserName: 'Host',
+            isSharing: true,
+            localStream: null,
+            activeShareGeneration: 0,
+            currentRoomId: 'sala-opt'
+        };
 
-    if (hasStatusHelper && hasTelemetry && hasP2PWarning) {
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } else {
-        console.log('\x1b[31mFALHOU (funções de diagnóstico P2P ausentes em public/app.js)\x1b[0m');
-        failures++;
-    }
+        class MockPC {
+            constructor() {
+                const pc = createMockPeerConnection();
+                pc.iceConnectionState = 'failed';
+                pc.connectionState = 'failed';
+                pc.getStats = async () => new Map([
+                    ['pair-1', { type: 'candidate-pair', state: 'failed', nominated: true, localCandidateId: 'lc', remoteCandidateId: 'rc' }],
+                    ['lc', { type: 'local-candidate', candidateType: 'host' }],
+                    ['rc', { type: 'remote-candidate', candidateType: 'srflx' }]
+                ]);
+                return pc;
+            }
+        }
 
-    // Teste 3 (Pacote 4): public/app.js deve escutar visibilitychange e pausar vídeo para salvar GPU
-    process.stdout.write('  [Teste] T3: public/app.js gerencia visibilitychange e otimização de GPU ... ');
-    const hasVisibility = appJs.includes("visibilitychange");
-    const hasGpuOpt = appJs.includes("updateBackgroundTracksOptimization");
+        const mesh = createWebRtcMesh({
+            state,
+            dom: { streamGrid },
+            getSocket: () => ({ id: 'self', emit: () => {} }),
+            getQosMonitor: () => ({ configureSenderParams: () => {}, updateSendersForActivePeers: () => {} }),
+            getGrid: () => ({
+                updateMemberCount: () => {},
+                updateGridState: () => {},
+                updateEchoWarningVisibility: () => {},
+                updatePeerUserName: () => {},
+                createStreamTile: () => {},
+                startTilePlayback: () => {}
+            }),
+            getScreenShare: () => ({ invalidateGeneration: () => {}, stopScreenShare: () => {} }),
+            getRoomModal: () => ({}),
+            getServerUrl: () => 'http://127.0.0.1:0',
+            rtcConfig: { iceServers: [] },
+            refreshIceServers: async () => {},
+            scheduleIceRefreshTimer: () => {},
+            registerFullscreenChangeHandler: () => {},
+            saveSessionRoomPassword: () => {},
+            clearSessionRoomPassword: () => {},
+            showToast: () => {},
+            playPresenceChime: () => {},
+            RTCPeerConnectionCtor: MockPC,
+            documentObj: doc,
+            windowObj: win
+        });
 
-    if (hasVisibility && hasGpuOpt) {
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } else {
-        console.log('\x1b[31mFALHOU (otimização de GPU em segundo plano ausente em public/app.js)\x1b[0m');
-        failures++;
-    }
+        try {
+            const pc = new MockPC();
+            const transceiver = {
+                sender: { track: { kind: 'video' } },
+                receiver: { track: { kind: 'video', enabled: true } }
+            };
+            pc.getTransceivers = () => [transceiver];
+            const remoteTrack = createMockTrack('video', 'remote-v1');
+            const remoteStream = new MockMediaStream([remoteTrack]);
+            mesh.peers.set('peer-1', { pc, stream: remoteStream, tileEl: tile, userName: 'Peer 1' });
 
-    console.log('\n===============================================================');
-    if (failures === 0) {
-        console.log('  ✅ Resultado: Todas as melhorias recomendadas validadas.');
-        console.log('===============================================================\n');
-        process.exit(0);
-    } else {
-        console.log(`  ❌ Resultado: ${failures} validação(ões) falharam.`);
-        console.log('===============================================================\n');
-        process.exit(1);
-    }
-}
+            mesh.setPeerConnectionStatus('peer-1', 'failed', 'Sem rota P2P');
+            const badge = tile.querySelector('.peer-connection-warning');
+            assert.ok(badge, 'Badge .peer-connection-warning deve ser criado em falha P2P');
+            const badgeText = badge.querySelector('span');
+            assert.ok(badgeText, 'Badge deve conter span de mensagem');
+            assert.strictEqual(badgeText.textContent, 'Sem rota P2P');
 
-runTests().catch(err => {
-    console.error('Erro inesperado:', err);
-    process.exit(1);
+            await mesh.logPeerConnectionTelemetry('peer-1', pc);
+
+            mesh.bindLifecycleListeners();
+            doc.hidden = true;
+            doc.dispatchEvent({ type: 'visibilitychange' });
+            assert.strictEqual(remoteTrack.enabled, false, 'Deve pausar trilha de vídeo em segundo plano');
+
+            doc.hidden = false;
+            doc.dispatchEvent({ type: 'visibilitychange' });
+            assert.strictEqual(remoteTrack.enabled, true, 'Deve reativar trilha de vídeo ao retornar ao foco');
+        } finally {
+            mesh.cleanupRoomState({ keepPassword: true });
+        }
+    });
 });

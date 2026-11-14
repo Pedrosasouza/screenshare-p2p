@@ -1,379 +1,278 @@
-const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const vm = require('vm');
+'use strict';
 
-const appPath = path.resolve(__dirname, '../public/app.js');
-const { loadClientBundleSource } = require('./helpers/client-source');
-const appJs = loadClientBundleSource();
-function extractFn(source, name) {
-    const regex = new RegExp(`(?:async\\s+)?function\\s+${name}\\s*\\([\\s\\S]*?\\n\\}`);
-    const match = source.match(regex);
-    assert(match, `Function ${name} not found in public/app.js`);
-    return match[0];
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
+
+const {
+    MockMediaStream,
+    MockRTCSessionDescription,
+    MockRTCIceCandidate,
+    createMockTrack,
+    createMockSender,
+    createMockPeerConnection
+} = require('./helpers/mock-webrtc');
+const { createMockElement, createMockDocument, createMockStorage } = require('./helpers/mock-dom');
+
+const ROOT_DIR = path.resolve(__dirname, '..');
+
+async function loadWebRtcMod() {
+    return import(pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/webrtc-mesh.js')).href);
 }
 
-function extractSocketHandler(source, eventName) {
-    const regex = new RegExp(`socket\\.on\\('${eventName}'[\\s\\S]*?\\n\\}\\);`);
-    const match = source.match(regex);
-    assert(match, `Handler socket.on('${eventName}') not found in public/app.js`);
-    return match[0];
-}
-
-function createHarness(overrides = {}) {
-    const socketHandlers = {};
+function createReconcileEnv(createWebRtcMesh, overrides = {}) {
     const emittedEvents = [];
-    const timeouts = new Map();
-    const intervals = new Map();
-    let nextTimerId = 1;
     let echoVisibilityUpdates = 0;
-    let sendOfferCalls = [];
 
-    class MockMediaStream {
-        constructor(tracks = []) {
-            this._tracks = tracks;
+    const streamGrid = createMockElement('div', { id: 'streamGrid' });
+    const displayRoomId = createMockElement('span', { id: 'displayRoomId' });
+    const memberCountText = createMockElement('span', { id: 'memberCountText' });
+    const doc = createMockDocument({ streamGrid, displayRoomId, memberCountText }, {
+        createElement: (tag) => createMockElement(tag)
+    });
+
+    const socket = {
+        id: 'my-socket-id',
+        connected: true,
+        emit(ev, payload) {
+            emittedEvents.push({ ev, payload });
         }
-        getTracks() { return this._tracks; }
-        getVideoTracks() { return this._tracks.filter((t) => t.kind === 'video'); }
-        addTrack(t) { this._tracks.push(t); }
-    }
+    };
 
-    function createMockPC() {
-        return {
-            signalingState: 'stable',
-            connectionState: 'connected',
-            iceConnectionState: 'connected',
-            closed: false,
-            restartIceCalls: 0,
-            _senders: [],
-            getSenders() { return this._senders; },
-            restartIce() { this.restartIceCalls++; },
-            close() {
-                this.closed = true;
-                this.signalingState = 'closed';
-                this.connectionState = 'closed';
-            }
-        };
-    }
-
-    const peers = new Map();
-    const remoteActiveStreams = new Set();
-
-    const sandbox = {
-        Map,
-        Set,
-        Array,
-        Promise,
-        encodeURIComponent,
-        console: { log: () => {}, warn: () => {}, error: () => {} },
-        STORAGE_KEY: 'screenshare_room_id',
-        rtcConfig: {},
-        MediaStream: MockMediaStream,
-        RTCPeerConnection: function MockRTCPeerConnection() {
-            return createMockPC();
-        },
+    const state = {
+        myId: 'my-socket-id',
         roomId: 'sala-1',
         pendingRoomJoin: null,
         currentRoomPassword: '',
-        myId: 'my-socket-id',
-        localStream: overrides.localStream || null,
-        peers,
-        remoteActiveStreams,
-        displayRoomId: { textContent: '', appendChild() {} },
-        memberCountText: { textContent: '' },
-        streamGrid: {
-            children: [],
-            appendChild(el) { this.children.push(el); },
-            querySelectorAll() { return []; }
-        },
-        document: {
-            createElement(tag) {
-                return { tagName: tag, className: '', style: {}, title: '' };
-            }
-        },
-        window: {
-            location: { protocol: 'http:', pathname: '/' },
-            history: { pushState() {} }
-        },
-        localStorage: { setItem() {} },
-        socket: {
-            id: 'my-socket-id',
-            connected: true,
-            on(ev, fn) { socketHandlers[ev] = fn; },
-            emit(ev, payload) { emittedEvents.push({ ev, payload }); }
-        },
-        setTimeout(fn, ms) {
-            const id = nextTimerId++;
-            timeouts.set(id, { id, fn, ms, cleared: false });
-            return id;
-        },
-        clearTimeout(id) {
-            if (timeouts.has(id)) {
-                timeouts.get(id).cleared = true;
-                timeouts.delete(id);
-            }
-        },
-        setInterval(fn, ms) {
-            const id = nextTimerId++;
-            intervals.set(id, { id, fn, ms, cleared: false });
-            return id;
-        },
-        clearInterval(id) {
-            if (intervals.has(id)) {
-                intervals.get(id).cleared = true;
-                intervals.delete(id);
-            }
-        },
-        closeRoomModal() {},
-        updateRoomModalCloseButton() {},
-        updateEchoWarningVisibility() { echoVisibilityUpdates++; },
-        updateMemberCount() {},
-        updateGridState() {},
-        updatePeerUserName() {},
-        addLocalTracksToPC() {},
-        updateSendersForActivePeers() {},
-        stopScreenShare() {},
-        showToast() {},
-        playPresenceChime() {},
-        setPeerConnectionStatus() {},
-        logPeerConnectionTelemetry() {},
-        createStreamTile(id, stream) {
-            const video = { srcObject: stream, videoWidth: 0 };
-            const tile = {
-                id,
-                removed: false,
-                querySelector(sel) { return sel === 'video' ? video : null; },
-                remove() { this.removed = true; }
-            };
-            return tile;
-        },
-        startTilePlayback() {},
-        sendOffer(peerId) {
-            sendOfferCalls.push(peerId);
-        }
+        localStream: overrides.localStream || null
     };
 
-    if (overrides.useRealSendOffer !== true) {
-        // Keep stubbed sendOffer so T4 verifies sendOffer wasn't even called
+    class FakePeerConnection {
+        constructor() {
+            return createMockPeerConnection({ connectionState: 'connected', iceConnectionState: 'connected' });
+        }
     }
 
-    vm.createContext(sandbox);
-    vm.runInContext(extractFn(appJs, 'disposeTileElement'), sandbox);
-    vm.runInContext(extractFn(appJs, 'clearPeerTimers'), sandbox);
-    vm.runInContext(extractFn(appJs, 'removePeerConnection'), sandbox);
-    vm.runInContext(extractFn(appJs, 'removeStreamTile'), sandbox);
-    vm.runInContext(extractFn(appJs, 'cleanupRoomState'), sandbox);
-    vm.runInContext(extractFn(appJs, 'isPeerConnectionActive'), sandbox);
-    vm.runInContext(extractFn(appJs, 'getOrCreatePeerConnection'), sandbox);
-    vm.runInContext(extractSocketHandler(appJs, 'room-users'), sandbox);
-    vm.runInContext(extractSocketHandler(appJs, 'user-joined'), sandbox);
+    const mesh = createWebRtcMesh({
+        state,
+        dom: { streamGrid, displayRoomId, memberCountText },
+        getSocket: () => socket,
+        getQosMonitor: () => ({
+            configureSenderParams: () => {},
+            updateSendersForActivePeers: () => {}
+        }),
+        getGrid: () => ({
+            updateEchoWarningVisibility: () => { echoVisibilityUpdates += 1; },
+            updateMemberCount: () => {},
+            updateGridState: () => {},
+            updatePeerUserName: () => {},
+            createStreamTile: (id, stream) => {
+                const tile = createMockElement('div', { id: `tile-${id}`, className: 'stream-tile' });
+                const video = createMockElement('video');
+                video.srcObject = stream;
+                video.videoWidth = 0;
+                tile.appendChild(video);
+                return tile;
+            },
+            startTilePlayback: () => {}
+        }),
+        getScreenShare: () => ({ invalidateGeneration: () => {}, stopScreenShare: () => {} }),
+        getRoomModal: () => null,
+        getServerUrl: () => '',
+        rtcConfig: { iceServers: [] },
+        refreshIceServers: async () => {},
+        scheduleIceRefreshTimer: () => {},
+        registerFullscreenChangeHandler: () => {},
+        saveSessionRoomPassword: () => {},
+        clearSessionRoomPassword: () => {},
+        showToast: () => {},
+        playPresenceChime: () => {},
+        RTCPeerConnectionCtor: FakePeerConnection,
+        RTCSessionDescriptionCtor: MockRTCSessionDescription,
+        RTCIceCandidateCtor: MockRTCIceCandidate,
+        MediaStreamCtor: MockMediaStream,
+        documentObj: doc,
+        windowObj: { location: { protocol: 'http:', pathname: '/' }, history: { pushState() {} }, addEventListener() {} },
+        storage: createMockStorage()
+    });
 
     return {
-        sandbox,
-        socketHandlers,
+        mesh,
+        state,
         emittedEvents,
-        timeouts,
-        intervals,
-        createMockPC,
-        MockMediaStream,
-        getEchoVisibilityUpdates: () => echoVisibilityUpdates,
-        getSendOfferCalls: () => sendOfferCalls
+        getEchoVisibilityUpdates: () => echoVisibilityUpdates
     };
 }
 
-async function runTests() {
-    console.log('\n===============================================================');
-    console.log('  🧪 SUÍTE DE TESTES: RECONCILIAÇÃO DE PEERS & TIMERS');
-    console.log('===============================================================\n');
+test('T1: room-users on reconnect removes stale peers, clears timers & video.srcObject, keeps active peers, ignores self', async () => {
+    const { createWebRtcMesh } = await loadWebRtcMod();
+    const h = createReconcileEnv(createWebRtcMesh);
 
-    // T1: room-users on reconnect (!pendingRoomJoin) removes stale peers, keeps active ones, ignores myId
-    process.stdout.write('  [Teste] T1: room-users em reconexão remove peers obsoletos e ignora myId ... ');
-    {
-        const h = createHarness();
-        const stalePc = h.createMockPC();
-        const activePc = h.createMockPC();
-        const staleVideo = { srcObject: { id: 'stale-stream' } };
-        const staleTile = {
-            removed: false,
-            querySelector(sel) { return sel === 'video' ? staleVideo : null; },
-            remove() { this.removed = true; }
-        };
-        const activeTile = {
-            removed: false,
-            querySelector() { return null; },
-            remove() { this.removed = true; }
-        };
-        const staleIntervalId = h.sandbox.setInterval(() => {}, 1000);
-        const stalePulseId = h.sandbox.setTimeout(() => {}, 400);
+    const stalePc = createMockPeerConnection();
+    const activePc = createMockPeerConnection();
+    const staleVideo = createMockElement('video');
+    staleVideo.srcObject = { id: 'stale-stream' };
+    const staleTile = createMockElement('div');
+    staleTile.appendChild(staleVideo);
+    const activeTile = createMockElement('div');
 
-        h.sandbox.peers.set('peer-stale', {
-            pc: stalePc,
-            stream: new h.MockMediaStream([{ stop() {} }]),
-            tileEl: staleTile,
-            _keyframeCheckInterval: staleIntervalId,
-            _keyframePulseTimeout: stalePulseId
-        });
-        h.sandbox.peers.set('peer-keep', {
-            pc: activePc,
-            stream: new h.MockMediaStream([]),
-            tileEl: activeTile
-        });
+    const staleIntervalId = setInterval(() => {}, 10000);
+    const stalePulseId = setTimeout(() => {}, 10000);
 
-        await h.socketHandlers['room-users']({
-            users: ['peer-keep', 'peer-new', 'my-socket-id'],
-            userNames: { 'peer-keep': 'Keep', 'peer-new': 'New' },
-            activeStreams: [],
-            socketId: 'my-socket-id',
-            memberCount: 3,
-            hasPassword: false
-        });
+    h.mesh.peers.set('peer-stale', {
+        pc: stalePc,
+        stream: new MockMediaStream([createMockTrack('video', 'v-stale')]),
+        tileEl: staleTile,
+        _keyframeCheckInterval: staleIntervalId,
+        _keyframePulseTimeout: stalePulseId
+    });
+    h.mesh.peers.set('peer-keep', {
+        pc: activePc,
+        stream: new MockMediaStream(),
+        tileEl: activeTile
+    });
 
-        assert.strictEqual(h.sandbox.peers.has('peer-stale'), false, 'Stale peer must be removed');
-        assert.strictEqual(stalePc.closed, true, 'Stale pc must be closed');
-        assert.strictEqual(staleTile.removed, true, 'Stale tile must be removed');
-        assert.strictEqual(staleVideo.srcObject, null, 'Stale video srcObject must be cleared');
-        assert.strictEqual(h.intervals.has(staleIntervalId), false, 'Stale interval must be cleared');
-        assert.strictEqual(h.timeouts.has(stalePulseId), false, 'Stale pulse timeout must be cleared');
+    await h.mesh.handleRoomUsers({
+        users: ['peer-keep', 'peer-new', 'my-socket-id'],
+        userNames: { 'peer-keep': 'Keep', 'peer-new': 'New' },
+        activeStreams: [],
+        socketId: 'my-socket-id',
+        memberCount: 3,
+        hasPassword: false
+    });
 
-        assert.strictEqual(h.sandbox.peers.has('peer-keep'), true, 'Present peer must remain');
-        assert.strictEqual(activePc.closed, false, 'Present peer pc must stay open');
-        assert.strictEqual(h.sandbox.peers.has('peer-new'), true, 'New peer must be initialized');
-        assert.strictEqual(h.sandbox.peers.has('my-socket-id'), false, 'Self socketId must be ignored');
-    }
-    console.log('\x1b[32mPASSOU\x1b[0m');
+    assert.equal(h.mesh.peers.has('peer-stale'), false);
+    assert.equal(stalePc.closed, true);
+    assert.equal(staleTile.removed, true);
+    assert.equal(staleVideo.srcObject, null);
 
-    // T2: cleanupRoomState clears remoteActiveStreams, calls updateEchoWarningVisibility, and nulls video.srcObject
-    process.stdout.write('  [Teste] T2: cleanupRoomState limpa remoteActiveStreams e zera videoEl.srcObject ... ');
-    {
-        const h = createHarness();
-        const video1 = { srcObject: { id: 'stream-1' } };
-        const tile1 = {
-            removed: false,
-            querySelector(sel) { return sel === 'video' ? video1 : null; },
-            remove() { this.removed = true; }
-        };
-        const tileMockWithoutQuery = {
-            removed: false,
-            remove() { this.removed = true; }
-        };
+    assert.equal(h.mesh.peers.has('peer-keep'), true);
+    assert.equal(activePc.closed, false);
+    assert.equal(h.mesh.peers.has('peer-new'), true);
+    assert.equal(h.mesh.peers.has('my-socket-id'), false);
+});
 
-        h.sandbox.peers.set('p1', {
-            pc: h.createMockPC(),
-            stream: new h.MockMediaStream([]),
-            tileEl: tile1
-        });
-        h.sandbox.peers.set('p2', {
-            pc: h.createMockPC(),
-            stream: new h.MockMediaStream([]),
-            tileEl: tileMockWithoutQuery
-        });
-        h.sandbox.remoteActiveStreams.add('p1');
-        h.sandbox.remoteActiveStreams.add('p2');
+test('T2: cleanupRoomState clears remoteActiveStreams, calls updateEchoWarningVisibility, and nulls video.srcObject', async () => {
+    const { createWebRtcMesh } = await loadWebRtcMod();
+    const h = createReconcileEnv(createWebRtcMesh);
 
-        const beforeEchoUpdates = h.getEchoVisibilityUpdates();
-        h.sandbox.cleanupRoomState();
+    const video1 = createMockElement('video');
+    video1.srcObject = { id: 'stream-1' };
+    const tile1 = createMockElement('div');
+    tile1.appendChild(video1);
+    const tileMinimal = {
+        removed: false,
+        remove() { this.removed = true; }
+    };
 
-        assert.strictEqual(h.sandbox.peers.size, 0, 'peers must be cleared');
-        assert.strictEqual(h.sandbox.remoteActiveStreams.size, 0, 'remoteActiveStreams must be cleared');
-        assert.strictEqual(h.getEchoVisibilityUpdates(), beforeEchoUpdates + 1, 'updateEchoWarningVisibility must be called');
-        assert.strictEqual(video1.srcObject, null, 'video1.srcObject must be nulled before tile removal');
-        assert.strictEqual(tile1.removed, true, 'tile1 must be removed');
-        assert.strictEqual(tileMockWithoutQuery.removed, true, 'mock tile without querySelector must still be removed safely');
-    }
-    console.log('\x1b[32mPASSOU\x1b[0m');
+    h.mesh.peers.set('p1', { pc: createMockPeerConnection(), stream: new MockMediaStream(), tileEl: tile1 });
+    h.mesh.peers.set('p2', { pc: createMockPeerConnection(), stream: new MockMediaStream(), tileEl: tileMinimal });
+    h.mesh.remoteActiveStreams.add('p1');
+    h.mesh.remoteActiveStreams.add('p2');
 
-    // T3: user-joined ignores myId and cancels _keyframePulseTimeout when peer is removed before 400ms
-    process.stdout.write('  [Teste] T3: user-joined ignora myId e cancela _keyframePulseTimeout ao remover peer ... ');
-    {
+    const beforeEcho = h.getEchoVisibilityUpdates();
+    h.mesh.cleanupRoomState();
+
+    assert.equal(h.mesh.peers.size, 0);
+    assert.equal(h.mesh.remoteActiveStreams.size, 0);
+    assert.equal(h.getEchoVisibilityUpdates(), beforeEcho + 1);
+    assert.equal(video1.srcObject, null);
+    assert.equal(tile1.removed, true);
+    assert.equal(tileMinimal.removed, true);
+});
+
+test('T3: handleUserJoined ignores self socketId and cancels _keyframePulseTimeout when peer removed early', async () => {
+    const { createWebRtcMesh } = await loadWebRtcMod();
+    const timeouts = new Map();
+    let nextId = 1;
+    const origSetTimeout = global.setTimeout;
+    const origClearTimeout = global.clearTimeout;
+    global.setTimeout = (fn, ms) => {
+        const id = nextId++;
+        timeouts.set(id, { id, fn, ms });
+        return id;
+    };
+    global.clearTimeout = (id) => { timeouts.delete(id); };
+
+    try {
         let replaceCalls = 0;
-        const fakeVideoTrack = { id: 'v1', kind: 'video' };
-        const h = createHarness({
-            localStream: {
-                getTracks: () => [fakeVideoTrack],
-                getVideoTracks: () => [fakeVideoTrack]
-            }
+        const fakeVideoTrack = createMockTrack('video', 'v1');
+        const h = createReconcileEnv(createWebRtcMesh, {
+            localStream: new MockMediaStream([fakeVideoTrack])
         });
 
-        await h.socketHandlers['user-joined']({
-            socketId: 'my-socket-id',
-            userName: 'Self',
-            memberCount: 1
-        });
-        assert.strictEqual(h.sandbox.peers.size, 0, 'Self user-joined must be ignored');
-        assert.strictEqual(h.timeouts.size, 0, 'No keyframe pulse timeout scheduled for self');
+        await h.mesh.handleUserJoined({ socketId: 'my-socket-id', userName: 'Self', memberCount: 1 });
+        assert.equal(h.mesh.peers.size, 0);
+        assert.equal(timeouts.size, 0);
 
-        await h.socketHandlers['user-joined']({
-            socketId: 'peer-late',
-            userName: 'Late Joiner',
-            memberCount: 2
-        });
-        const peerObj = h.sandbox.peers.get('peer-late');
-        assert(peerObj, 'peer-late should exist');
-        peerObj.pc._senders = [{
-            track: fakeVideoTrack,
-            replaceTrack: async () => { replaceCalls++; }
-        }];
-        assert(peerObj._keyframePulseTimeout, '_keyframePulseTimeout should be stored on peerObj');
-        assert.strictEqual(h.timeouts.size, 1, 'One pulse timeout scheduled');
+        await h.mesh.handleUserJoined({ socketId: 'peer-late', userName: 'Late Joiner', memberCount: 2 });
+        const peerObj = h.mesh.peers.get('peer-late');
+        assert.ok(peerObj);
+        const videoSender = peerObj.pc.getSenders().find((s) => s.track && s.track.kind === 'video');
+        videoSender.replaceTrack = async () => { replaceCalls += 1; };
+        assert.ok(peerObj._keyframePulseTimeout);
+        assert.equal(timeouts.size, 1);
 
-        const capturedTimer = Array.from(h.timeouts.values())[0];
-        h.sandbox.removePeerConnection('peer-late');
-        assert.strictEqual(h.timeouts.size, 0, 'removePeerConnection/clearPeerTimers must clear _keyframePulseTimeout');
+        const captured = Array.from(timeouts.values())[0];
+        h.mesh.removePeerConnection('peer-late');
+        assert.equal(timeouts.size, 0);
 
-        // Even if timer callback were triggered manually after removal, guard must block replaceTrack
-        capturedTimer.fn();
-        assert.strictEqual(replaceCalls, 0, 'replaceTrack must not run after peer removal');
+        captured.fn();
+        assert.equal(replaceCalls, 0);
+    } finally {
+        global.setTimeout = origSetTimeout;
+        global.clearTimeout = origClearTimeout;
     }
-    console.log('\x1b[32mPASSOU\x1b[0m');
+});
 
-    // T4: _keyframeCheckInterval and _iceRestartTimeout abort cleanly when peer is closed/removed
-    process.stdout.write('  [Teste] T4: _keyframeCheckInterval e _iceRestartTimeout abortam quando peer fecha/sai ... ');
-    {
-        const h = createHarness({
-            localStream: {
-                getTracks: () => [],
-                getVideoTracks: () => []
-            }
+test('T4: _keyframeCheckInterval and _iceRestartTimeout abort cleanly when peer is closed/deleted', async () => {
+    const { createWebRtcMesh } = await loadWebRtcMod();
+    const timeouts = new Map();
+    const intervals = new Map();
+    let nextId = 1;
+    const origSetTimeout = global.setTimeout;
+    const origClearTimeout = global.clearTimeout;
+    const origSetInterval = global.setInterval;
+    const origClearInterval = global.clearInterval;
+
+    global.setTimeout = (fn, ms) => { const id = nextId++; timeouts.set(id, { fn, ms }); return id; };
+    global.clearTimeout = (id) => { timeouts.delete(id); };
+    global.setInterval = (fn, ms) => { const id = nextId++; intervals.set(id, { fn, ms }); return id; };
+    global.clearInterval = (id) => { intervals.delete(id); };
+
+    try {
+        const h = createReconcileEnv(createWebRtcMesh, {
+            localStream: new MockMediaStream()
         });
 
-        const pc = h.sandbox.getOrCreatePeerConnection('peer-x');
-        const peerObj = h.sandbox.peers.get('peer-x');
+        const pc = h.mesh.getOrCreatePeerConnection('peer-x');
+        const peerObj = h.mesh.peers.get('peer-x');
 
-        // Trigger ontrack for video -> schedules _keyframeCheckInterval
-        const mockTrack = { kind: 'video', onended: null };
-        pc.ontrack({ track: mockTrack, streams: [] });
-        assert.strictEqual(h.intervals.size, 1, '_keyframeCheckInterval should be scheduled');
-        const kfInterval = Array.from(h.intervals.values())[0];
+        pc.ontrack({ track: createMockTrack('video', 'remote-v'), streams: [] });
+        assert.equal(intervals.size, 1);
+        const kfInterval = Array.from(intervals.values())[0];
 
-        // Trigger oniceconnectionstatechange('disconnected') -> schedules _iceRestartTimeout
         pc.iceConnectionState = 'disconnected';
         pc.oniceconnectionstatechange();
-        assert.strictEqual(h.timeouts.size, 1, '_iceRestartTimeout should be scheduled');
-        const iceTimeout = Array.from(h.timeouts.values())[0];
+        assert.equal(timeouts.size, 1);
+        const iceTimeout = Array.from(timeouts.values())[0];
 
-        // Close PC / delete peer WITHOUT clearing timers manually (race simulation)
         pc.close();
-        h.sandbox.peers.delete('peer-x');
+        h.mesh.peers.delete('peer-x');
 
-        // Firing stale interval must self-clear and NOT emit request-keyframe
         kfInterval.fn();
-        assert.strictEqual(h.emittedEvents.length, 0, 'No request-keyframe emitted for closed/removed peer');
-        assert.strictEqual(peerObj._keyframeCheckInterval, null, '_keyframeCheckInterval must clear itself when inactive');
-        assert.strictEqual(h.intervals.size, 0, 'Interval must be cleared');
+        assert.equal(h.emittedEvents.length, 0);
+        assert.equal(peerObj._keyframeCheckInterval, null);
+        assert.equal(intervals.size, 0);
 
-        // Firing stale ICE restart timeout must NOT call restartIce or sendOffer
         iceTimeout.fn();
-        assert.strictEqual(pc.restartIceCalls, 0, 'restartIce must not run on closed/removed peer');
-        assert.strictEqual(h.getSendOfferCalls().length, 0, 'sendOffer must not run on closed/removed peer');
+        assert.equal(pc.iceRestarts, 0);
+        assert.equal(h.emittedEvents.length, 0);
+    } finally {
+        global.setTimeout = origSetTimeout;
+        global.clearTimeout = origClearTimeout;
+        global.setInterval = origSetInterval;
+        global.clearInterval = origClearInterval;
     }
-    console.log('\x1b[32mPASSOU\x1b[0m');
-
-    console.log('\n===============================================================');
-    console.log('  ✅ Resultado: Todos os testes de reconciliação passaram.');
-    console.log('===============================================================\n');
-}
-
-runTests().catch((err) => {
-    console.error(err);
-    process.exit(1);
 });

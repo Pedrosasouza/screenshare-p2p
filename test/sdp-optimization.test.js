@@ -1,23 +1,10 @@
-const fs = require('fs');
-const path = require('path');
-const vm = require('vm');
-const assert = require('assert');
+const { describe, it } = require('node:test');
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 
-// Extrai prioritizeH264 e optimizeSDP diretamente de public/app.js
-function loadSDPHelpers() {
-    const appJsPath = path.resolve(__dirname, '../public/app.js');
-    const { loadClientBundleSource } = require('./helpers/client-source');
-    const appJs = loadClientBundleSource();
-    const fnRegex = /function prioritizeH264[\s\S]*?function optimizeSDP[\s\S]*?\n\}/;
-    const match = appJs.match(fnRegex);
-    if (!match) {
-        throw new Error('Não foi possível localizar prioritizeH264 ou optimizeSDP em public/app.js');
-    }
-
-    const sandbox = {};
-    vm.createContext(sandbox);
-    vm.runInContext(match[0] + '\n;this.helpers = { prioritizeH264, optimizeSDP };', sandbox);
-    return sandbox.helpers;
+async function loadSdpModule() {
+    return import(pathToFileURL(path.resolve(__dirname, '../public/js/modules/sdp.js')).href);
 }
 
 const SAMPLE_SDP_CHROME = [
@@ -52,129 +39,73 @@ const SAMPLE_SDP_NO_FMTP = [
     'a=rtpmap:98 VP8/90000'
 ].join('\r\n');
 
-function runTests() {
-    console.log('\n===============================================================');
-    console.log('  🧪 SUÍTE DE TESTES: OTIMIZAÇÃO E PARSING DE SDP WEBRTC');
-    console.log('===============================================================\n');
-
-    const { optimizeSDP } = loadSDPHelpers();
-    let failures = 0;
-
-    // Teste 1: Opus Stereo e Bitrate em a=fmtp com a=rtpmap:111 opus/48000/2
-    try {
-        process.stdout.write('  [Teste] T1: Parâmetros Opus (stereo=1, 128kbps) aplicados no payload correto ... ');
+describe('Otimização e parsing de SDP WebRTC (sdp.js)', () => {
+    it('T1: aplica parâmetros Opus (stereo=1, 128kbps) no payload correto preservando originais', async () => {
+        const { optimizeSDP } = await loadSdpModule();
         const optimized = optimizeSDP(SAMPLE_SDP_CHROME);
         const lines = optimized.split('\r\n');
 
-        const opusFmtp = lines.find(l => l.startsWith('a=fmtp:111'));
+        const opusFmtp = lines.find((l) => l.startsWith('a=fmtp:111'));
         assert.ok(opusFmtp, 'Deveria existir uma linha a=fmtp:111');
         assert.ok(opusFmtp.includes('stereo=1'), 'Linha Opus deveria conter stereo=1');
         assert.ok(opusFmtp.includes('sprop-stereo=1'), 'Linha Opus deveria conter sprop-stereo=1');
         assert.ok(opusFmtp.includes('maxaveragebitrate=128000'), 'Linha Opus deveria conter maxaveragebitrate=128000');
         assert.ok(opusFmtp.includes('minptime=10'), 'Parâmetros originais do Opus deveriam ser preservados');
-        console.log('PASSOU');
-    } catch (err) {
-        failures++;
-        console.log('FALHOU');
-        console.error('    Detalhe:', err.message);
-    }
+    });
 
-    // Teste 2: Video Bitrate Tuning para H264 (payload 96) preservando profile-level-id
-    try {
-        process.stdout.write('  [Teste] T2: Parâmetros de Bitrate Google aplicados em H264 preservando profile ... ');
+    it('T2: aplica parâmetros de bitrate Google em H264 preservando profile-level-id', async () => {
+        const { optimizeSDP } = await loadSdpModule();
         const optimized = optimizeSDP(SAMPLE_SDP_CHROME);
         const lines = optimized.split('\r\n');
 
-        const h264Fmtp = lines.find(l => l.startsWith('a=fmtp:96'));
+        const h264Fmtp = lines.find((l) => l.startsWith('a=fmtp:96'));
         assert.ok(h264Fmtp, 'Deveria existir uma linha a=fmtp:96');
         assert.ok(h264Fmtp.includes('x-google-min-bitrate=400'), 'Deveria conter x-google-min-bitrate=400');
         assert.ok(h264Fmtp.includes('x-google-start-bitrate=1500'), 'Deveria conter x-google-start-bitrate=1500');
         assert.ok(h264Fmtp.includes('x-google-max-bitrate=6000'), 'Deveria conter x-google-max-bitrate=6000');
         assert.ok(h264Fmtp.includes('profile-level-id=42e01f'), 'profile-level-id original deveria ser preservado');
-        console.log('PASSOU');
-    } catch (err) {
-        failures++;
-        console.log('FALHOU');
-        console.error('    Detalhe:', err.message);
-    }
+    });
 
-    // Teste 3: Criação de a=fmtp quando codec (VP8 / Opus) não tem fmtp original
-    try {
-        process.stdout.write('  [Teste] T3: Injeção de a=fmtp para Opus e VP8 quando ausentes originalmente ... ');
+    it('T3: injeta a=fmtp para Opus e VP8 quando ausentes originalmente', async () => {
+        const { optimizeSDP } = await loadSdpModule();
         const optimized = optimizeSDP(SAMPLE_SDP_NO_FMTP);
         const lines = optimized.split('\r\n');
 
-        const opusFmtp = lines.find(l => l.startsWith('a=fmtp:111'));
+        const opusFmtp = lines.find((l) => l.startsWith('a=fmtp:111'));
         assert.ok(opusFmtp, 'Deveria injetar a=fmtp:111 para Opus');
         assert.ok(opusFmtp.includes('stereo=1'), 'Linha Opus injetada deve ter stereo=1');
 
-        const vp8Fmtp = lines.find(l => l.startsWith('a=fmtp:98'));
+        const vp8Fmtp = lines.find((l) => l.startsWith('a=fmtp:98'));
         assert.ok(vp8Fmtp, 'Deveria injetar a=fmtp:98 para VP8');
         assert.ok(vp8Fmtp.includes('x-google-max-bitrate=6000'), 'Linha VP8 injetada deve ter x-google-max-bitrate=6000');
-        console.log('PASSOU');
-    } catch (err) {
-        failures++;
-        console.log('FALHOU');
-        console.error('    Detalhe:', err.message);
-    }
+    });
 
-    // Teste 4: Limites de largura de banda na seção de vídeo (b=AS e b=TIAS) sem duplicação
-    try {
-        process.stdout.write('  [Teste] T4: Limites b=AS:6000 e b=TIAS:6000000 presentes sem duplicações ... ');
+    it('T4: inclui limites b=AS:6000 e b=TIAS:6000000 sem duplicações', async () => {
+        const { optimizeSDP } = await loadSdpModule();
         const optimized = optimizeSDP(SAMPLE_SDP_CHROME);
         const lines = optimized.split('\r\n');
 
-        const asCount = lines.filter(l => l === 'b=AS:6000').length;
-        const tiasCount = lines.filter(l => l === 'b=TIAS:6000000').length;
+        const asCount = lines.filter((l) => l === 'b=AS:6000').length;
+        const tiasCount = lines.filter((l) => l === 'b=TIAS:6000000').length;
 
         assert.strictEqual(asCount, 1, 'Deveria existir exatamente 1 linha b=AS:6000');
         assert.strictEqual(tiasCount, 1, 'Deveria existir exatamente 1 linha b=TIAS:6000000');
-        console.log('PASSOU');
-    } catch (err) {
-        failures++;
-        console.log('FALHOU');
-        console.error('    Detalhe:', err.message);
-    }
+    });
 
-    // Teste 5: Idempotência (executar optimizeSDP duas vezes seguidas)
-    try {
-        process.stdout.write('  [Teste] T5: Idempotência de optimizeSDP(optimizeSDP(sdp)) ... ');
+    it('T5: garante idempotência ao executar optimizeSDP duas vezes seguidas', async () => {
+        const { optimizeSDP } = await loadSdpModule();
         const pass1 = optimizeSDP(SAMPLE_SDP_CHROME);
         const pass2 = optimizeSDP(pass1);
 
         assert.strictEqual(pass1, pass2, 'Segunda execução deve produzir saída idêntica à primeira');
-        console.log('PASSOU');
-    } catch (err) {
-        failures++;
-        console.log('FALHOU');
-        console.error('    Detalhe:', err.message);
-    }
+    });
 
-    // Teste 6: Ordem de codecs de vídeo prioriza VP8 -> VP9 antes de H264 (evitando OpenH264 em CPU)
-    try {
-        process.stdout.write('  [Teste] T6: optimizeSDP prioriza VP8 e VP9 antes de H264 na linha m=video ... ');
+    it('T6: prioriza VP8 e VP9 antes de H264 na linha m=video', async () => {
+        const { optimizeSDP } = await loadSdpModule();
         const optimized = optimizeSDP(SAMPLE_SDP_CHROME);
-        const mVideoLine = optimized.split('\r\n').find(l => l.startsWith('m=video'));
+        const mVideoLine = optimized.split('\r\n').find((l) => l.startsWith('m=video'));
         assert.ok(mVideoLine, 'Deveria existir linha m=video');
         const payloads = mVideoLine.split(' ').slice(3);
         assert.deepStrictEqual(payloads, ['98', '100', '96'], 'Ordem esperada em m=video: VP8 (98), VP9 (100), H264 (96)');
-        console.log('PASSOU');
-    } catch (err) {
-        failures++;
-        console.log('FALHOU');
-        console.error('    Detalhe:', err.message);
-    }
-
-    console.log('\n===============================================================');
-    if (failures > 0) {
-        console.log(`  ❌ Resultado: ${failures} falhas encontradas.`);
-        console.log('===============================================================\n');
-        process.exit(1);
-    } else {
-        console.log('  ✅ Resultado: Todos os testes passaram com sucesso.');
-        console.log('===============================================================\n');
-        process.exit(0);
-    }
-}
-
-runTests();
+    });
+});

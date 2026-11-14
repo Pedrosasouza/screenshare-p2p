@@ -11,22 +11,14 @@ export function registerFullscreenChangeHandler(handler) {
 
 
 function notifyFullscreenChange() {
-
     if (typeof fullscreenChangeCallback === 'function') {
-
         fullscreenChangeCallback();
-
-    } else if (typeof updateBackgroundTracksOptimization === 'function') {
-
-        updateBackgroundTracksOptimization();
-
     }
-
 }
 
 
 
-export function disposeTileElement(tileEl) {
+export function disposeTileElement(tileEl, documentObj = (typeof document !== 'undefined' ? document : null)) {
     if (!tileEl) return;
     if (typeof tileEl._cleanupTapUnmute === 'function') {
         tileEl._cleanupTapUnmute();
@@ -37,15 +29,15 @@ export function disposeTileElement(tileEl) {
     if (videoEl) {
         videoEl.srcObject = null;
     }
-    if (typeof document !== 'undefined' && document.fullscreenElement === tileEl && typeof document.exitFullscreen === 'function') {
-        Promise.resolve(document.exitFullscreen()).catch(() => {});
+    if (documentObj && documentObj.fullscreenElement === tileEl && typeof documentObj.exitFullscreen === 'function') {
+        Promise.resolve(documentObj.exitFullscreen()).catch(() => {});
     }
     if (typeof tileEl.remove === 'function') {
         tileEl.remove();
     }
 }
 
-export function toggleTileFullscreen(tile, video) {
+export function toggleTileFullscreen(tile, video, documentObj = (typeof document !== 'undefined' ? document : null)) {
     if (!tile) return;
 
     // 1. If currently in pseudo-fullscreen, exit it
@@ -53,18 +45,17 @@ export function toggleTileFullscreen(tile, video) {
         tile.classList.remove('pseudo-fullscreen');
         const exitBtn = tile.querySelector('.btn-exit-pseudo-fs');
         if (exitBtn) exitBtn.remove();
-        if (typeof notifyFullscreenChange === 'function') notifyFullscreenChange();
-        else if (typeof updateBackgroundTracksOptimization === 'function') updateBackgroundTracksOptimization();
+        notifyFullscreenChange();
         return;
     }
 
     // 2. If native document fullscreen is active, exit it
-    if (document.fullscreenElement || document.webkitFullscreenElement) {
-        if (document.exitFullscreen) {
-            Promise.resolve(document.exitFullscreen()).catch(() => {});
-        } else if (document.webkitExitFullscreen) {
+    if (documentObj && (documentObj.fullscreenElement || documentObj.webkitFullscreenElement)) {
+        if (documentObj.exitFullscreen) {
+            Promise.resolve(documentObj.exitFullscreen()).catch(() => {});
+        } else if (documentObj.webkitExitFullscreen) {
             try {
-                Promise.resolve(document.webkitExitFullscreen()).catch(() => {});
+                Promise.resolve(documentObj.webkitExitFullscreen()).catch(() => {});
             } catch (_) {}
         }
         return;
@@ -86,24 +77,23 @@ export function toggleTileFullscreen(tile, video) {
         try {
             Promise.resolve(req.call(tile)).catch(err => {
                 console.warn('[FS] Native requestFullscreen rejected, falling back to pseudo:', err);
-                enterPseudoFullscreen(tile);
+                enterPseudoFullscreen(tile, documentObj);
             });
         } catch (err) {
             console.warn('[FS] Native requestFullscreen threw synchronously, falling back to pseudo:', err);
-            enterPseudoFullscreen(tile);
+            enterPseudoFullscreen(tile, documentObj);
         }
     } else {
         // 5. Fallback: Pseudo-fullscreen
-        enterPseudoFullscreen(tile);
+        enterPseudoFullscreen(tile, documentObj);
     }
 }
 
-export function enterPseudoFullscreen(tile) {
+export function enterPseudoFullscreen(tile, documentObj = (typeof document !== 'undefined' ? document : null)) {
     tile.classList.add('pseudo-fullscreen');
-    if (typeof notifyFullscreenChange === 'function') notifyFullscreenChange();
-    else if (typeof updateBackgroundTracksOptimization === 'function') updateBackgroundTracksOptimization();
-    if (!tile.querySelector('.btn-exit-pseudo-fs')) {
-        const exitBtn = document.createElement('button');
+    notifyFullscreenChange();
+    if (!tile.querySelector('.btn-exit-pseudo-fs') && documentObj && typeof documentObj.createElement === 'function') {
+        const exitBtn = documentObj.createElement('button');
         exitBtn.type = 'button';
         exitBtn.className = 'btn-exit-pseudo-fs';
         exitBtn.innerHTML = '<i class="fa-solid fa-xmark"></i>';
@@ -115,16 +105,15 @@ export function enterPseudoFullscreen(tile) {
             e.stopPropagation();
             tile.classList.remove('pseudo-fullscreen');
             exitBtn.remove();
-            if (typeof notifyFullscreenChange === 'function') notifyFullscreenChange();
-            else if (typeof updateBackgroundTracksOptimization === 'function') updateBackgroundTracksOptimization();
+            notifyFullscreenChange();
         });
         tile.appendChild(exitBtn);
     }
 }
 
-export function showTapToUnmuteBadge(tile, video) {
-    if (!tile || tile.querySelector('.tap-unmute-badge')) return;
-    const badge = document.createElement('div');
+export function showTapToUnmuteBadge(tile, video, documentObj = (typeof document !== 'undefined' ? document : null)) {
+    if (!tile || tile.querySelector('.tap-unmute-badge') || !documentObj || typeof documentObj.createElement !== 'function') return;
+    const badge = documentObj.createElement('div');
     badge.className = 'tap-unmute-badge';
     badge.innerHTML = '<i class="fa-solid fa-volume-xmark"></i> Toque para ativar o som';
     badge.style.cssText = `

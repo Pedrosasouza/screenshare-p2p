@@ -11,7 +11,7 @@ export function getVideoConstraints(resolution = '1080p', fps = 60) {
     };
 }
 
-export function getMaxBitrateForPeerCount(count = (typeof peers !== 'undefined' ? peers.size : 1), resolution = (typeof selectedVideoResolution !== 'undefined' ? selectedVideoResolution : '1080p'), fps = (typeof selectedVideoFps !== 'undefined' ? selectedVideoFps : 60)) {
+export function getMaxBitrateForPeerCount(count = 1, resolution = '1080p', fps = 60) {
     const is720p = resolution === '720p';
     const is30fps = Number(fps) === 30;
 

@@ -1,80 +1,138 @@
-const fs = require('fs');
-const path = require('path');
-const assert = require('assert');
+const { describe, it } = require('node:test');
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
+const { createMockDocument, createMockElement } = require('./helpers/mock-dom');
+const { createMockPeerConnection } = require('./helpers/mock-webrtc');
 
-async function runTests() {
-    console.log('\n===============================================================');
-    console.log('  🧪 SUÍTE DE TESTES: NOTIFICAÇÃO E CHIME DE PRESENÇA (JOIN/LEAVE)');
-    console.log('===============================================================\n');
+describe('Notificação e chime de presença (join/leave)', () => {
+    it('T1: playPresenceChime utiliza AudioContext e oscilador para join/leave', async () => {
+        const { playPresenceChime } = await import(
+            pathToFileURL(path.resolve(__dirname, '../public/js/modules/ui-feedback.js')).href
+        );
 
-    let failures = 0;
+        const oscCalls = [];
+        const gainCalls = [];
+        let createdCtx = 0;
 
-    const appJsPath = path.resolve(__dirname, '../public/app.js');
-    const { loadClientBundleSource } = require('./helpers/client-source');
-    const appJs = loadClientBundleSource();
-    // Teste 1: Presença da função playPresenceChime com Web Audio API
-    process.stdout.write('  [Teste] T1: public/app.js implementa playPresenceChime com AudioContext ... ');
-    const hasChimeFunc = appJs.includes('function playPresenceChime(');
-    const usesAudioContext = appJs.includes('AudioContext') && appJs.includes('createOscillator');
+        class FakeAudioContext {
+            constructor() {
+                createdCtx += 1;
+                this.state = 'running';
+                this.currentTime = 1.0;
+                this.destination = {};
+            }
+            createOscillator() {
+                return {
+                    type: '',
+                    frequency: {
+                        setValueAtTime: (freq, t) => oscCalls.push({ op: 'set', freq, t }),
+                        exponentialRampToValueAtTime: (freq, t) => oscCalls.push({ op: 'ramp', freq, t })
+                    },
+                    connect: () => {},
+                    start: () => oscCalls.push({ op: 'start' }),
+                    stop: () => oscCalls.push({ op: 'stop' })
+                };
+            }
+            createGain() {
+                return {
+                    gain: {
+                        setValueAtTime: (val, t) => gainCalls.push({ op: 'set', val, t }),
+                        exponentialRampToValueAtTime: (val, t) => gainCalls.push({ op: 'ramp', val, t })
+                    },
+                    connect: () => {}
+                };
+            }
+        }
 
-    if (hasChimeFunc && usesAudioContext) {
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } else {
-        console.log('\x1b[31mFALHOU (playPresenceChime ausente ou não utiliza AudioContext)\x1b[0m');
-        failures++;
-    }
+        const prevWin = global.window;
+        global.window = { AudioContext: FakeAudioContext };
+        try {
+            playPresenceChime('join');
+            playPresenceChime('leave');
 
-    // Teste 2: socket.on('user-joined') dispara showToast e chime de entrada
-    process.stdout.write('  [Teste] T2: socket.on(\'user-joined\') emite toast e chime de entrada ... ');
-    const userJoinedIndex = appJs.indexOf("socket.on('user-joined'");
-    let joinedHasToast = false;
-    let joinedHasChime = false;
+            assert.strictEqual(createdCtx, 1, 'Deve reutilizar _presenceAudioCtx');
+            assert.strictEqual(oscCalls.filter((c) => c.op === 'start').length, 2);
+            assert.strictEqual(oscCalls.filter((c) => c.op === 'stop').length, 2);
+            assert.strictEqual(oscCalls[0].freq, 440);
+            assert.strictEqual(oscCalls[1].freq, 587.33);
+            assert.ok(gainCalls.length >= 4);
+        } finally {
+            if (prevWin === undefined) delete global.window;
+            else global.window = prevWin;
+        }
+    });
 
-    if (userJoinedIndex !== -1) {
-        const handlerBlock = appJs.substring(userJoinedIndex, userJoinedIndex + 500);
-        joinedHasToast = handlerBlock.includes('showToast(') && handlerBlock.includes('entrou na sala');
-        joinedHasChime = handlerBlock.includes("playPresenceChime('join')") || handlerBlock.includes('playPresenceChime("join")');
-    }
+    it('T2 & T3: webrtc-mesh handleUserJoined e handleUserLeft disparam showToast e playPresenceChime', async () => {
+        const { createWebRtcMesh } = await import(
+            pathToFileURL(path.resolve(__dirname, '../public/js/modules/webrtc-mesh.js')).href
+        );
 
-    if (joinedHasToast && joinedHasChime) {
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } else {
-        console.log('\x1b[31mFALHOU (user-joined não aciona showToast ou playPresenceChime)\x1b[0m');
-        failures++;
-    }
+        const toasts = [];
+        const chimes = [];
+        const doc = createMockDocument();
+        const win = { addEventListener: () => {} };
+        const state = {
+            currentUserName: 'Host',
+            isSharing: false,
+            localStream: null,
+            activeShareGeneration: 0,
+            currentRoomId: 'sala-teste'
+        };
+        const dom = {
+            streamGrid: createMockElement('div', { id: 'streamGrid' }),
+            memberCountEl: createMockElement('span', { id: 'memberCount' })
+        };
 
-    // Teste 3: socket.on('user-left') dispara showToast e chime de saída
-    process.stdout.write('  [Teste] T3: socket.on(\'user-left\') emite toast e chime de saída ... ');
-    const userLeftIndex = appJs.indexOf("socket.on('user-left'");
-    let leftHasToast = false;
-    let leftHasChime = false;
+        class MockPC {
+            constructor() {
+                return createMockPeerConnection();
+            }
+        }
 
-    if (userLeftIndex !== -1) {
-        const handlerBlock = appJs.substring(userLeftIndex, userLeftIndex + 500);
-        leftHasToast = handlerBlock.includes('showToast(') && handlerBlock.includes('saiu da sala');
-        leftHasChime = handlerBlock.includes("playPresenceChime('leave')") || handlerBlock.includes('playPresenceChime("leave")');
-    }
+        let mesh;
+        mesh = createWebRtcMesh({
+            state,
+            dom,
+            getSocket: () => ({ id: 'self-id', emit: () => {} }),
+            getQosMonitor: () => ({ configureSenderParams: () => {}, updateSendersForActivePeers: () => {} }),
+            getGrid: () => ({
+                updateMemberCount: () => {},
+                updateGridState: () => {},
+                updateEchoWarningVisibility: () => {},
+                updatePeerUserName: (id, name) => {
+                    const p = mesh && mesh.peers.get(id);
+                    if (p) p.userName = name;
+                },
+                createStreamTile: () => {},
+                startTilePlayback: () => {}
+            }),
+            getScreenShare: () => ({ invalidateGeneration: () => {}, stopScreenShare: () => {} }),
+            getRoomModal: () => ({}),
+            getServerUrl: () => 'http://127.0.0.1:0',
+            rtcConfig: { iceServers: [] },
+            refreshIceServers: async () => {},
+            scheduleIceRefreshTimer: () => {},
+            registerFullscreenChangeHandler: () => {},
+            saveSessionRoomPassword: () => {},
+            clearSessionRoomPassword: () => {},
+            showToast: (msg, type) => toasts.push({ msg, type }),
+            playPresenceChime: (kind) => chimes.push(kind),
+            RTCPeerConnectionCtor: MockPC,
+            documentObj: doc,
+            windowObj: win
+        });
 
-    if (leftHasToast && leftHasChime) {
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } else {
-        console.log('\x1b[31mFALHOU (user-left não aciona showToast ou playPresenceChime)\x1b[0m');
-        failures++;
-    }
+        try {
+            mesh.handleUserJoined({ socketId: 'peer-1', userName: 'Alice', memberCount: 2 });
+            assert.ok(toasts.some((t) => t.msg.includes('Alice') && t.msg.includes('entrou na sala')));
+            assert.deepStrictEqual(chimes, ['join']);
 
-    console.log('\n===============================================================');
-    if (failures === 0) {
-        console.log('  ✅ Resultado: Todos os testes de notificação de presença passaram.');
-        console.log('===============================================================\n');
-        process.exit(0);
-    } else {
-        console.log(`  ❌ Resultado: ${failures} validação(ões) falharam conforme esperado no código antigo.`);
-        console.log('===============================================================\n');
-        process.exit(1);
-    }
-}
-
-runTests().catch(err => {
-    console.error('Erro inesperado no teste:', err);
-    process.exit(1);
+            mesh.handleUserLeft({ socketId: 'peer-1', memberCount: 1 });
+            assert.ok(toasts.some((t) => t.msg.includes('Alice') && t.msg.includes('saiu da sala')));
+            assert.deepStrictEqual(chimes, ['join', 'leave']);
+        } finally {
+            mesh.cleanupRoomState({ keepPassword: true });
+        }
+    });
 });

@@ -1,231 +1,255 @@
-const fs = require('fs');
-const path = require('path');
-const vm = require('vm');
-const assert = require('assert');
+'use strict';
 
-// Extrai isValidSignal diretamente de server.js para teste isolado
-function loadServerHelpers() {
-    const serverJsPath = path.resolve(__dirname, '../server.js');
-    const serverJs = fs.readFileSync(serverJsPath, 'utf8');
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 
-    const fnMatch = serverJs.match(/function\s+isValidSignal\s*\([\s\S]*?\n\}/);
-    if (!fnMatch) {
-        throw new Error('Não foi possível localizar isValidSignal em server.js');
-    }
+const { isValidSignal } = require('../src/server/signaling');
+const {
+    MockMediaStream,
+    MockRTCSessionDescription,
+    MockRTCIceCandidate,
+    createMockTrack,
+    createMockSender,
+    createMockPeerConnection
+} = require('./helpers/mock-webrtc');
+const { createMockElement, createMockDocument, createMockStorage } = require('./helpers/mock-dom');
 
-    const sandbox = {
-        isPlainObject: (obj) => obj !== null && typeof obj === 'object' && !Array.isArray(obj)
-    };
-    vm.createContext(sandbox);
-    const isValidSignal = vm.runInContext(`(${fnMatch[0]})`, sandbox);
-    return { isValidSignal };
+const ROOT_DIR = path.resolve(__dirname, '..');
+
+async function loadModules() {
+    const webrtcUrl = pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/webrtc-mesh.js')).href;
+    const shareUrl = pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/screen-share.js')).href;
+    const [webrtcMod, shareMod] = await Promise.all([import(webrtcUrl), import(shareUrl)]);
+    return { ...webrtcMod, ...shareMod };
 }
 
-// Extrai e prepara o ambiente para testar app.js
-function loadAppFunctions() {
-    const appJsPath = path.resolve(__dirname, '../public/app.js');
-    const { loadClientBundleSource } = require('./helpers/client-source');
-    const appJs = loadClientBundleSource();
-    const addLocalTracksMatch = appJs.match(/function\s+addLocalTracksToPC\s*\([\s\S]*?\n\}/);
-    const configureSenderParamsMatch = appJs.match(/function\s+configureSenderParams\s*\([\s\S]*?\n\}/);
-    const getMaxBitrateMatch = appJs.match(/function\s+getMaxBitrateForPeerCount\s*\([\s\S]*?\n\}/);
-
-    if (!addLocalTracksMatch) {
-        throw new Error('Não foi possível localizar addLocalTracksToPC em public/app.js');
-    }
-
-    const helpers = {};
-    const sandbox = {
-        selectedVideoResolution: '1080p',
+function createMeshFixture(createWebRtcMesh, options = {}) {
+    const emitted = [];
+    const socket = {
+        id: options.myId || 'peer-a',
+        emit(event, data) {
+            emitted.push({ event, data });
+        }
+    };
+    const state = {
+        myId: socket.id,
+        roomId: 'room-1',
+        localStream: options.localStream || null,
         selectedVideoFps: 60,
-        peers: new Map(),
-        localStream: null,
-        configureSenderParams: () => {}
+        contentHintMode: 'motion'
     };
-    vm.createContext(sandbox);
+    const streamGrid = createMockElement('div', { id: 'streamGrid' });
+    const dom = {
+        streamGrid,
+        btnStartShare: createMockElement('button', { id: 'btnStartShare' }),
+        btnStopShare: createMockElement('button', { id: 'btnStopShare' }),
+        btnQualityToggle: createMockElement('button', { id: 'btnQualityToggle' })
+    };
+    const doc = createMockDocument({
+        streamGrid,
+        btnStartShare: dom.btnStartShare,
+        btnStopShare: dom.btnStopShare,
+        btnQualityToggle: dom.btnQualityToggle
+    });
 
-    if (getMaxBitrateMatch) {
-        try {
-            sandbox.getMaxBitrateForPeerCount = vm.runInContext(`(${getMaxBitrateMatch[0]})`, sandbox);
-        } catch (_) {}
-    }
-    if (configureSenderParamsMatch) {
-        try {
-            sandbox.configureSenderParams = vm.runInContext(`(${configureSenderParamsMatch[0]})`, sandbox);
-        } catch (_) {}
-    }
-    if (addLocalTracksMatch) {
-        helpers.addLocalTracksToPC = vm.runInContext(`(${addLocalTracksMatch[0]})`, sandbox);
+    class FakePeerConnection {
+        constructor() {
+            return options.pcFactory ? options.pcFactory() : createMockPeerConnection();
+        }
     }
 
-    helpers.sandbox = sandbox;
-    helpers.appJs = appJs;
-    return helpers;
+    const mesh = createWebRtcMesh({
+        state,
+        dom,
+        getSocket: () => socket,
+        getQosMonitor: () => ({ configureSenderParams: () => {} }),
+        getGrid: () => ({
+            updateMemberCount: () => {},
+            updateGridState: () => {},
+            updateEchoWarningVisibility: () => {},
+            updatePeerUserName: () => {},
+            createStreamTile: () => createMockElement('div'),
+            startTilePlayback: () => {}
+        }),
+        getScreenShare: () => ({ invalidateGeneration: () => {}, stopScreenShare: () => {} }),
+        getRoomModal: () => null,
+        getServerUrl: () => 'http://localhost:3000',
+        rtcConfig: { iceServers: [] },
+        refreshIceServers: async () => {},
+        scheduleIceRefreshTimer: () => {},
+        registerFullscreenChangeHandler: () => {},
+        saveSessionRoomPassword: () => {},
+        clearSessionRoomPassword: () => {},
+        showToast: () => {},
+        playPresenceChime: () => {},
+        RTCPeerConnectionCtor: FakePeerConnection,
+        RTCSessionDescriptionCtor: MockRTCSessionDescription,
+        RTCIceCandidateCtor: MockRTCIceCandidate,
+        MediaStreamCtor: MockMediaStream,
+        documentObj: doc,
+        windowObj: { addEventListener: () => {}, removeEventListener: () => {} },
+        storage: createMockStorage()
+    });
+
+    return { mesh, state, socket, emitted, dom, doc };
 }
 
-async function runTDDSuites() {
-    console.log('\n===============================================================');
-    console.log('  🧪 TDD: KEYFRAME RECOVERY & TRANSCEIVER REUSE (RED PHASE)');
-    console.log('===============================================================\n');
+test('isValidSignal accepts request-keyframe and offer while rejecting invalid payloads', () => {
+    assert.equal(isValidSignal({ type: 'request-keyframe' }), true);
+    assert.equal(isValidSignal({ type: 'offer', sdp: 'v=0...' }), true);
+    assert.equal(isValidSignal({ type: 'invalid-type' }), false);
+    assert.equal(isValidSignal({ foo: 'bar' }), false);
+});
 
-    let failures = 0;
+test('addLocalTracksToPC reuses existing empty video transceiver/sender via replaceTrack without duplicate addTrack', async () => {
+    const { createWebRtcMesh } = await loadModules();
+    const vTrack = createMockTrack('video', 'v-live');
+    const localStream = new MockMediaStream([vTrack]);
 
-    // -------------------------------------------------------------
-    // Teste 1: server.js deve aceitar sinal { type: 'request-keyframe' }
-    // -------------------------------------------------------------
-    process.stdout.write('  [Teste] T1: server.js isValidSignal autoriza { type: "request-keyframe" } ... ');
-    try {
-        const { isValidSignal } = loadServerHelpers();
+    const { mesh } = createMeshFixture(createWebRtcMesh, { localStream });
 
-        const kfSignal = { type: 'request-keyframe' };
-        const validSdpOffer = { type: 'offer', sdp: 'v=0...' };
-        const invalidSignal = { type: 'invalid-type' };
-        const fakeObject = { foo: 'bar' };
+    const sender = createMockSender(null, { _kind: 'video' });
+    const transceivers = [
+        {
+            sender,
+            receiver: { track: { kind: 'video' } },
+            direction: 'recvonly'
+        }
+    ];
+    let addTrackCount = 0;
+    const pc = createMockPeerConnection({ senders: [sender], transceivers });
+    const origAddTrack = pc.addTrack.bind(pc);
+    pc.addTrack = (track, stream) => {
+        addTrackCount += 1;
+        return origAddTrack(track, stream);
+    };
 
-        assert.strictEqual(isValidSignal(kfSignal), true, 'Sinal request-keyframe DEVE ser válido');
-        assert.strictEqual(isValidSignal(validSdpOffer), true, 'SDP offer normal deve continuar válido');
-        assert.strictEqual(isValidSignal(invalidSignal), false, 'Tipos arbitrários devem ser rejeitados');
-        assert.strictEqual(isValidSignal(fakeObject), false, 'Objetos sem type/ice devem ser rejeitados');
+    mesh.addLocalTracksToPC(pc);
 
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-        failures++;
-    }
+    assert.equal(addTrackCount, 0, 'Must reuse existing transceiver/sender instead of calling addTrack');
+    assert.equal(sender.track, vTrack, 'replaceTrack must bind the local video track');
+    assert.equal(sender.replaceHistory.length, 1);
+    assert.equal(transceivers[0].direction, 'sendrecv', 'recvonly transceiver must transition to sendrecv');
+});
 
-    // -------------------------------------------------------------
-    // Teste 2: addLocalTracksToPC deve REUTILIZAR sender existente (replaceTrack) em vez de addTrack
-    // -------------------------------------------------------------
-    process.stdout.write('  [Teste] T2: addLocalTracksToPC reutiliza sender existente sem duplicar canais ... ');
-    try {
-        const { addLocalTracksToPC, sandbox } = loadAppFunctions();
+test('stopScreenShare clears tracks with replaceTrack(null) instead of removeTrack', async () => {
+    const { createWebRtcMesh, createScreenShareController } = await loadModules();
+    const screenShareSource = fs.readFileSync(path.join(ROOT_DIR, 'public/js/modules/screen-share.js'), 'utf8');
+    assert.equal(screenShareSource.includes('removeTrack(sender)'), false, 'screen-share must not call removeTrack(sender)');
 
-        const videoTrack = { id: 'v-track-1', kind: 'video' };
-        sandbox.localStream = {
-            getTracks: () => [videoTrack]
-        };
+    const vTrack = createMockTrack('video', 'v1');
+    const localStream = new MockMediaStream([vTrack]);
+    const { state, socket, emitted, dom, doc } = createMeshFixture(createWebRtcMesh, { localStream });
 
-        let replaceTrackCalls = 0;
-        let addTrackCalls = 0;
-        let lastReplacedTrack = null;
+    const sender = createMockSender(vTrack);
+    const transceiver = { sender, receiver: { track: { kind: 'video' } }, direction: 'sendrecv' };
+    const pc = createMockPeerConnection({ senders: [sender], transceivers: [transceiver] });
+    const peers = new Map([['peer-b', { pc }]]);
+    const offersSent = [];
 
-        // Mock de Sender que já existe no PeerConnection, mas cuja trilha estava nula (após stopScreenShare)
-        const mockExistingSender = {
-            track: null,
-            dtlsTransport: {}, // Conexão de transporte estabelecida
-            replaceTrack: async (track) => {
-                replaceTrackCalls++;
-                lastReplacedTrack = track;
+    const controller = createScreenShareController({
+        state,
+        dom,
+        getSocket: () => socket,
+        getPeers: () => peers,
+        getWebRtc: () => ({
+            sendOffer: async (peerId) => {
+                offersSent.push(peerId);
             }
-        };
+        }),
+        getGrid: () => ({ updateGridState: () => {} }),
+        getQosMonitor: () => ({ stopQualityMonitor: () => {} }),
+        startExcludeDiscordCapture: async () => {},
+        startAppAudioCapture: async () => {},
+        stopAppAudioCapture: () => {},
+        showToast: () => {},
+        documentObj: doc,
+        navigatorObj: {},
+        MediaStreamCtor: MockMediaStream
+    });
 
-        const mockPC = {
-            getSenders: () => [mockExistingSender],
-            addTrack: (track, stream) => {
-                addTrackCalls++;
-                return { track };
-            }
-        };
+    await controller.stopScreenShare();
 
-        addLocalTracksToPC(mockPC);
+    assert.equal(sender.track, null, 'sender track should be cleared via replaceTrack(null)');
+    assert.deepEqual(sender.replaceHistory, [null]);
+    assert.equal(transceiver.direction, 'recvonly');
+    assert.deepEqual(offersSent, ['peer-b']);
+    assert.ok(emitted.some((e) => e.event === 'stream-state' && e.data.state === 'stopped'));
+});
 
-        assert.strictEqual(replaceTrackCalls, 1, 'Deve chamar replaceTrack no sender existente');
-        assert.strictEqual(lastReplacedTrack, videoTrack, 'replaceTrack deve receber a nova trilha de vídeo');
-        assert.strictEqual(addTrackCalls, 0, 'NÃO deve chamar addTrack quando sender compatível já existe (evita duplicação no SDP)');
+test('handleSignal request-keyframe forces IDR via videoSender.replaceTrack(videoTrack)', async () => {
+    const { createWebRtcMesh } = await loadModules();
+    const vTrack = createMockTrack('video', 'v-idr');
+    const localStream = new MockMediaStream([vTrack]);
+    const sender = createMockSender(vTrack);
+    const pc = createMockPeerConnection({ senders: [sender] });
 
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-        failures++;
-    }
+    const { mesh } = createMeshFixture(createWebRtcMesh, {
+        localStream,
+        pcFactory: () => pc
+    });
 
-    // -------------------------------------------------------------
-    // Teste 3: stopScreenShare deve usar replaceTrack(null) em vez de removeTrack
-    // -------------------------------------------------------------
-    process.stdout.write('  [Teste] T3: public/app.js stopScreenShare usa replaceTrack(null) para não destruir transceivers ... ');
+    mesh.peers.set('peer-b', {
+        pc,
+        stream: new MockMediaStream(),
+        iceCandidateQueue: [],
+        isRemoteDescriptionSet: true,
+        _signalChain: Promise.resolve()
+    });
+
+    mesh.handleSignal({
+        senderId: 'peer-b',
+        signal: { type: 'request-keyframe' }
+    });
+    await mesh.peers.get('peer-b')._signalChain;
+
+    assert.equal(sender.replaceHistory.length, 1, 'request-keyframe must invoke replaceTrack on video sender');
+    assert.equal(sender.replaceHistory[0], vTrack);
+});
+
+test('ontrack video monitors 0-width frames and emits request-keyframe on black screen', async () => {
+    const { createWebRtcMesh } = await loadModules();
+    const { mesh, emitted } = createMeshFixture(createWebRtcMesh);
+
+    const origSetInterval = global.setInterval;
+    const origClearInterval = global.clearInterval;
+    let scheduledTick = null;
+    let cleared = false;
+    global.setInterval = (fn) => {
+        scheduledTick = fn;
+        return 777;
+    };
+    global.clearInterval = (id) => {
+        if (id === 777) cleared = true;
+    };
+
     try {
-        const { appJs } = loadAppFunctions();
+        const pc = mesh.getOrCreatePeerConnection('peer-b');
+        const peerObj = mesh.peers.get('peer-b');
+        const mockVideo = createMockElement('video');
+        mockVideo.videoWidth = 0;
+        const mockTile = createMockElement('div');
+        mockTile.querySelector = (sel) => (sel === 'video' ? mockVideo : null);
+        peerObj.tileEl = mockTile;
 
-        const stopScreenShareMatch = appJs.match(/function\s+stopScreenShare\s*\([\s\S]*?\n\}/);
-        assert.ok(stopScreenShareMatch, 'stopScreenShare deve existir em public/app.js');
-        const code = stopScreenShareMatch[0];
+        pc.ontrack({ track: createMockTrack('video', 'remote-v') });
+        assert.equal(typeof scheduledTick, 'function', 'Video ontrack should start keyframe watchdog interval');
 
+        scheduledTick();
         assert.ok(
-            code.includes('replaceTrack(null)') || code.includes('replaceTrack( null )'),
-            'stopScreenShare deve chamar sender.replaceTrack(null) para silenciar a trilha de forma limpa'
-        );
-        assert.ok(
-            !code.includes('removeTrack(sender)'),
-            'stopScreenShare NÃO deve chamar removeTrack(sender), pois cria senders zumbis no WebRTC'
+            emitted.some((e) => e.event === 'signal' && e.data.targetId === 'peer-b' && e.data.signal.type === 'request-keyframe'),
+            'Should emit request-keyframe when remote videoWidth === 0'
         );
 
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-        failures++;
+        mockVideo.videoWidth = 1280;
+        scheduledTick();
+        assert.equal(cleared, true, 'Watchdog should clear once videoWidth > 0');
+    } finally {
+        global.setInterval = origSetInterval;
+        global.clearInterval = origClearInterval;
+        mesh.removePeerConnection('peer-b');
     }
-
-    // -------------------------------------------------------------
-    // Teste 4: Transmissor escuta signal request-keyframe e força IDR frame via replaceTrack
-    // -------------------------------------------------------------
-    process.stdout.write('  [Teste] T4: public/app.js trata sinal request-keyframe com replaceTrack para IDR imediato ... ');
-    try {
-        const { appJs } = loadAppFunctions();
-
-        const signalHandlerMatch = appJs.match(/socket\.on\('signal'[\s\S]*?\n\}\);/);
-        assert.ok(signalHandlerMatch, 'Handler de socket.on("signal") deve existir em public/app.js');
-        const signalCode = signalHandlerMatch[0];
-
-        assert.ok(
-            signalCode.includes('request-keyframe'),
-            'socket.on("signal") deve conter verificação para signal.type === "request-keyframe"'
-        );
-        assert.ok(
-            signalCode.includes('replaceTrack'),
-            'Ao receber request-keyframe, deve forçar emissão de IDR frame via replaceTrack'
-        );
-
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-        failures++;
-    }
-
-    // -------------------------------------------------------------
-    // Teste 5: Receptor monitora videoWidth === 0 e emite request-keyframe
-    // -------------------------------------------------------------
-    process.stdout.write('  [Teste] T5: public/app.js receptor detecta videoWidth 0 e solicita keyframe automaticamente ... ');
-    try {
-        const { appJs } = loadAppFunctions();
-
-        assert.ok(
-            appJs.includes('request-keyframe'),
-            'public/app.js deve conter a lógica de emissão do sinal request-keyframe para o transmissor'
-        );
-        assert.ok(
-            appJs.includes('videoWidth'),
-            'public/app.js deve inspecionar videoWidth para identificar quando os frames ainda não foram decodificados'
-        );
-
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-        failures++;
-    }
-
-    console.log('\n===============================================================');
-    if (failures === 0) {
-        console.log('  ✅ Resultado: Todos os testes de TDD passaram.');
-        console.log('===============================================================\n');
-        process.exit(0);
-    } else {
-        console.log(`  ❌ Resultado: ${failures} teste(s) falharam (Fase RED esperada antes da implementação).`);
-        console.log('===============================================================\n');
-        process.exit(1);
-    }
-}
-
-runTDDSuites().catch(err => {
-    console.error('Erro de execução do teste TDD:', err);
-    process.exit(1);
 });

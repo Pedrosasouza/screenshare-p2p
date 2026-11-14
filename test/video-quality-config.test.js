@@ -1,171 +1,101 @@
-const fs = require('fs');
-const path = require('path');
-const vm = require('vm');
-const assert = require('assert');
+const { describe, it } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 
-function loadAppHelpers() {
-    const appJsPath = path.resolve(__dirname, '../public/app.js');
-    const { loadClientBundleSource } = require('./helpers/client-source');
-    const appJs = loadClientBundleSource();
-    const getVideoConstraintsMatch = appJs.match(/function\s+getVideoConstraints\s*\([\s\S]*?\n\}/);
-    const getMaxBitrateMatch = appJs.match(/function\s+getMaxBitrateForPeerCount\s*\([\s\S]*?\n\}/);
-    const configureSenderParamsMatch = appJs.match(/function\s+configureSenderParams\s*\([\s\S]*?\n\}/);
-
-    const helpers = {};
-    const sandbox = {
-        selectedVideoResolution: '1080p',
-        selectedVideoFps: 60,
-        peers: new Map()
-    };
-    vm.createContext(sandbox);
-
-    if (getVideoConstraintsMatch) {
-        try {
-            helpers.getVideoConstraints = vm.runInContext(`(${getVideoConstraintsMatch[0]})`, sandbox);
-        } catch (_) {}
-    }
-    if (getMaxBitrateMatch) {
-        try {
-            helpers.getMaxBitrateForPeerCount = vm.runInContext(`(${getMaxBitrateMatch[0]})`, sandbox);
-            sandbox.getMaxBitrateForPeerCount = helpers.getMaxBitrateForPeerCount;
-        } catch (_) {}
-    }
-    if (configureSenderParamsMatch) {
-        try {
-            helpers.configureSenderParams = vm.runInContext(`(${configureSenderParamsMatch[0]})`, sandbox);
-        } catch (_) {}
-    }
-
-    return helpers;
+async function loadModules() {
+    const qos = await import(pathToFileURL(path.resolve(__dirname, '../public/js/modules/qos.js')).href);
+    const qosMonitorMod = await import(pathToFileURL(path.resolve(__dirname, '../public/js/modules/qos-monitor.js')).href);
+    return { qos, qosMonitorMod };
 }
 
-async function runTests() {
-    console.log('\n===============================================================');
-    console.log('  🧪 SUÍTE DE TESTES: SELEÇÃO DE RESOLUÇÃO (720p/1080p) E FPS (30/60)');
-    console.log('===============================================================\n');
+describe('Seleção de resolução (720p/1080p) e FPS (30/60)', () => {
+    it('T1: getVideoConstraints mapeia resoluções e framerates corretamente', async () => {
+        const { qos } = await loadModules();
 
-    let failures = 0;
-    const helpers = loadAppHelpers();
+        const c1080_60 = qos.getVideoConstraints('1080p', 60);
+        assert.strictEqual(c1080_60.width.ideal, 1920);
+        assert.strictEqual(c1080_60.width.max, 1920);
+        assert.strictEqual(c1080_60.height.ideal, 1080);
+        assert.strictEqual(c1080_60.height.max, 1080);
+        assert.strictEqual(c1080_60.frameRate.ideal, 60);
+        assert.strictEqual(c1080_60.frameRate.max, 60);
 
-    // Teste 1: getVideoConstraints deve mapear 1080p/720p e 30/60fps
-    process.stdout.write('  [Teste] T1: getVideoConstraints mapeia resoluções e framerates corretamente ... ');
-    if (typeof helpers.getVideoConstraints !== 'function') {
-        console.log('\x1b[31mFALHOU (getVideoConstraints não está definida em public/app.js)\x1b[0m');
-        failures++;
-    } else {
-        try {
-            const c1080_60 = helpers.getVideoConstraints('1080p', 60);
-            assert.strictEqual(c1080_60.width.ideal, 1920);
-            assert.strictEqual(c1080_60.width.max, 1920);
-            assert.strictEqual(c1080_60.height.ideal, 1080);
-            assert.strictEqual(c1080_60.height.max, 1080);
-            assert.strictEqual(c1080_60.frameRate.ideal, 60);
-            assert.strictEqual(c1080_60.frameRate.max, 60);
+        const c720_30 = qos.getVideoConstraints('720p', 30);
+        assert.strictEqual(c720_30.width.ideal, 1280);
+        assert.strictEqual(c720_30.width.max, 1280);
+        assert.strictEqual(c720_30.height.ideal, 720);
+        assert.strictEqual(c720_30.height.max, 720);
+        assert.strictEqual(c720_30.frameRate.ideal, 30);
+        assert.strictEqual(c720_30.frameRate.max, 30);
 
-            const c720_30 = helpers.getVideoConstraints('720p', 30);
-            assert.strictEqual(c720_30.width.ideal, 1280);
-            assert.strictEqual(c720_30.width.max, 1280);
-            assert.strictEqual(c720_30.height.ideal, 720);
-            assert.strictEqual(c720_30.height.max, 720);
-            assert.strictEqual(c720_30.frameRate.ideal, 30);
-            assert.strictEqual(c720_30.frameRate.max, 30);
+        const c1080_30 = qos.getVideoConstraints('1080p', 30);
+        assert.strictEqual(c1080_30.height.ideal, 1080);
+        assert.strictEqual(c1080_30.frameRate.ideal, 30);
 
-            const c1080_30 = helpers.getVideoConstraints('1080p', 30);
-            assert.strictEqual(c1080_30.height.ideal, 1080);
-            assert.strictEqual(c1080_30.frameRate.ideal, 30);
+        const c720_60 = qos.getVideoConstraints('720p', 60);
+        assert.strictEqual(c720_60.height.ideal, 720);
+        assert.strictEqual(c720_60.frameRate.ideal, 60);
+    });
 
-            const c720_60 = helpers.getVideoConstraints('720p', 60);
-            assert.strictEqual(c720_60.height.ideal, 720);
-            assert.strictEqual(c720_60.frameRate.ideal, 60);
+    it('T2: getMaxBitrateForPeerCount adequa teto de bitrate por perfil', async () => {
+        const { qos } = await loadModules();
 
-            console.log('\x1b[32mPASSOU\x1b[0m');
-        } catch (err) {
-            console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-            failures++;
-        }
-    }
+        const b1080_60 = qos.getMaxBitrateForPeerCount(1, '1080p', 60);
+        const b1080_30 = qos.getMaxBitrateForPeerCount(1, '1080p', 30);
+        const b720_60 = qos.getMaxBitrateForPeerCount(1, '720p', 60);
+        const b720_30 = qos.getMaxBitrateForPeerCount(1, '720p', 30);
 
-    // Teste 2: getMaxBitrateForPeerCount escala conforme resolução e fps
-    process.stdout.write('  [Teste] T2: getMaxBitrateForPeerCount adequa teto de bitrate por perfil ... ');
-    if (typeof helpers.getMaxBitrateForPeerCount !== 'function') {
-        console.log('\x1b[31mFALHOU (getMaxBitrateForPeerCount não encontrada)\x1b[0m');
-        failures++;
-    } else {
-        try {
-            const b1080_60 = helpers.getMaxBitrateForPeerCount(1, '1080p', 60);
-            const b1080_30 = helpers.getMaxBitrateForPeerCount(1, '1080p', 30);
-            const b720_60 = helpers.getMaxBitrateForPeerCount(1, '720p', 60);
-            const b720_30 = helpers.getMaxBitrateForPeerCount(1, '720p', 30);
+        assert.strictEqual(b1080_60, 6000000, '1080p60 para 1 peer deve ser 6.0 Mbps');
+        assert.strictEqual(b1080_30, 4000000, '1080p30 para 1 peer deve ser 4.0 Mbps');
+        assert.strictEqual(b720_60, 2800000, '720p60 para 1 peer deve ser 2.8 Mbps');
+        assert.strictEqual(b720_30, 1800000, '720p30 para 1 peer deve ser 1.8 Mbps');
+        assert.ok(b720_30 < b1080_60, 'Perfil 720p30 deve alocar menos bitrate que 1080p60');
+    });
 
-            assert.strictEqual(b1080_60, 6000000, '1080p60 para 1 peer deve ser 6.0 Mbps');
-            assert.strictEqual(b1080_30, 4000000, '1080p30 para 1 peer deve ser 4.0 Mbps');
-            assert.strictEqual(b720_60, 2800000, '720p60 para 1 peer deve ser 2.8 Mbps');
-            assert.strictEqual(b720_30, 1800000, '720p30 para 1 peer deve ser 1.8 Mbps');
+    it('T3: public/index.html contém seletores de 1080p/720p e 60fps/30fps', () => {
+        const htmlPath = path.resolve(__dirname, '../public/index.html');
+        const html = fs.readFileSync(htmlPath, 'utf8');
 
-            // 720p30 deve ser menor que 1080p60
-            assert(b720_30 < b1080_60, 'Perfil 720p30 deve alocar menos bitrate que 1080p60');
+        assert.ok(html.includes('name="videoResolution"') && html.includes('value="1080p"'));
+        assert.ok(html.includes('name="videoResolution"') && html.includes('value="720p"'));
+        assert.ok(html.includes('name="videoFps"') && html.includes('value="60"'));
+        assert.ok(html.includes('name="videoFps"') && html.includes('value="30"'));
+    });
 
-            console.log('\x1b[32mPASSOU\x1b[0m');
-        } catch (err) {
-            console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-            failures++;
-        }
-    }
+    it('T4: alocação multi-peer e degradationPreference=maintain-framerate no modo fluent', async () => {
+        const { qos, qosMonitorMod } = await loadModules();
 
-    // Teste 3: Presença de seletores no DOM (public/index.html)
-    process.stdout.write('  [Teste] T3: public/index.html contém seletores de 1080p/720p e 60fps/30fps ... ');
-    const htmlPath = path.resolve(__dirname, '../public/index.html');
-    const html = fs.readFileSync(htmlPath, 'utf8');
+        const b2Peers = qos.getMaxBitrateForPeerCount(2, '1080p', 60);
+        const b3Peers = qos.getMaxBitrateForPeerCount(3, '1080p', 60);
 
-    const hasRes1080 = html.includes('name="videoResolution"') && html.includes('value="1080p"');
-    const hasRes720 = html.includes('name="videoResolution"') && html.includes('value="720p"');
-    const hasFps60 = html.includes('name="videoFps"') && html.includes('value="60"');
-    const hasFps30 = html.includes('name="videoFps"') && html.includes('value="30"');
+        assert.ok(b2Peers <= 2500000, `Bitrate para 2 peers (${b2Peers}) deve ser <= 2.5 Mbps para não saturar upload`);
+        assert.ok(b3Peers <= 1800000, `Bitrate para 3 peers (${b3Peers}) deve ser <= 1.8 Mbps`);
+        assert.ok(2 * b2Peers <= 5500000, 'Total upload para 2 peers deve ser <= 5.5 Mbps');
+        assert.ok(3 * b3Peers <= 5500000, 'Total upload para 3 peers deve ser <= 5.5 Mbps');
 
-    if (hasRes1080 && hasRes720 && hasFps60 && hasFps30) {
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } else {
-        console.log('\x1b[31mFALHOU (seletores de resolução ou FPS ausentes no index.html)\x1b[0m');
-        failures++;
-    }
-
-    // Teste 4: Alocação multi-peer com degradação maintain-framerate e teto de upload seguro
-    process.stdout.write('  [Teste] T4: Alocação de banda multi-peer e degradationPreference=maintain-framerate ... ');
-    try {
-        const b2Peers = helpers.getMaxBitrateForPeerCount(2, '1080p', 60);
-        const b3Peers = helpers.getMaxBitrateForPeerCount(3, '1080p', 60);
-
-        assert(b2Peers <= 2500000, `Bitrate para 2 peers (${b2Peers}) deve ser <= 2.5 Mbps para não saturar upload`);
-        assert(b3Peers <= 1800000, `Bitrate para 3 peers (${b3Peers}) deve ser <= 1.8 Mbps`);
-        assert(2 * b2Peers <= 5500000, 'Total upload para 2 peers deve ser <= 5.5 Mbps');
-        assert(3 * b3Peers <= 5500000, 'Total upload para 3 peers deve ser <= 5.5 Mbps');
+        const state = {
+            selectedVideoResolution: '1080p',
+            selectedVideoFps: 60,
+            qualityMode: 'fluent',
+            contentHintMode: 'motion'
+        };
+        const monitor = qosMonitorMod.createQosMonitor({
+            state,
+            dom: {},
+            getPeers: () => new Map()
+        });
 
         const mockSender = {
             getParameters: () => ({ encodings: [{}] }),
             setParameters: async (p) => { mockSender.appliedParams = p; }
         };
-        helpers.configureSenderParams(mockSender, 'video');
-        assert.strictEqual(mockSender.appliedParams.degradationPreference, 'maintain-framerate', 'degradationPreference no modo Fluido deve preservar FPS (maintain-framerate)');
-
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-        failures++;
-    }
-
-    console.log('\n===============================================================');
-    if (failures === 0) {
-        console.log('  ✅ Resultado: Todos os testes passaram com sucesso.');
-        console.log('===============================================================\n');
-        process.exit(0);
-    } else {
-        console.log(`  ❌ Resultado: ${failures} validação(ões) falharam.`);
-        console.log('===============================================================\n');
-        process.exit(1);
-    }
-}
-
-runTests().catch(err => {
-    console.error('Erro na execução:', err);
-    process.exit(1);
+        monitor.configureSenderParams(mockSender, 'video');
+        assert.strictEqual(
+            mockSender.appliedParams.degradationPreference,
+            'maintain-framerate',
+            'degradationPreference no modo Fluido deve preservar FPS (maintain-framerate)'
+        );
+    });
 });

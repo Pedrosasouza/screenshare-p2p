@@ -1,227 +1,173 @@
-const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const vm = require('vm');
+'use strict';
 
-const appPath = path.resolve(__dirname, '../public/app.js');
-const { loadClientBundleSource } = require('./helpers/client-source');
-const appJs = loadClientBundleSource();
-function extractFn(source, name) {
-    const regex = new RegExp(`(?:async\\s+)?function\\s+${name}\\s*\\([\\s\\S]*?\\n\\}`);
-    const match = source.match(regex);
-    assert(match, `Function ${name} not found in public/app.js`);
-    return match[0];
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
+
+const {
+    MockMediaStream,
+    MockRTCSessionDescription,
+    MockRTCIceCandidate,
+    createMockTrack,
+    createMockPeerConnection
+} = require('./helpers/mock-webrtc');
+const { createMockElement, createMockDocument, createMockStorage } = require('./helpers/mock-dom');
+
+const ROOT_DIR = path.resolve(__dirname, '..');
+
+async function loadModules() {
+    const [tileDomMod, webrtcMod] = await Promise.all([
+        import(pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/tile-dom.js')).href),
+        import(pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/webrtc-mesh.js')).href)
+    ]);
+    return { ...tileDomMod, ...webrtcMod };
 }
 
 function createTileMock(peerId, videoObj, onCleanup) {
-    const classes = new Set(['stream-tile']);
-    const tile = {
-        dataset: { peerId },
-        inDom: true,
-        removed: false,
-        children: [],
-        _cleanupTapUnmute: onCleanup || null,
-        classList: {
-            add: (c) => classes.add(c),
-            remove: (c) => classes.delete(c),
-            contains: (c) => classes.has(c)
-        },
-        appendChild: (c) => tile.children.push(c),
-        querySelector: (sel) => {
-            if (sel === 'video') return videoObj;
-            if (sel === '.btn-exit-pseudo-fs') return tile.children.find((c) => c.className === 'btn-exit-pseudo-fs') || null;
-            return null;
-        },
-        remove: () => {
-            tile.inDom = false;
-            tile.removed = true;
-        }
+    const tile = createMockElement('div', { className: 'stream-tile' });
+    tile.dataset.peerId = peerId;
+    tile.inDom = true;
+    tile._cleanupTapUnmute = onCleanup || null;
+    tile.querySelector = (sel) => {
+        if (sel === 'video') return videoObj;
+        if (sel === '.btn-exit-pseudo-fs') return tile.children.find((c) => c.className === 'btn-exit-pseudo-fs') || null;
+        return null;
+    };
+    const origRemove = tile.remove.bind(tile);
+    tile.remove = () => {
+        tile.inDom = false;
+        origRemove();
     };
     return tile;
 }
 
-function createHarness() {
+function createHarness({ createWebRtcMesh, registerFullscreenChangeHandler }) {
     const peers = new Map();
-    let exitFullscreenCalls = 0;
-
-    class MockMediaStream {
-        constructor(tracks = []) { this._tracks = tracks; }
-        getTracks() { return this._tracks; }
-        getVideoTracks() { return this._tracks.filter((t) => t.kind === 'video'); }
-    }
-
-    const doc = {
-        hidden: false,
-        fullscreenElement: null,
-        webkitFullscreenElement: null,
-        _listeners: {},
-        addEventListener(ev, fn) { this._listeners[ev] = fn; },
-        createElement(tag) {
-            return {
-                tagName: tag,
-                className: '',
-                innerHTML: '',
-                title: '',
-                addEventListener() {},
-                remove() {}
-            };
-        },
-        querySelector(sel) {
-            if (sel === '.stream-tile.pseudo-fullscreen') {
-                for (const peerObj of peers.values()) {
-                    if (peerObj.tileEl && peerObj.tileEl.inDom && peerObj.tileEl.classList.contains('pseudo-fullscreen')) {
-                        return peerObj.tileEl;
-                    }
+    const doc = createMockDocument({}, { createElement: (tag) => createMockElement(tag) });
+    doc.hidden = false;
+    doc.fullscreenElement = null;
+    doc.webkitFullscreenElement = null;
+    doc.exitFullscreen = () => {
+        doc.fullscreenElement = null;
+        return Promise.resolve();
+    };
+    doc.querySelector = (sel) => {
+        if (sel === '.stream-tile.pseudo-fullscreen') {
+            for (const peerObj of peers.values()) {
+                if (peerObj.tileEl && peerObj.tileEl.inDom && peerObj.tileEl.classList.contains('pseudo-fullscreen')) {
+                    return peerObj.tileEl;
                 }
-                return null;
             }
             return null;
-        },
-        exitFullscreen() {
-            exitFullscreenCalls++;
-            doc.fullscreenElement = null;
-            return Promise.resolve();
         }
+        return null;
     };
 
-    const sandbox = {
-        Map,
-        Set,
-        Promise,
-        MediaStream: MockMediaStream,
-        console: { log: () => {}, warn: () => {}, error: () => {} },
-        peers,
-        document: doc,
-        clearPeerTimers() {},
-        updateGridState() {},
-        clearInterval() {},
-        clearTimeout() {}
+    const mesh = createWebRtcMesh({
+        state: { myId: 'me' },
+        dom: { streamGrid: createMockElement('div') },
+        getSocket: () => null,
+        getQosMonitor: () => null,
+        getGrid: () => ({ updateGridState: () => {} }),
+        getScreenShare: () => null,
+        getRoomModal: () => null,
+        getServerUrl: () => '',
+        rtcConfig: { iceServers: [] },
+        refreshIceServers: async () => {},
+        scheduleIceRefreshTimer: () => {},
+        registerFullscreenChangeHandler,
+        saveSessionRoomPassword: () => {},
+        clearSessionRoomPassword: () => {},
+        showToast: () => {},
+        playPresenceChime: () => {},
+        RTCPeerConnectionCtor: function () { return createMockPeerConnection(); },
+        RTCSessionDescriptionCtor: MockRTCSessionDescription,
+        RTCIceCandidateCtor: MockRTCIceCandidate,
+        MediaStreamCtor: MockMediaStream,
+        documentObj: doc,
+        windowObj: { addEventListener: () => {} },
+        storage: createMockStorage()
+    });
+    mesh.bindLifecycleListeners();
+
+    // Point doc.querySelector at mesh.peers
+    doc.querySelector = (sel) => {
+        if (sel === '.stream-tile.pseudo-fullscreen') {
+            for (const peerObj of mesh.peers.values()) {
+                if (peerObj.tileEl && peerObj.tileEl.inDom && peerObj.tileEl.classList.contains('pseudo-fullscreen')) {
+                    return peerObj.tileEl;
+                }
+            }
+            return null;
+        }
+        return null;
     };
 
-    vm.createContext(sandbox);
-    const code = [
-        extractFn(appJs, 'disposeTileElement'),
-        extractFn(appJs, 'updateBackgroundTracksOptimization'),
-        extractFn(appJs, 'removePeerConnection'),
-        extractFn(appJs, 'removeStreamTile'),
-        extractFn(appJs, 'toggleTileFullscreen'),
-        extractFn(appJs, 'enterPseudoFullscreen')
-    ].join('\n\n');
-    vm.runInContext(code, sandbox, { filename: 'public/app.js' });
-
-    return {
-        sandbox,
-        peers,
-        doc,
-        MockMediaStream,
-        getExitFullscreenCalls: () => exitFullscreenCalls
-    };
+    return { mesh, doc };
 }
 
-async function runTests() {
-    console.log('\n===============================================================');
-    console.log('  🧪 SUÍTE DE TESTES: FULLSCREEN, BACKGROUND TRACKS & CLEANUP');
-    console.log('===============================================================\n');
+test('Background track optimization pauses non-fullscreen tracks during pseudo-fullscreen and restores on exit', async () => {
+    const { createWebRtcMesh, registerFullscreenChangeHandler, enterPseudoFullscreen, toggleTileFullscreen } = await loadModules();
+    const { mesh, doc } = createHarness({ createWebRtcMesh, registerFullscreenChangeHandler });
 
-    // T1: removeStreamTile on fullscreen tile exits fullscreen, runs _cleanupTapUnmute, nulls srcObject, and re-enables other peers
-    process.stdout.write('  [Teste] T1: removeStreamTile em tile fullscreen reabilita tracks de outros peers ... ');
-    {
-        const h = createHarness();
-        let cleanupCalled = 0;
-        const videoA = { srcObject: { id: 'stream-a' } };
-        const tileA = createTileMock('peer-a', videoA, () => { cleanupCalled++; });
-        const trackA = { kind: 'video', enabled: true, stop() {} };
-        const trackB = { kind: 'video', enabled: true, stop() {} };
+    const trackA = createMockTrack('video', 'va');
+    const trackB = createMockTrack('video', 'vb');
+    const tileA = createTileMock('peer-a', { srcObject: null });
+    const tileB = createTileMock('peer-b', { srcObject: null });
 
-        h.peers.set('peer-a', {
-            pc: { close() {} },
-            stream: new h.MockMediaStream([trackA]),
-            tileEl: tileA
-        });
-        h.peers.set('peer-b', {
-            pc: { close() {} },
-            stream: new h.MockMediaStream([trackB]),
-            tileEl: createTileMock('peer-b', { srcObject: { id: 'stream-b' } })
-        });
+    mesh.peers.set('peer-a', { pc: createMockPeerConnection(), stream: new MockMediaStream([trackA]), tileEl: tileA });
+    mesh.peers.set('peer-b', { pc: createMockPeerConnection(), stream: new MockMediaStream([trackB]), tileEl: tileB });
 
-        // Put peer-a into pseudo-fullscreen + native fullscreenElement
-        h.sandbox.enterPseudoFullscreen(tileA);
-        h.doc.fullscreenElement = tileA;
-        assert.strictEqual(trackB.enabled, false, 'Peer B should be disabled while Peer A is fullscreen');
+    enterPseudoFullscreen(tileA, doc);
+    assert.equal(trackA.enabled, true, 'Focused fullscreen track stays enabled');
+    assert.equal(trackB.enabled, false, 'Background track pauses in pseudo-fullscreen');
 
-        h.sandbox.removeStreamTile('peer-a');
+    toggleTileFullscreen(tileA, null, doc);
+    assert.equal(tileA.classList.contains('pseudo-fullscreen'), false);
+    assert.equal(trackA.enabled, true);
+    assert.equal(trackB.enabled, true, 'Background track resumes when exiting pseudo-fullscreen');
+});
 
-        assert.strictEqual(cleanupCalled, 1, '_cleanupTapUnmute must be invoked');
-        assert.strictEqual(videoA.srcObject, null, 'videoA.srcObject must be nulled');
-        assert.strictEqual(tileA.removed, true, 'tileA must be removed');
-        assert.strictEqual(h.getExitFullscreenCalls(), 1, 'document.exitFullscreen must be called');
-        assert.strictEqual(trackB.enabled, true, 'Peer B video track must be re-enabled after Peer A tile removal');
-    }
-    console.log('\x1b[32mPASSOU\x1b[0m');
+test('removePeerConnection disposes tile listeners, clears srcObject, removes tile, and restores other tracks', async () => {
+    const { createWebRtcMesh, registerFullscreenChangeHandler, enterPseudoFullscreen } = await loadModules();
+    const { mesh, doc } = createHarness({ createWebRtcMesh, registerFullscreenChangeHandler });
 
-    // T2: removePeerConnection on fullscreen peer cleans up tile & re-enables remaining peers
-    process.stdout.write('  [Teste] T2: removePeerConnection em peer fullscreen limpa listeners e restaura tracks ... ');
-    {
-        const h = createHarness();
-        let cleanupCalled = 0;
-        const videoA = { srcObject: { id: 'stream-a' } };
-        const tileA = createTileMock('peer-a', videoA, () => { cleanupCalled++; });
-        const trackA = { kind: 'video', enabled: true, stop() {} };
-        const trackB = { kind: 'video', enabled: true, stop() {} };
+    let cleanupCalled = 0;
+    const videoA = { srcObject: { id: 'stream-a' } };
+    const tileA = createTileMock('peer-a', videoA, () => { cleanupCalled += 1; });
+    const trackA = createMockTrack('video', 'va');
+    const trackB = createMockTrack('video', 'vb');
 
-        h.peers.set('peer-a', {
-            pc: { close() {} },
-            stream: new h.MockMediaStream([trackA]),
-            tileEl: tileA
-        });
-        h.peers.set('peer-b', {
-            pc: { close() {} },
-            stream: new h.MockMediaStream([trackB]),
-            tileEl: createTileMock('peer-b', { srcObject: { id: 'stream-b' } })
-        });
+    mesh.peers.set('peer-a', { pc: createMockPeerConnection(), stream: new MockMediaStream([trackA]), tileEl: tileA });
+    mesh.peers.set('peer-b', { pc: createMockPeerConnection(), stream: new MockMediaStream([trackB]), tileEl: createTileMock('peer-b', { srcObject: { id: 'stream-b' } }) });
 
-        h.sandbox.enterPseudoFullscreen(tileA);
-        assert.strictEqual(trackB.enabled, false);
+    enterPseudoFullscreen(tileA, doc);
+    assert.equal(trackB.enabled, false);
 
-        h.sandbox.removePeerConnection('peer-a');
+    mesh.removePeerConnection('peer-a');
+    assert.equal(mesh.peers.has('peer-a'), false);
+    assert.equal(cleanupCalled, 1);
+    assert.equal(videoA.srcObject, null);
+    assert.equal(tileA.removed, true);
+    assert.equal(trackB.enabled, true, 'Remaining peer track must be re-enabled');
+});
 
-        assert.strictEqual(h.peers.has('peer-a'), false);
-        assert.strictEqual(cleanupCalled, 1);
-        assert.strictEqual(videoA.srcObject, null);
-        assert.strictEqual(tileA.removed, true);
-        assert.strictEqual(trackB.enabled, true, 'Remaining peer track must be re-enabled');
-    }
-    console.log('\x1b[32mPASSOU\x1b[0m');
+test('toggleTileFullscreen handles undefined returns and synchronous throws without crashing', async () => {
+    const { toggleTileFullscreen, registerFullscreenChangeHandler } = await loadModules();
+    registerFullscreenChangeHandler(null);
+    const doc = createMockDocument({}, { createElement: (tag) => createMockElement(tag) });
 
-    // T3: toggleTileFullscreen safely handles legacy non-Promise returns and sync throws
-    process.stdout.write('  [Teste] T3: toggleTileFullscreen trata retorno undefined e throw síncrono sem crash ... ');
-    {
-        const h = createHarness();
+    const tileLegacy = createTileMock('peer-legacy', { srcObject: null });
+    tileLegacy.webkitRequestFullscreen = () => undefined;
+    assert.doesNotThrow(() => toggleTileFullscreen(tileLegacy, null, doc));
 
-        // Case A: webkitRequestFullscreen returns undefined (does not throw .catch on undefined)
-        const tileLegacy = createTileMock('peer-legacy', { srcObject: null });
-        tileLegacy.webkitRequestFullscreen = () => undefined;
-        assert.doesNotThrow(() => h.sandbox.toggleTileFullscreen(tileLegacy));
+    const tileThrow = createTileMock('peer-throw', { srcObject: null });
+    tileThrow.webkitRequestFullscreen = () => { throw new Error('Fullscreen disallowed'); };
+    assert.doesNotThrow(() => toggleTileFullscreen(tileThrow, null, doc));
+    assert.equal(tileThrow.classList.contains('pseudo-fullscreen'), true);
 
-        // Case B: webkitRequestFullscreen throws synchronously -> falls back to pseudo-fullscreen
-        const tileThrow = createTileMock('peer-throw', { srcObject: null });
-        tileThrow.webkitRequestFullscreen = () => { throw new Error('Fullscreen disallowed'); };
-        assert.doesNotThrow(() => h.sandbox.toggleTileFullscreen(tileThrow));
-        assert.strictEqual(tileThrow.classList.contains('pseudo-fullscreen'), true, 'Sync throw must fall back to pseudo-fullscreen');
-
-        // Case C: legacy exitFullscreen returning undefined
-        h.doc.fullscreenElement = tileLegacy;
-        h.doc.exitFullscreen = () => undefined;
-        assert.doesNotThrow(() => h.sandbox.toggleTileFullscreen(tileLegacy));
-    }
-    console.log('\x1b[32mPASSOU\x1b[0m');
-
-    console.log('\n===============================================================');
-    console.log('  ✅ Resultado: Todos os testes de fullscreen e cleanup passaram.');
-    console.log('===============================================================\n');
-}
-
-runTests().catch((err) => {
-    console.error(err);
-    process.exit(1);
+    doc.fullscreenElement = tileLegacy;
+    doc.exitFullscreen = () => undefined;
+    assert.doesNotThrow(() => toggleTileFullscreen(tileLegacy, null, doc));
 });

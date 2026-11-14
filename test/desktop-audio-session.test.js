@@ -1,19 +1,14 @@
-const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const vm = require('vm');
+const { describe, it } = require('node:test');
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 
-const appPath = path.resolve(__dirname, '../public/app.js');
-const { loadClientBundleSource } = require('./helpers/client-source');
-const appJs = loadClientBundleSource();
-function extractFn(source, name) {
-    const regex = new RegExp(`(?:async\\s+)?function\\s+${name}\\s*\\([\\s\\S]*?\\n\\}`);
-    const match = source.match(regex);
-    assert(match, `Function ${name} not found in public/app.js`);
-    return match[0];
-}
+const BRIDGE_PATH = path.resolve(__dirname, '../public/js/desktop-bridge.js');
+const DESKTOP_AUDIO_URL = pathToFileURL(path.resolve(__dirname, '../public/js/modules/desktop-audio.js')).href;
 
-function createHarness(overrides = {}) {
+let moduleSeq = 0;
+
+async function withDesktopEnv(overrides, fn) {
     const createdNodes = [];
     const createdContexts = [];
     let stopDesktopCalls = 0;
@@ -76,7 +71,7 @@ function createHarness(overrides = {}) {
             this.state = 'suspended';
         }
         createMediaStreamDestination() {
-            const track = { id: `track-${createdNodes.length}`, kind: 'audio' };
+            const track = { id: `track-${createdNodes.length}`, kind: 'audio', stop() {} };
             return {
                 stream: {
                     getAudioTracks: () => (overrides.emptyAudioTracks ? [] : [track])
@@ -85,7 +80,7 @@ function createHarness(overrides = {}) {
         }
     }
 
-    const desktopApi = {
+    const desktopApi = overrides.customDesktopApi || {
         isDesktop: () => true,
         startAppAudioCapture: overrides.startAppAudioCapture || (async (pid) => ({
             pid,
@@ -104,102 +99,81 @@ function createHarness(overrides = {}) {
         }
     };
 
-    const varsMatch = appJs.match(/let availableWindows[\s\S]*?const audioWorkletLoadedContexts = new WeakSet\(\);/);
-    assert(varsMatch, 'Desktop audio state declarations not found in public/app.js');
+    const prevWindow = global.window;
+    const prevDoc = global.document;
+    const prevNodeCtor = global.AudioWorkletNode;
 
-    const sandbox = {
-        WeakSet,
-        ArrayBuffer,
-        Float32Array,
-        Promise,
-        Error,
-        console: { log: () => {}, warn: () => {}, error: () => {} },
-        AudioWorkletNode: MockAudioWorkletNode,
-        window: {
-            __TAURI_INTERNALS__: {},
-            AudioContext: MockAudioContext,
-            StreamGridDesktop: desktopApi
-        }
+    const windowObj = overrides.windowObj || {
+        __TAURI_INTERNALS__: {},
+        AudioContext: MockAudioContext,
+        StreamGridDesktop: desktopApi
     };
+    if (!windowObj.AudioContext) windowObj.AudioContext = MockAudioContext;
 
-    vm.createContext(sandbox);
-    const code = [
-        varsMatch[0],
-        extractFn(appJs, 'isDesktopApp'),
-        extractFn(appJs, 'forwardPcmBufferToWorklet'),
-        extractFn(appJs, 'prepareHelperAudioWorklet'),
-        extractFn(appJs, 'startDesktopCaptureWith'),
-        extractFn(appJs, 'startAppAudioCapture'),
-        extractFn(appJs, 'startExcludeDiscordCapture'),
-        extractFn(appJs, 'stopAppAudioCapture'),
-        'function __getTestState() { return { activeAudioWorkletNode, desktopCaptureGeneration, helperAudioDestination, helperAudioContext }; }'
-    ].join('\n\n');
-    vm.runInContext(code, sandbox, { filename: 'public/app.js' });
+    global.window = windowObj;
+    global.AudioWorkletNode = MockAudioWorkletNode;
+    if (overrides.documentObj) {
+        global.document = overrides.documentObj;
+    }
 
-    return {
-        sandbox,
-        createdNodes,
-        createdContexts,
-        getState: () => sandbox.__getTestState(),
-        getStopDesktopCalls: () => stopDesktopCalls
-    };
+    try {
+        const mod = await import(`${DESKTOP_AUDIO_URL}?session=${++moduleSeq}`);
+        return await fn({
+            mod,
+            windowObj,
+            createdNodes,
+            createdContexts,
+            getStopDesktopCalls: () => stopDesktopCalls
+        });
+    } finally {
+        if (prevWindow === undefined) delete global.window;
+        else global.window = prevWindow;
+        if (prevDoc === undefined) delete global.document;
+        else global.document = prevDoc;
+        if (prevNodeCtor === undefined) delete global.AudioWorkletNode;
+        else global.AudioWorkletNode = prevNodeCtor;
+    }
 }
 
-async function runTests() {
-    console.log('\n===============================================================');
-    console.log('  🧪 SUÍTE DE TESTES: SESSÃO DESKTOP WASAPI / AUDIOWORKLET');
-    console.log('===============================================================\n');
-
-    // T1: stopAppAudioCapture invalidates generation so late IPC onPcm cannot reach new session's worklet
-    process.stdout.write('  [Teste] T1: stopAppAudioCapture invalida geração e bloqueia onPcm tardio ... ');
-    {
+describe('Sessão Desktop WASAPI / AudioWorklet (desktop-audio.js)', () => {
+    it('T1: stopAppAudioCapture invalida geração e bloqueia onPcm tardio', async () => {
         const onPcmCallbacks = [];
-        const h = createHarness({
+        await withDesktopEnv({
             startAppAudioCapture: async (pid, onPcm) => {
                 onPcmCallbacks.push(onPcm);
                 return { pid, sample_rate: 48000, channels: 2, mode: 'include' };
             }
+        }, async ({ mod, createdNodes }) => {
+            await mod.startAppAudioCapture(101);
+            assert.strictEqual(createdNodes.length, 1);
+            const node1 = createdNodes[0];
+
+            mod.stopAppAudioCapture();
+            assert.strictEqual(node1.disconnected, true);
+
+            await mod.startAppAudioCapture(202);
+            assert.strictEqual(createdNodes.length, 2);
+            const node2 = createdNodes[1];
+
+            // Callback antigo de sessão 1 não pode chegar ao node2
+            onPcmCallbacks[0](new Float32Array([0.5, -0.5]).buffer);
+            assert.strictEqual(node2.posted.length, 0);
+            assert.strictEqual(node1.posted.filter((m) => m.data instanceof Float32Array).length, 0);
+
+            // Callback ativo da sessão 2 chega normalmente ao node2
+            onPcmCallbacks[1](new Float32Array([0.25, -0.25]).buffer);
+            assert.strictEqual(node2.posted.length, 1);
         });
+    });
 
-        await h.sandbox.startAppAudioCapture(101);
-        assert.strictEqual(h.createdNodes.length, 1);
-        const node1 = h.createdNodes[0];
-
-        h.sandbox.stopAppAudioCapture();
-        assert.strictEqual(h.getState().activeAudioWorkletNode, null);
-
-        // Start session 2
-        await h.sandbox.startAppAudioCapture(202);
-        assert.strictEqual(h.createdNodes.length, 2);
-        const node2 = h.createdNodes[1];
-
-        // Stale IPC PCM buffer from session 1 must NOT reach node2
-        const staleBuf = new Float32Array([0.5, -0.5]).buffer;
-        onPcmCallbacks[0](staleBuf);
-        assert.strictEqual(node2.posted.length, 0, 'Stale session-1 PCM must not reach session-2 worklet');
-        assert.strictEqual(
-            node1.posted.filter((m) => m.data instanceof Float32Array).length,
-            0,
-            'Session-1 node should receive no stale PCM'
-        );
-
-        // Active session-2 IPC PCM buffer DOES reach node2
-        const freshBuf = new Float32Array([0.25, -0.25]).buffer;
-        onPcmCallbacks[1](freshBuf);
-        assert.strictEqual(node2.posted.length, 1, 'Active session-2 PCM must be forwarded');
-    }
-    console.log('\x1b[32mPASSOU\x1b[0m');
-
-    // T2: Overlapping startAppAudioCapture calls: older attempt is cancelled, never overwrites or stops newer session
-    process.stdout.write('  [Teste] T2: Chamadas concorrentes de startAppAudioCapture preservam apenas a sessão mais nova ... ');
-    {
+    it('T2: chamadas concorrentes de startAppAudioCapture preservam apenas a sessão mais nova', async () => {
         let rejectFirstStart;
         let markFirstEntered;
         const firstEntered = new Promise((r) => { markFirstEntered = r; });
         let callIndex = 0;
         const onPcmByCall = [];
 
-        const h = createHarness({
+        await withDesktopEnv({
             startAppAudioCapture: (pid, onPcm) => {
                 callIndex++;
                 onPcmByCall.push(onPcm);
@@ -211,108 +185,79 @@ async function runTests() {
                 }
                 return Promise.resolve({ pid, sample_rate: 48000, channels: 2, mode: 'include' });
             }
+        }, async ({ mod, createdNodes, getStopDesktopCalls }) => {
+            const p1 = mod.startAppAudioCapture(111);
+            const p1Settled = p1.then(() => { throw new Error('p1 should not resolve'); }, (err) => err);
+            await firstEntered;
+
+            const track2 = await mod.startAppAudioCapture(222);
+            assert.ok(track2 && track2.kind === 'audio');
+            const node2 = createdNodes[createdNodes.length - 1];
+            const stopCallsBeforeP1Fail = getStopDesktopCalls();
+
+            rejectFirstStart(new Error('WASAPI init timeout'));
+            const err1 = await p1Settled;
+            assert.match(err1.message, /WASAPI init timeout/);
+
+            assert.strictEqual(node2.disconnected, false);
+            assert.strictEqual(getStopDesktopCalls(), stopCallsBeforeP1Fail);
+
+            onPcmByCall[0](new Float32Array([1, -1]).buffer);
+            assert.strictEqual(node2.posted.length, 0);
+            onPcmByCall[1](new Float32Array([0.1, -0.1]).buffer);
+            assert.strictEqual(node2.posted.length, 1);
         });
+    });
 
-        const p1 = h.sandbox.startAppAudioCapture(111);
-        const p1Settled = p1.then(
-            () => { throw new Error('p1 should not resolve'); },
-            (err) => err
-        );
-        await firstEntered;
-
-        const p2 = h.sandbox.startAppAudioCapture(222);
-        const track2 = await p2;
-        assert(track2 && track2.kind === 'audio', 'Second session should resolve with audio track');
-        const activeNodeAfterP2 = h.getState().activeAudioWorkletNode;
-        assert(activeNodeAfterP2, 'Second session worklet should be active');
-        const stopCallsBeforeP1Fail = h.getStopDesktopCalls();
-
-        // First call now fails late in startFn -> its catch must NOT call stopAppAudioCapture on session 2
-        rejectFirstStart(new Error('WASAPI init timeout'));
-        const err1 = await p1Settled;
-        assert.match(err1.message, /WASAPI init timeout/);
-
-        assert.strictEqual(h.getState().activeAudioWorkletNode, activeNodeAfterP2, 'Failed old session must not clear new worklet');
-        assert.strictEqual(h.getStopDesktopCalls(), stopCallsBeforeP1Fail, 'Failed old session must not stop new desktop capture');
-
-        // Late PCM on session 1 callback is ignored; session 2 callback works
-        onPcmByCall[0](new Float32Array([1, -1]).buffer);
-        assert.strictEqual(activeNodeAfterP2.posted.length, 0);
-        onPcmByCall[1](new Float32Array([0.1, -0.1]).buffer);
-        assert.strictEqual(activeNodeAfterP2.posted.length, 1);
-    }
-    console.log('\x1b[32mPASSOU\x1b[0m');
-
-    // T3: addModule failure propagates & does not poison WeakSet; success caches per AudioContext instance
-    process.stdout.write('  [Teste] T3: Erro em addModule é propagado e WeakSet evita recarga no mesmo AudioContext ... ');
-    {
+    it('T3: erro em addModule é propagado e WeakSet evita recarga no mesmo AudioContext', async () => {
         let shouldFailModule = true;
-        const h = createHarness({
+        await withDesktopEnv({
             onAddModule: async () => {
                 if (shouldFailModule) {
                     throw new Error('Failed to load audio-worklet-processor.js');
                 }
             }
+        }, async ({ mod, createdContexts, createdNodes }) => {
+            await assert.rejects(
+                () => mod.prepareHelperAudioWorklet(),
+                /Failed to load audio-worklet-processor\.js/
+            );
+            assert.strictEqual(createdContexts.length, 1);
+            assert.strictEqual(createdContexts[0].addModuleCalls, 1);
+            assert.strictEqual(createdNodes.length, 0);
+
+            shouldFailModule = false;
+            await mod.prepareHelperAudioWorklet();
+            assert.strictEqual(createdContexts[0].addModuleCalls, 2);
+            assert.strictEqual(createdNodes.length, 1);
+
+            await mod.prepareHelperAudioWorklet();
+            assert.strictEqual(createdContexts[0].addModuleCalls, 2);
+            assert.strictEqual(createdNodes.length, 2);
+
+            createdContexts[0].state = 'closed';
+            await mod.prepareHelperAudioWorklet();
+            assert.strictEqual(createdContexts.length, 2);
+            assert.strictEqual(createdContexts[1].addModuleCalls, 1);
         });
+    });
 
-        await assert.rejects(
-            () => h.sandbox.prepareHelperAudioWorklet(),
-            /Failed to load audio-worklet-processor\.js/
-        );
-        assert.strictEqual(h.createdContexts.length, 1);
-        assert.strictEqual(h.createdContexts[0].addModuleCalls, 1);
-        assert.strictEqual(h.createdNodes.length, 0, 'No AudioWorkletNode created after addModule failure');
+    it('T4: forwardPcmBufferToWorklet não lança erro se port.postMessage falhar', async () => {
+        await withDesktopEnv({ throwOnPostMessage: true }, async ({ mod, createdNodes }) => {
+            await mod.prepareHelperAudioWorklet();
+            assert.strictEqual(createdNodes.length, 1);
+            const buf = new Float32Array([0.5, -0.5, 0.25, -0.25]).buffer;
+            assert.doesNotThrow(() => mod.forwardPcmBufferToWorklet(buf));
+        });
+    });
 
-        // Retry succeeds on same AudioContext because failed load was NOT marked in WeakSet
-        shouldFailModule = false;
-        await h.sandbox.prepareHelperAudioWorklet();
-        assert.strictEqual(h.createdContexts[0].addModuleCalls, 2, 'Retry must invoke addModule again after failure');
-        assert.strictEqual(h.createdNodes.length, 1);
-
-        // Third call on the same open AudioContext skips addModule via WeakSet
-        await h.sandbox.prepareHelperAudioWorklet();
-        assert.strictEqual(h.createdContexts[0].addModuleCalls, 2, 'WeakSet must skip duplicate addModule on same AudioContext');
-        assert.strictEqual(h.createdNodes.length, 2);
-
-        // If AudioContext is closed and recreated, addModule runs once for the new instance
-        h.createdContexts[0].state = 'closed';
-        await h.sandbox.prepareHelperAudioWorklet();
-        assert.strictEqual(h.createdContexts.length, 2);
-        assert.strictEqual(h.createdContexts[1].addModuleCalls, 1, 'New AudioContext instance must load module once');
-    }
-    console.log('\x1b[32mPASSOU\x1b[0m');
-
-    // T4: forwardPcmBufferToWorklet swallows postMessage errors when port is disconnected
-    process.stdout.write('  [Teste] T4: forwardPcmBufferToWorklet não lança erro se port.postMessage falhar ... ');
-    {
-        const h = createHarness({ throwOnPostMessage: true });
-        await h.sandbox.prepareHelperAudioWorklet();
-        assert(h.getState().activeAudioWorkletNode, 'Worklet node should exist');
-
-        const buf = new Float32Array([0.5, -0.5, 0.25, -0.25]).buffer;
-        assert.doesNotThrow(() => {
-            h.sandbox.forwardPcmBufferToWorklet(buf);
-        }, 'Disconnected port postMessage error must be handled safely');
-    }
-    console.log('\x1b[32mPASSOU\x1b[0m');
-
-    // T5: fetchWindowList exibe estado de erro e wasapi-capture-stopped notifica interrupção inesperada
-    process.stdout.write('  [Teste] T5: fetchWindowList sinaliza erro em #selectAudioApp e onCaptureStopped notifica queda ... ');
-    {
+    it('T5: fetchWindowList sinaliza erro em #selectAudioApp e onCaptureStopped notifica queda', async () => {
         const appendedOptions = [];
         const selectEl = {
             innerHTML: '<option value="1">Antigo</option>',
             appendChild(opt) { appendedOptions.push(opt); }
         };
         let captureStoppedCb = null;
-        const desktopBridgePath = path.resolve(__dirname, '../public/js/desktop-bridge.js');
-        const bridgeCode = fs.readFileSync(desktopBridgePath, 'utf8');
-        const desktopAudioSrc = fs.readFileSync(path.resolve(__dirname, '../public/js/modules/desktop-audio.js'), 'utf8');
-
-        assert(
-            typeof extractFn === 'function' && desktopAudioSrc.includes('registerDesktopCaptureListeners'),
-            'desktop-audio.js deve exportar registerDesktopCaptureListeners'
-        );
 
         const win = {
             __TAURI_INTERNALS__: {},
@@ -332,54 +277,48 @@ async function runTests() {
                 }
             }
         };
-        vm.runInNewContext(bridgeCode, { window: win, globalThis: win });
-        assert.strictEqual(typeof win.StreamGridDesktop.onCaptureStopped, 'function', 'desktop-bridge deve expor onCaptureStopped');
 
-        const cleanedModuleCode = desktopAudioSrc
-            .replace(/^export\s+/gm, '')
-            .replace(/import\s+[\s\S]*?;\n/g, '');
-        const modSandbox = {
-            WeakSet,
-            ArrayBuffer,
-            Float32Array,
-            Promise,
-            Error,
-            console: { log: () => {}, warn: () => {}, error: () => {} },
-            document: {
+        // Carrega desktop-bridge real sobre win
+        const prevWindow = global.window;
+        delete require.cache[BRIDGE_PATH];
+        global.window = win;
+        try {
+            require(BRIDGE_PATH);
+        } finally {
+            delete require.cache[BRIDGE_PATH];
+            if (prevWindow === undefined) delete global.window;
+            else global.window = prevWindow;
+        }
+        assert.strictEqual(typeof win.StreamGridDesktop.onCaptureStopped, 'function');
+
+        await withDesktopEnv({
+            windowObj: win,
+            documentObj: {
                 getElementById: (id) => (id === 'selectAudioApp' ? selectEl : null),
                 createElement: () => ({ value: '', textContent: '' })
-            },
-            window: win
-        };
-        vm.createContext(modSandbox);
-        vm.runInContext(cleanedModuleCode, modSandbox);
+            }
+        }, async ({ mod }) => {
+            await mod.fetchWindowList();
+            assert.strictEqual(appendedOptions.length, 1);
+            assert.strictEqual(appendedOptions[0].value, '');
+            assert.match(appendedOptions[0].textContent, /erro/i);
 
-        await modSandbox.fetchWindowList();
-        assert(appendedOptions.length === 1, 'Erro em fetchWindowList deve renderizar 1 option explicativa');
-        assert.strictEqual(appendedOptions[0].value, '');
-        assert(
-            /erro/i.test(appendedOptions[0].textContent),
-            `Texto de erro esperado em #selectAudioApp, recebido "${appendedOptions[0].textContent}"`
-        );
-
-        let notifiedPayload = null;
-        await modSandbox.registerDesktopCaptureListeners((payload) => {
-            notifiedPayload = payload;
+            let notifiedPayload = null;
+            await mod.registerDesktopCaptureListeners((payload) => {
+                notifiedPayload = payload;
+            });
+            assert.strictEqual(typeof captureStoppedCb, 'function');
+            captureStoppedCb({ payload: { pid: 4321, reason: 'device_invalidated' } });
+            assert.ok(notifiedPayload && notifiedPayload.pid === 4321);
         });
-        assert.strictEqual(typeof captureStoppedCb, 'function', 'Deve registrar listener em wasapi-capture-stopped');
-        captureStoppedCb({ payload: { pid: 4321, reason: 'device_invalidated' } });
-        assert(notifiedPayload && notifiedPayload.pid === 4321, 'Callback de queda inesperada deve receber payload do evento');
-    }
-    console.log('\x1b[32mPASSOU\x1b[0m');
+    });
 
-    // T6: stopAppAudioCapture during pending startFn tears down late backend capture without killing newer start
-    process.stdout.write('  [Teste] T6: cancelamento em voo durante startFn fecha backend tardio sem matar nova sessão ... ');
-    {
+    it('T6: cancelamento em voo durante startFn fecha backend tardio sem matar nova sessão', async () => {
         let resolveFirst;
         let markFirstEntered;
         const firstEntered = new Promise((r) => { markFirstEntered = r; });
 
-        const h1 = createHarness({
+        await withDesktopEnv({
             startAppAudioCapture: async (pid) => {
                 if (pid === 101) {
                     markFirstEntered();
@@ -387,29 +326,24 @@ async function runTests() {
                 }
                 return { pid, sample_rate: 48000, channels: 2, mode: 'include' };
             }
+        }, async ({ mod, getStopDesktopCalls }) => {
+            const p1 = mod.startAppAudioCapture(101);
+            const p1Settled = p1.then(() => null, (err) => err);
+            await firstEntered;
+
+            mod.stopAppAudioCapture();
+            assert.strictEqual(getStopDesktopCalls(), 1);
+
+            resolveFirst({ pid: 101, sample_rate: 48000, channels: 2, mode: 'include' });
+            const err1 = await p1Settled;
+            assert.ok(err1 instanceof Error);
+            assert.strictEqual(getStopDesktopCalls(), 2);
         });
 
-        const p1 = h1.sandbox.startAppAudioCapture(101);
-        const p1Settled = p1.then(() => null, (err) => err);
-        await firstEntered;
-
-        h1.sandbox.stopAppAudioCapture();
-        assert.strictEqual(h1.getStopDesktopCalls(), 1, 'stopAppAudioCapture imediato deve invocar IPC stop uma vez');
-
-        resolveFirst({ pid: 101, sample_rate: 48000, channels: 2, mode: 'include' });
-        const err1 = await p1Settled;
-        assert(err1 instanceof Error, 'start cancelado em voo deve rejeitar');
-        assert.strictEqual(
-            h1.getStopDesktopCalls(),
-            2,
-            'startFn resolvendo após cancelamento deve disparar cleanup backend tardio'
-        );
-
-        // Sub-cenário: stop seguido de novo start não deve deixar start antigo matar o novo start
         let resolveStale;
         let markStaleEntered;
         const staleEntered = new Promise((r) => { markStaleEntered = r; });
-        const h2 = createHarness({
+        await withDesktopEnv({
             startAppAudioCapture: async (pid) => {
                 if (pid === 303) {
                     markStaleEntered();
@@ -417,36 +351,30 @@ async function runTests() {
                 }
                 return { pid, sample_rate: 48000, channels: 2, mode: 'include' };
             }
+        }, async ({ mod, getStopDesktopCalls }) => {
+            const pStale = mod.startAppAudioCapture(303);
+            const pStaleSettled = pStale.then(() => null, (err) => err);
+            await staleEntered;
+
+            mod.stopAppAudioCapture();
+            assert.strictEqual(getStopDesktopCalls(), 1);
+
+            const freshTrack = await mod.startAppAudioCapture(404);
+            assert.ok(freshTrack && freshTrack.kind === 'audio');
+
+            resolveStale({ pid: 303, sample_rate: 48000, channels: 2, mode: 'include' });
+            await pStaleSettled;
+            assert.strictEqual(getStopDesktopCalls(), 1);
         });
+    });
 
-        const pStale = h2.sandbox.startAppAudioCapture(303);
-        const pStaleSettled = pStale.then(() => null, (err) => err);
-        await staleEntered;
-
-        h2.sandbox.stopAppAudioCapture();
-        assert.strictEqual(h2.getStopDesktopCalls(), 1);
-
-        const freshTrack = await h2.sandbox.startAppAudioCapture(404);
-        assert(freshTrack && freshTrack.kind === 'audio', 'Nova captura após stop deve concluir com sucesso');
-
-        resolveStale({ pid: 303, sample_rate: 48000, channels: 2, mode: 'include' });
-        await pStaleSettled;
-        assert.strictEqual(
-            h2.getStopDesktopCalls(),
-            1,
-            'start antigo resolvendo após um novo start não deve chamar stopAppAudioCapture do backend'
-        );
-    }
-    console.log('\x1b[32mPASSOU\x1b[0m');
-
-    // T7: prepareHelperAudioWorklet aguarda suspend() em andamento antes de chamar resume()
-    process.stdout.write('  [Teste] T7: prepareHelperAudioWorklet serializa suspend em voo antes de resume ... ');
-    {
+    it('T7: prepareHelperAudioWorklet serializa suspend em voo antes de resume', async () => {
         let releaseSuspend;
         let suspendStarted = false;
         const timeline = [];
-        const h = createHarness({
-            onSuspend: (ctx) => {
+
+        await withDesktopEnv({
+            onSuspend: () => {
                 suspendStarted = true;
                 timeline.push('suspend:start');
                 return new Promise((resolve) => {
@@ -459,116 +387,61 @@ async function runTests() {
             onResume: () => {
                 timeline.push('resume');
             }
+        }, async ({ mod, createdContexts }) => {
+            await mod.startAppAudioCapture(501);
+            const ctx = createdContexts[0];
+            assert.strictEqual(ctx.state, 'running');
+
+            mod.stopAppAudioCapture();
+            assert.strictEqual(suspendStarted, true);
+
+            let restartDone = false;
+            const restartPromise = mod.startAppAudioCapture(502).then((track) => {
+                restartDone = true;
+                return track;
+            });
+
+            await Promise.resolve();
+            await Promise.resolve();
+            assert.strictEqual(restartDone, false);
+
+            releaseSuspend();
+            const track = await restartPromise;
+            assert.ok(track && track.kind === 'audio');
+            assert.strictEqual(ctx.state, 'running');
+            assert.deepStrictEqual(timeline, ['suspend:start', 'suspend:end', 'resume']);
         });
+    });
 
-        await h.sandbox.startAppAudioCapture(501);
-        const ctx = h.getState().helperAudioContext;
-        assert.strictEqual(ctx.state, 'running');
-
-        h.sandbox.stopAppAudioCapture();
-        assert.strictEqual(suspendStarted, true, 'stopAppAudioCapture deve iniciar suspend()');
-
-        // Start imediato enquanto suspend() ainda está pendente (ctx.state ainda 'running')
-        let restartDone = false;
-        const restartPromise = h.sandbox.startAppAudioCapture(502).then((track) => {
-            restartDone = true;
-            return track;
-        });
-
-        await Promise.resolve();
-        await Promise.resolve();
-        assert.strictEqual(restartDone, false, 'Novo start deve aguardar suspend() em andamento terminar');
-
-        releaseSuspend();
-        const track = await restartPromise;
-        assert(track && track.kind === 'audio');
-        assert.strictEqual(ctx.state, 'running', 'AudioContext deve terminar em running e não sobrescrito por suspended');
-        assert.deepStrictEqual(timeline, ['suspend:start', 'suspend:end', 'resume']);
-    }
-    console.log('\x1b[32mPASSOU\x1b[0m');
-
-    // T8: Evento tardio wasapi-capture-stopped de sessão/geração antiga é ignorado e não mata sessão 2
-    process.stdout.write('  [Teste] T8: wasapi-capture-stopped obsoleto não encerra captura WASAPI recém-iniciada ... ');
-    {
-        const desktopAudioSrcLocal = fs.readFileSync(
-            path.resolve(__dirname, '../public/js/modules/desktop-audio.js'),
-            'utf8'
-        );
+    it('T8: wasapi-capture-stopped obsoleto não encerra captura WASAPI recém-iniciada', async () => {
         let onStopCb = null;
         let stopIpcCalls = 0;
         let unexpectedNotifications = 0;
-        const cleanedModuleCode = desktopAudioSrcLocal
-            .replace(/^export\s+/gm, '')
-            .replace(/import\s+[\s\S]*?;\n/g, '');
 
-        class MockWorkletNode {
-            constructor() {
-                this.port = { postMessage() {} };
-            }
-            connect() {}
-            disconnect() { this.disconnected = true; }
-        }
-        class MockCtx {
-            constructor() {
-                this.state = 'running';
-                this.audioWorklet = { addModule: async () => {} };
-            }
-            async resume() { this.state = 'running'; }
-            async suspend() { this.state = 'suspended'; }
-            createMediaStreamDestination() {
-                return { stream: { getAudioTracks: () => [{ id: 't-active', kind: 'audio', stop() {} }] } };
-            }
-        }
-
-        const modSandbox = {
-            WeakSet,
-            ArrayBuffer,
-            Float32Array,
-            Promise,
-            Error,
-            console: { log: () => {}, warn: () => {}, error: () => {} },
-            AudioWorkletNode: MockWorkletNode,
-            window: {
-                __TAURI_INTERNALS__: {},
-                AudioContext: MockCtx,
-                StreamGridDesktop: {
-                    isDesktop: () => true,
-                    startAppAudioCapture: async (pid) => ({ pid, generation: 2, sample_rate: 48000, channels: 2, mode: 'include' }),
-                    stopAppAudioCapture: async () => { stopIpcCalls++; },
-                    onCaptureStopped: async (cb) => {
-                        onStopCb = cb;
-                        return () => {};
-                    }
+        await withDesktopEnv({
+            customDesktopApi: {
+                isDesktop: () => true,
+                startAppAudioCapture: async (pid) => ({ pid, generation: 2, sample_rate: 48000, channels: 2, mode: 'include' }),
+                stopAppAudioCapture: async () => { stopIpcCalls++; },
+                onCaptureStopped: async (cb) => {
+                    onStopCb = cb;
+                    return () => {};
                 }
             }
-        };
-        vm.createContext(modSandbox);
-        vm.runInContext(cleanedModuleCode, modSandbox);
+        }, async ({ mod }) => {
+            await mod.registerDesktopCaptureListeners(() => {
+                unexpectedNotifications++;
+            });
+            const track2 = await mod.startAppAudioCapture(202);
+            assert.ok(track2 && track2.kind === 'audio');
 
-        await modSandbox.registerDesktopCaptureListeners(() => {
-            unexpectedNotifications++;
+            onStopCb({ pid: 101, generation: 1, reason: 'device_invalidated' });
+            assert.strictEqual(stopIpcCalls, 0);
+            assert.strictEqual(unexpectedNotifications, 0);
+
+            onStopCb({ pid: 202, generation: 2, reason: 'device_invalidated' });
+            assert.strictEqual(stopIpcCalls, 1);
+            assert.strictEqual(unexpectedNotifications, 1);
         });
-        const track2 = await modSandbox.startAppAudioCapture(202);
-        assert(track2 && track2.kind === 'audio');
-
-        // Entrega evento atrasado da sessão 1 (PID 101 / generation 1)
-        onStopCb({ pid: 101, generation: 1, reason: 'device_invalidated' });
-        assert.strictEqual(stopIpcCalls, 0, 'Evento wasapi-capture-stopped obsoleto não deve chamar stopAppAudioCapture');
-        assert.strictEqual(unexpectedNotifications, 0, 'Evento obsoleto não deve disparar onUnexpectedStop');
-
-        // Entrega evento real da sessão 2 (PID 202 / generation 2)
-        onStopCb({ pid: 202, generation: 2, reason: 'device_invalidated' });
-        assert.strictEqual(stopIpcCalls, 1, 'Evento da sessão ativa deve encerrar captura');
-        assert.strictEqual(unexpectedNotifications, 1, 'Evento da sessão ativa deve notificar onUnexpectedStop');
-    }
-    console.log('\x1b[32mPASSOU\x1b[0m');
-
-    console.log('\n===============================================================');
-    console.log('  ✅ Resultado: Todos os testes da sessão desktop passaram.');
-    console.log('===============================================================\n');
-}
-
-runTests().catch((err) => {
-    console.error(err);
-    process.exit(1);
+    });
 });

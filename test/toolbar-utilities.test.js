@@ -1,72 +1,105 @@
-const fs = require('fs');
-const path = require('path');
-const assert = require('assert');
+const { describe, it } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
+const { createMockDocument, createMockElement } = require('./helpers/mock-dom');
 
-async function runTests() {
-    console.log('\n===============================================================');
-    console.log('  🧪 SUÍTE DE TESTES: UTILITÁRIOS DA BARRA INFERIOR (PiP E STATS)');
-    console.log('===============================================================\n');
+describe('Utilitários da barra inferior (PiP e Stats)', () => {
+    it('T1: public/index.html define btnTogglePip, btnToggleStats e statsModal', () => {
+        const html = fs.readFileSync(path.resolve(__dirname, '../public/index.html'), 'utf8');
+        assert.ok(html.includes('id="btnTogglePip"'));
+        assert.ok(html.includes('id="btnToggleStats"'));
+        assert.ok(html.includes('id="statsModal"'));
+    });
 
-    let failures = 0;
+    it('T2: stats-modal togglePictureInPicture ativa e sai de PiP corretamente', async () => {
+        const { createStatsModalController } = await import(
+            pathToFileURL(path.resolve(__dirname, '../public/js/modules/stats-modal.js')).href
+        );
 
-    // Teste 1: public/index.html contém os botões na toolbar-right e o modal de estatísticas
-    process.stdout.write('  [Teste] T1: public/index.html define btnTogglePip, btnToggleStats e statsModal ... ');
-    const htmlPath = path.resolve(__dirname, '../public/index.html');
-    const html = fs.readFileSync(htmlPath, 'utf8');
+        const doc = createMockDocument();
+        let pipRequested = 0;
+        let pipExited = 0;
+        doc.pictureInPictureEnabled = true;
+        doc.pictureInPictureElement = null;
+        doc.exitPictureInPicture = async () => {
+            pipExited += 1;
+            doc.pictureInPictureElement = null;
+        };
 
-    const hasPipBtn = html.includes('id="btnTogglePip"');
-    const hasStatsBtn = html.includes('id="btnToggleStats"');
-    const hasStatsModal = html.includes('id="statsModal"');
+        const streamGrid = createMockElement('div', { id: 'streamGrid' });
+        const remoteTile = createMockElement('div', { id: 'tile-peer-1', className: 'stream-tile' });
+        const remoteVideo = createMockElement('video');
+        remoteVideo.requestPictureInPicture = async () => {
+            pipRequested += 1;
+            doc.pictureInPictureElement = remoteVideo;
+        };
+        remoteTile.appendChild(remoteVideo);
+        streamGrid.appendChild(remoteTile);
+        doc.body.appendChild(streamGrid);
 
-    if (hasPipBtn && hasStatsBtn && hasStatsModal) {
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } else {
-        console.log('\x1b[31mFALHOU (botões na toolbar-right ou statsModal ausentes no HTML)\x1b[0m');
-        failures++;
-    }
+        const toasts = [];
+        const ctrl = createStatsModalController({
+            state: { selectedVideoResolution: '1080p' },
+            dom: { streamGrid },
+            getPeers: () => new Map(),
+            getServerUrl: () => 'http://127.0.0.1',
+            showToast: (msg, type) => toasts.push({ msg, type }),
+            documentObj: doc,
+            windowObj: { location: { reload: () => {} } }
+        });
 
-    // Teste 2: public/app.js implementa togglePictureInPicture
-    process.stdout.write('  [Teste] T2: public/app.js implementa togglePictureInPicture ... ');
-    const appJsPath = path.resolve(__dirname, '../public/app.js');
-    const { loadClientBundleSource } = require('./helpers/client-source');
-    const appJs = loadClientBundleSource();
-    const hasPipFunc = appJs.includes('function togglePictureInPicture(') || appJs.includes('async function togglePictureInPicture(');
-    const usesPipApi = appJs.includes('requestPictureInPicture') || appJs.includes('exitPictureInPicture');
+        await ctrl.togglePictureInPicture();
+        assert.strictEqual(pipRequested, 1);
+        assert.strictEqual(doc.pictureInPictureElement, remoteVideo);
 
-    if (hasPipFunc && usesPipApi) {
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } else {
-        console.log('\x1b[31mFALHOU (função togglePictureInPicture ausente ou sem API PiP)\x1b[0m');
-        failures++;
-    }
+        await ctrl.togglePictureInPicture();
+        assert.strictEqual(pipExited, 1);
+        assert.strictEqual(doc.pictureInPictureElement, null);
+        assert.strictEqual(toasts.length, 0);
+    });
 
-    // Teste 3: public/app.js implementa openStatsModal e closeStatsModal com ESC e backdrop
-    process.stdout.write('  [Teste] T3: public/app.js implementa modal de estatísticas com ESC e backdrop ... ');
-    const hasStatsOpen = appJs.includes('function openStatsModal(');
-    const hasStatsClose = appJs.includes('function closeStatsModal(');
-    const hasStatsEsc = appJs.includes('statsModal') && appJs.includes('closeStatsModal()');
-    const hasStatsBackdrop = appJs.includes('e.target === statsModal');
+    it('T3: openStatsModal/closeStatsModal respondem a clique de backdrop e API pública', async () => {
+        const { createStatsModalController } = await import(
+            pathToFileURL(path.resolve(__dirname, '../public/js/modules/stats-modal.js')).href
+        );
 
-    if (hasStatsOpen && hasStatsClose && hasStatsEsc && hasStatsBackdrop) {
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } else {
-        console.log('\x1b[31mFALHOU (funções de stats modal ou listeners de ESC/backdrop ausentes)\x1b[0m');
-        failures++;
-    }
+        const doc = createMockDocument();
+        const statsModal = createMockElement('div', { id: 'statsModal' });
+        statsModal.hidden = true;
+        statsModal.style.display = 'none';
+        const btnToggleStats = createMockElement('button', { id: 'btnToggleStats' });
+        const btnCloseStatsModal = createMockElement('button', { id: 'btnCloseStatsModal' });
+        doc.body.appendChild(statsModal);
 
-    console.log('\n===============================================================');
-    if (failures === 0) {
-        console.log('  ✅ Resultado: Todos os testes de utilitários da barra passaram.');
-        console.log('===============================================================\n');
-        process.exit(0);
-    } else {
-        console.log(`  ❌ Resultado: ${failures} validação(ões) falharam conforme esperado no código antigo.`);
-        console.log('===============================================================\n');
-        process.exit(1);
-    }
-}
+        const ctrl = createStatsModalController({
+            state: { selectedVideoResolution: '1080p' },
+            dom: { statsModal, btnToggleStats, btnCloseStatsModal },
+            getPeers: () => new Map(),
+            getServerUrl: () => 'http://127.0.0.1',
+            showToast: () => {},
+            documentObj: doc,
+            windowObj: { location: { reload: () => {} } }
+        });
+        ctrl.bindEvents();
 
-runTests().catch(err => {
-    console.error('Erro inesperado no teste:', err);
-    process.exit(1);
+        try {
+            ctrl.openStatsModal();
+            assert.strictEqual(ctrl.isStatsModalOpen(), true);
+
+            // Backdrop click fecha
+            statsModal.dispatchEvent({ type: 'click', target: statsModal });
+            assert.strictEqual(ctrl.isStatsModalOpen(), false);
+            assert.strictEqual(statsModal.style.display, 'none');
+
+            // Reabre e fecha via botão
+            btnToggleStats.click();
+            assert.strictEqual(ctrl.isStatsModalOpen(), true);
+            btnCloseStatsModal.click();
+            assert.strictEqual(ctrl.isStatsModalOpen(), false);
+        } finally {
+            ctrl.closeStatsModal();
+        }
+    });
 });

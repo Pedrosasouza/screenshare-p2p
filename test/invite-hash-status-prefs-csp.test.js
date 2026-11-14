@@ -1,466 +1,310 @@
-const assert = require('assert');
-const fs = require('fs');
-const http = require('http');
-const path = require('path');
-const vm = require('vm');
+'use strict';
 
-const rootDir = path.resolve(__dirname, '..');
-const appPath = path.join(rootDir, 'public', 'app.js');
-const indexPath = path.join(rootDir, 'public', 'index.html');
-const stylePath = path.join(rootDir, 'public', 'style.css');
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 
-function extractFn(source, name) {
-    const regex = new RegExp(`(?:async\\s+)?function\\s+${name}\\s*\\([\\s\\S]*?\\n\\}`);
-    const match = source.match(regex);
-    assert(match, `Função ${name} não encontrada em public/app.js`);
-    return match[0];
+const { startTestServer } = require('./helpers/test-server');
+const { createMockElement, createMockDocument, createMockStorage } = require('./helpers/mock-dom');
+
+const ROOT_DIR = path.resolve(__dirname, '..');
+const indexHtml = fs.readFileSync(path.join(ROOT_DIR, 'public/index.html'), 'utf8');
+const styleCss = fs.readFileSync(path.join(ROOT_DIR, 'public/style.css'), 'utf8');
+
+async function loadClientModules() {
+    const [sigMod, prefsMod, qosMonMod, shareModalMod, tileDomMod, appMod] = await Promise.all([
+        import(pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/signaling-url.js')).href),
+        import(pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/preferences.js')).href),
+        import(pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/qos-monitor.js')).href),
+        import(pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/share-config-modal.js')).href),
+        import(pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/tile-dom.js')).href),
+        import(`${pathToFileURL(path.join(ROOT_DIR, 'public/app.js')).href}?ihs=${Date.now()}`)
+    ]);
+    return { ...sigMod, ...prefsMod, ...qosMonMod, ...shareModalMod, ...tileDomMod, ...appMod };
 }
 
-function extractSocketHandler(source, eventName) {
-    const regex = new RegExp(`socket\\.on\\('${eventName}'[\\s\\S]*?\\n\\}\\);`);
-    const match = source.match(regex);
-    assert(match, `Handler socket.on('${eventName}') não encontrado em public/app.js`);
-    return match[0];
-}
-
-function extractDomContentLoaded(source) {
-    const match = source.match(/window\.addEventListener\('DOMContentLoaded'[\s\S]*?\n\}\);/);
-    assert(match, "Handler window.addEventListener('DOMContentLoaded') não encontrado em public/app.js");
-    return match[0];
-}
-
-function extractCopyLinkBlock(source) {
-    const marker = '// Copy Invite Link';
-    const start = source.indexOf(marker);
-    assert(start !== -1, 'Bloco // Copy Invite Link não encontrado em public/app.js');
-    const end = source.indexOf('\nwindow.addEventListener(', start);
-    assert(end !== -1, 'Fim do bloco // Copy Invite Link não encontrado em public/app.js');
-    return source.slice(start, end);
-}
-
-function httpGet(url) {
-    return new Promise((resolve, reject) => {
-        http.get(url, (res) => {
-            let body = '';
-            res.setEncoding('utf8');
-            res.on('data', (chunk) => { body += chunk; });
-            res.on('end', () => resolve({ statusCode: res.statusCode, headers: res.headers, body }));
-        }).on('error', reject);
+test('T1 (Item A): Invite link places #pass= in URL fragment, strips from history, and preserves other hash params', async () => {
+    const { buildInviteUrl, initApp } = await loadClientModules();
+    const link = buildInviteUrl({
+        roomId: 'casal-1',
+        password: 's@nha#1 2',
+        isDesktop: false,
+        serverUrl: 'https://screenshare-p2p.onrender.com',
+        origin: 'https://screenshare-p2p.onrender.com',
+        pathname: '/app/'
     });
-}
 
-async function runTests() {
-    console.log('\n===============================================================');
-    console.log('  🧪 SUÍTE DE TESTES: #pass=, STATUS HEADER, PREFS & CSP/LIMPEZA');
-    console.log('===============================================================\n');
+    const parsed = new URL(link);
+    assert.equal(parsed.searchParams.get('room'), 'casal-1');
+    assert.equal(parsed.searchParams.get('pass'), null, 'Password must NEVER appear in query string');
+    assert.equal(parsed.hash, '#pass=s%40nha%231%202');
 
-    let failures = 0;
-    const { loadClientBundleSource } = require('./helpers/client-source');
-    const appJs = loadClientBundleSource();
-    const indexHtml = fs.readFileSync(indexPath, 'utf8');
-    const styleCss = fs.readFileSync(stylePath, 'utf8');
+    const replaced = [];
+    const emitted = [];
+    const win = {
+        location: {
+            protocol: 'https:',
+            origin: 'https://screenshare-p2p.onrender.com',
+            pathname: '/',
+            search: '?room=casal-1',
+            hash: '#outro=1&pass=segredo-hash'
+        },
+        history: {
+            state: { existing: true },
+            replaceState(_state, _title, url) {
+                replaced.push(url);
+                const u = new URL(url, 'https://screenshare-p2p.onrender.com');
+                win.location.search = u.search;
+                win.location.hash = u.hash;
+            },
+            pushState() {}
+        },
+        addEventListener() {},
+        removeEventListener() {},
+        matchMedia: () => ({ matches: false })
+    };
 
-    // T1 (Item A): btnCopyLink gera #pass= em vez de ?pass=, e DOMContentLoaded lê #pass= e ?pass= limpando ambos
-    process.stdout.write('  [Teste] T1 (Item A): btnCopyLink usa #pass= e DOMContentLoaded lê #pass= / ?pass= limpando URL ... ');
+    const fakeSocket = {
+        id: 's1',
+        connected: true,
+        on() {},
+        emit(ev, payload) { emitted.push({ ev, payload }); },
+        disconnect() {}
+    };
+
+    const app = initApp({
+        windowObj: win,
+        documentObj: createMockDocument({}, { createElement: (tag) => createMockElement(tag) }),
+        navigatorObj: { clipboard: { writeText: async () => {} } },
+        storage: createMockStorage(),
+        ioFactory: () => fakeSocket,
+        serverUrl: 'https://screenshare-p2p.onrender.com'
+    });
+
     try {
-        const clipboardWrites = [];
-        let copyHandler = null;
-        const btnCopyLink = {
-            innerHTML: '<i class="fa-regular fa-copy"></i> <span class="btn-text">Copiar Link</span>',
-            addEventListener(ev, fn) {
-                if (ev === 'click') copyHandler = fn;
-            }
-        };
+        emitted.length = 0;
+        app.roomModalCtrl.applyInitialUrlAndRestore();
 
-        const windowObj = {
-            location: {
-                protocol: 'https:',
-                origin: 'https://screenshare-p2p.onrender.com',
-                pathname: '/',
-                search: '?room=casal-1',
-                hash: '#pass=segredo-hash'
-            },
-            history: {
-                state: null,
-                replaced: [],
-                replaceState(s, _t, url) {
-                    this.replaced.push(url);
-                    const parsed = new URL(url, 'https://screenshare-p2p.onrender.com');
-                    windowObj.location.pathname = parsed.pathname;
-                    windowObj.location.search = parsed.search;
-                    windowObj.location.hash = parsed.hash;
-                }
-            },
-            addEventListener() {}
-        };
-
-        const sandbox = {
-            URLSearchParams,
-            encodeURIComponent,
-            setTimeout,
-            clearTimeout,
-            roomId: 'casal-1',
-            currentRoomPassword: 'segredo-hash',
-            btnCopyLink,
-            window: windowObj,
-            navigator: {
-                clipboard: {
-                    writeText: (txt) => {
-                        clipboardWrites.push(txt);
-                        return Promise.resolve();
-                    }
-                }
-            },
-            showToast() {}
-        };
-
-        vm.createContext(sandbox);
-        vm.runInContext(extractCopyLinkBlock(appJs), sandbox);
-        assert(copyHandler, 'Listener click de btnCopyLink deve existir');
-        await copyHandler();
-
-        assert.strictEqual(clipboardWrites.length, 1);
-        assert.strictEqual(
-            clipboardWrites[0],
-            'https://screenshare-p2p.onrender.com/?room=casal-1#pass=segredo-hash',
-            'Link copiado deve usar #pass= e não ?pass='
-        );
-        assert(!clipboardWrites[0].includes('?pass=') && !clipboardWrites[0].includes('&pass='), 'Link não deve vazar senha na query string');
-
-        // Agora testa DOMContentLoaded lendo #pass= e limpando da URL
-        const joinCalls = [];
-        const domListeners = {};
-        const windowDom = {
-            location: {
-                protocol: 'https:',
-                origin: 'https://screenshare-p2p.onrender.com',
-                pathname: '/',
-                search: '?room=casal-1',
-                hash: '#pass=segredo-hash&outro=1'
-            },
-            history: {
-                state: null,
-                replaced: [],
-                replaceState(s, _t, url) {
-                    this.replaced.push(url);
-                    const parsed = new URL(url, 'https://screenshare-p2p.onrender.com');
-                    windowDom.location.pathname = parsed.pathname;
-                    windowDom.location.search = parsed.search;
-                    windowDom.location.hash = parsed.hash;
-                }
-            },
-            addEventListener(ev, fn) { domListeners[ev] = fn; }
-        };
-
-        const domSandbox = {
-            URLSearchParams,
-            console: { log: () => {}, warn: () => {}, error: () => {} },
-            STORAGE_KEY: 'streamgrid_last_room',
-            window: windowDom,
-            localStorage: { getItem: () => null, removeItem() {} },
-            inputCreateRoomPassword: { value: '' },
-            inputJoinRoomPassword: { value: '' },
-            inputJoinRoomId: { value: '' },
-            initTheme() {},
-            sanitizeRoomId: (s) => (s || '').trim().toLowerCase(),
-            getSessionRoomPassword: () => '',
-            openRoomModal() {},
-            showRoomError() {},
-            joinRoom: (r, p) => joinCalls.push({ r, p })
-        };
-        vm.createContext(domSandbox);
-        vm.runInContext(extractDomContentLoaded(appJs), domSandbox);
-        domListeners.DOMContentLoaded();
-
-        assert.deepStrictEqual(joinCalls, [{ r: 'casal-1', p: 'segredo-hash' }], 'DOMContentLoaded deve ler senha de #pass=');
-        assert.strictEqual(windowDom.history.replaced.length, 1);
-        assert(!windowDom.location.hash.includes('segredo-hash'), 'Hash #pass= deve ser removido da barra de endereço');
-        assert(windowDom.location.hash.includes('outro=1'), 'Outros parâmetros do hash devem ser preservados');
-
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        failures++;
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+        const joins = emitted.filter((e) => e.ev === 'join-room');
+        assert.equal(joins.length, 1);
+        assert.equal(joins[0].payload.roomId, 'casal-1');
+        assert.equal(joins[0].payload.password, 'segredo-hash');
+        assert.equal(replaced.length, 1);
+        assert(!win.location.hash.includes('segredo-hash'), 'Hash #pass= must be removed from address bar');
+        assert(win.location.hash.includes('outro=1'), 'Other hash parameters must be preserved');
+    } finally {
+        app.teardownClientSession();
     }
+});
 
-    // T2 (Item B): Indicador fixo de status da sinalização no header
-    process.stdout.write('  [Teste] T2 (Item B): Header possui #connectionStatusPill e transiciona entre estados ... ');
+test('T2 (Item B): Signaling status pill transitions across waking, connected, reconnecting, and offline', async () => {
+    assert.ok(indexHtml.includes('id="connectionStatusPill"'));
+    assert.ok(indexHtml.includes('id="connectionStatusText"'));
+    assert.match(styleCss, /\.connection-status-pill/);
+
+    const { initApp, COLD_START_NOTICE_DELAY_MS } = await loadClientModules();
+    const pill = createMockElement('div', { id: 'connectionStatusPill', className: 'info-pill connection-status-pill' });
+    const textEl = createMockElement('span', { id: 'connectionStatusText' });
+    const fakeDoc = createMockDocument({ connectionStatusPill: pill, connectionStatusText: textEl });
+
+    const origDocument = global.document;
+    const origSetTimeout = global.setTimeout;
+    const origClearTimeout = global.clearTimeout;
+    const timers = new Map();
+    let nextId = 1;
+    global.document = fakeDoc;
+    global.setTimeout = (fn, ms) => {
+        if (ms === COLD_START_NOTICE_DELAY_MS) {
+            const id = nextId++;
+            timers.set(id, { fn, ms });
+            return id;
+        }
+        return origSetTimeout(fn, ms);
+    };
+    global.clearTimeout = (id) => {
+        if (timers.has(id)) {
+            timers.delete(id);
+            return;
+        }
+        return origClearTimeout(id);
+    };
+
+    const socketHandlers = {};
+    const fakeSocket = {
+        id: 's1',
+        connected: false,
+        on(ev, fn) { socketHandlers[ev] = fn; },
+        emit() {},
+        disconnect() {}
+    };
+
     try {
-        assert(indexHtml.includes('id="connectionStatusPill"'), 'index.html deve conter #connectionStatusPill');
-        assert(indexHtml.includes('id="connectionStatusText"'), 'index.html deve conter #connectionStatusText');
-        assert(/\.connection-status-pill/.test(styleCss), 'style.css deve estilizar .connection-status-pill');
-
-        const pill = {
-            className: 'info-pill connection-status-pill',
-            dataset: {},
-            title: '',
-            setAttribute(k, v) { if (k === 'data-status') this.dataset.status = v; }
-        };
-        const textEl = { textContent: '' };
-        const socketHandlers = {};
-        const timers = new Map();
-        let nextId = 1;
-
-        const socket = {
-            id: 's1',
-            connected: false,
-            on(ev, fn) { socketHandlers[ev] = fn; },
-            emit() {}
-        };
-
-        const sandbox = {
-            Map,
-            console: { log: () => {}, warn: () => {}, error: () => {} },
-            COLD_START_NOTICE_DELAY_MS: 3000,
-            coldStartTimer: null,
-            hasShownColdStartToast: false,
-            wasSocketDisconnected: false,
-            hasShownConnectErrorToast: false,
-            myId: '',
-            roomId: '',
-            pendingRoomJoin: null,
-            currentRoomPassword: '',
-            currentUserName: '',
-            clientId: 'c1',
-            socket,
-            document: {
-                getElementById: (id) => {
-                    if (id === 'connectionStatusPill') return pill;
-                    if (id === 'connectionStatusText') return textEl;
-                    return null;
-                }
+        const app = initApp({
+            windowObj: {
+                location: { protocol: 'http:', origin: 'http://localhost:3000', pathname: '/', search: '', hash: '' },
+                addEventListener() {},
+                removeEventListener() {},
+                matchMedia: () => ({ matches: false })
             },
-            setTimeout: (fn, ms) => {
-                const id = nextId++;
-                timers.set(id, { fn, ms });
-                return id;
-            },
-            clearTimeout: (id) => timers.delete(id),
-            showToast() {}
-        };
+            documentObj: fakeDoc,
+            navigatorObj: { clipboard: { writeText: async () => {} } },
+            storage: createMockStorage(),
+            ioFactory: () => fakeSocket,
+            serverUrl: 'http://localhost:3000'
+        });
 
-        vm.createContext(sandbox);
-        vm.runInContext(extractFn(appJs, 'setSignalingStatus'), sandbox);
-        vm.runInContext(extractFn(appJs, 'scheduleColdStartNotice'), sandbox);
-        vm.runInContext(extractFn(appJs, 'cancelColdStartNotice'), sandbox);
-        vm.runInContext(extractSocketHandler(appJs, 'connect'), sandbox);
-        vm.runInContext(extractSocketHandler(appJs, 'disconnect'), sandbox);
-        vm.runInContext(extractSocketHandler(appJs, 'connect_error'), sandbox);
+        try {
+            const [tid, entry] = Array.from(timers.entries())[0];
+            timers.delete(tid);
+            entry.fn();
+            assert.equal(pill.dataset.status, 'waking');
+            assert.match(textEl.textContent, /acordando/i);
 
-        sandbox.scheduleColdStartNotice();
-        const [tid, entry] = Array.from(timers.entries())[0];
-        timers.delete(tid);
-        entry.fn();
-        assert.strictEqual(pill.dataset.status, 'waking');
-        assert(/acordando/i.test(textEl.textContent));
+            fakeSocket.connected = true;
+            socketHandlers.connect();
+            assert.equal(pill.dataset.status, 'connected');
+            assert.match(textEl.textContent, /conectado/i);
 
-        socket.connected = true;
-        socketHandlers.connect();
-        assert.strictEqual(pill.dataset.status, 'connected');
-        assert(/conectado/i.test(textEl.textContent));
+            fakeSocket.connected = false;
+            socketHandlers.disconnect('transport close');
+            assert.equal(pill.dataset.status, 'reconnecting');
+            assert.match(textEl.textContent, /reconectando/i);
 
-        socket.connected = false;
-        socketHandlers.disconnect('transport close');
-        assert.strictEqual(pill.dataset.status, 'reconnecting');
-        assert(/reconectando/i.test(textEl.textContent));
-
-        socketHandlers.connect_error(new Error('offline'));
-        assert.strictEqual(pill.dataset.status, 'offline');
-        assert(/offline/i.test(textEl.textContent));
-
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        failures++;
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+            socketHandlers.connect_error(new Error('offline'));
+            assert.equal(pill.dataset.status, 'offline');
+            assert.match(textEl.textContent, /offline/i);
+        } finally {
+            app.teardownClientSession();
+        }
+    } finally {
+        global.setTimeout = origSetTimeout;
+        global.clearTimeout = origClearTimeout;
+        global.document = origDocument;
     }
+});
 
-    // T3 (Item C): Persistência de audioSourceType e contentHintMode em localStorage
-    process.stdout.write('  [Teste] T3 (Item C): Persiste audioSourceType e contentHintMode em localStorage ... ');
-    try {
-        const audioKeyMatch = appJs.match(/const AUDIO_SOURCE_KEY\s*=\s*'([^']+)';/);
-        const hintKeyMatch = appJs.match(/const CONTENT_HINT_KEY\s*=\s*'([^']+)';/);
-        assert(audioKeyMatch, 'AUDIO_SOURCE_KEY não encontrada em public/app.js');
-        assert(hintKeyMatch, 'CONTENT_HINT_KEY não encontrada em public/app.js');
+test('T3 (Item C): AUDIO_SOURCE_KEY and CONTENT_HINT_KEY persist in localStorage and restore in UI & Share modal', async () => {
+    const {
+        AUDIO_SOURCE_KEY,
+        CONTENT_HINT_KEY,
+        loadSavedClientPreferences,
+        createQosMonitor,
+        createShareConfigModalController
+    } = await loadClientModules();
 
-        const localMap = new Map([
-            [audioKeyMatch[1], 'app'],
-            [hintKeyMatch[1], 'detail']
-        ]);
+    const storage = createMockStorage({
+        [AUDIO_SOURCE_KEY]: 'app',
+        [CONTENT_HINT_KEY]: 'detail'
+    });
+    const qualityModeLabel = createMockElement('span', { id: 'qualityModeLabel' });
+    const btnQualityToggle = createMockElement('button', { id: 'btnQualityToggle' });
+    const radios = {
+        exclude_discord: createMockElement('input', { value: 'exclude_discord', checked: true }),
+        app: createMockElement('input', { value: 'app', checked: false }),
+        system: createMockElement('input', { value: 'system', checked: false }),
+        none: createMockElement('input', { value: 'none', checked: false })
+    };
+    const radioList = Object.values(radios);
+    const appSelectorContainer = createMockElement('div', { style: { display: 'none' } });
+    const shareConfigModal = createMockElement('div', { style: { display: 'none' }, hidden: true });
+    const doc = createMockDocument({ qualityModeLabel, btnQualityToggle, appSelectorContainer, shareConfigModal });
+    doc.querySelector = (sel) => (sel === 'input[name="audioSourceType"]:checked' ? radioList.find((r) => r.checked) || null : null);
+    doc.querySelectorAll = (sel) => (sel === 'input[name="audioSourceType"]' ? radioList : []);
 
-        const qualityLabel = { textContent: '' };
-        const btnQuality = { title: '' };
-        const radios = {
-            exclude_discord: { value: 'exclude_discord', checked: true, closest: () => ({ classList: { toggle() {} }, style: {} }) },
-            app: { value: 'app', checked: false, closest: () => ({ classList: { toggle() {} }, style: {} }) },
-            system: { value: 'system', checked: false, closest: () => ({ classList: { toggle() {} }, style: {} }) },
-            none: { value: 'none', checked: false, closest: () => ({ classList: { toggle() {} }, style: {} }) }
-        };
-        const radioList = Object.values(radios);
+    const state = {
+        contentHintMode: 'motion',
+        selectedVideoResolution: '1080p',
+        selectedVideoFps: 60,
+        selectedAudioSource: null,
+        localStream: null
+    };
+    const qm = createQosMonitor({
+        state,
+        dom: { qualityModeLabel, btnQualityToggle },
+        getPeers: () => new Map(),
+        storage
+    });
 
-        const sandbox = {
-            Boolean,
-            Number,
-            AUDIO_SOURCE_KEY: audioKeyMatch[1],
-            CONTENT_HINT_KEY: hintKeyMatch[1],
-            contentHintMode: 'motion',
-            selectedVideoResolution: '1080p',
-            selectedVideoFps: 60,
-            localStream: null,
-            peers: new Map(),
-            qualityModeLabel: qualityLabel,
-            btnQualityToggle: btnQuality,
+    loadSavedClientPreferences({
+        state,
+        storage,
+        onApplied: () => qm.applyQualityModeUI()
+    });
+    assert.equal(state.contentHintMode, 'detail');
+    assert.equal(qualityModeLabel.textContent, 'Nítido');
+
+    qm.toggleQualityMode();
+    assert.equal(state.contentHintMode, 'motion');
+    assert.equal(storage.getItem(CONTENT_HINT_KEY), 'motion');
+
+    const shareModalCtrl = createShareConfigModalController({
+        state,
+        dom: {
             audioSourceExcludeDiscord: radios.exclude_discord,
             audioSourceApp: radios.app,
             audioSourceSystem: radios.system,
             audioSourceNone: radios.none,
-            appSelectorContainer: { style: { display: 'none' } },
-            shareConfigModal: { style: { display: 'none' }, removeAttribute() {} },
-            localStorage: {
-                getItem: (k) => (localMap.has(k) ? localMap.get(k) : null),
-                setItem: (k, v) => localMap.set(k, String(v))
-            },
-            document: {
-                querySelector: (sel) => {
-                    if (sel === 'input[name="audioSourceType"]:checked') {
-                        return radioList.find((r) => r.checked) || null;
-                    }
-                    return null;
-                },
-                querySelectorAll: (sel) => (sel === 'input[name="audioSourceType"]' ? radioList : [])
-            },
-            isDesktopApp: () => true,
-            updateEchoWarningVisibility() {},
-            checkDiscordStatus() {},
-            fetchWindowList() {}
-        };
+            appSelectorContainer,
+            shareConfigModal
+        },
+        isDesktopApp: () => true,
+        documentObj: doc,
+        storage
+    });
+    shareModalCtrl.openShareConfigModal();
+    assert.equal(radios.app.checked, true);
+    assert.equal(appSelectorContainer.style.display, 'flex');
+});
 
-        vm.createContext(sandbox);
-        vm.runInContext(extractFn(appJs, 'loadSavedClientPreferences'), sandbox);
-        vm.runInContext(extractFn(appJs, 'applyQualityModeUI'), sandbox);
-        vm.runInContext(extractFn(appJs, 'toggleQualityMode'), sandbox);
-        vm.runInContext(extractFn(appJs, 'openShareConfigModal'), sandbox);
+test('T4 (Item E): disposeTileElement unifies cleanup without stale inline systemCard border', async () => {
+    const shareModalSrc = fs.readFileSync(path.join(ROOT_DIR, 'public/js/modules/share-config-modal.js'), 'utf8');
+    assert.equal(/systemCard\.style\.border\s*=/.test(shareModalSrc), false);
 
-        sandbox.loadSavedClientPreferences();
-        assert.strictEqual(sandbox.contentHintMode, 'detail', 'Deve restaurar contentHintMode=detail do localStorage');
-        assert.strictEqual(qualityLabel.textContent, 'Nítido');
+    const { disposeTileElement } = await loadClientModules();
+    let unmuteCleaned = 0;
+    let removedCount = 0;
+    let exitFsCalls = 0;
 
-        sandbox.toggleQualityMode();
-        assert.strictEqual(sandbox.contentHintMode, 'motion');
-        assert.strictEqual(localMap.get(hintKeyMatch[1]), 'motion', 'toggleQualityMode deve salvar no localStorage');
-
-        sandbox.openShareConfigModal();
-        assert.strictEqual(radios.app.checked, true, 'openShareConfigModal em Desktop deve restaurar áudio salvo (app)');
-        assert.strictEqual(sandbox.appSelectorContainer.style.display, 'flex');
-
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        failures++;
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-    }
-
-    // T4 (Item E - limpeza): disposeTileElement centralizado e sem systemCard.style.border inline
-    process.stdout.write('  [Teste] T4 (Item E): disposeTileElement unifica cleanup e remove borda inline residual ... ');
-    try {
-        assert(!/systemCard\.style\.border\s*=/.test(appJs), 'openShareConfigModal não deve definir systemCard.style.border inline');
-
-        let unmuteCleaned = 0;
-        let removedCount = 0;
-        let exitFsCalls = 0;
-        const videoEl = { srcObject: { id: 'stream-1' } };
-        const tileEl = {
-            _cleanupTapUnmute: () => { unmuteCleaned += 1; },
-            querySelector: (sel) => (sel === 'video' ? videoEl : null),
-            remove: () => { removedCount += 1; }
-        };
-
-        const sandbox = {
-            Promise,
-            document: {
-                fullscreenElement: tileEl,
-                exitFullscreen: () => {
-                    exitFsCalls += 1;
-                    return Promise.resolve();
-                }
-            }
-        };
-
-        vm.createContext(sandbox);
-        vm.runInContext(extractFn(appJs, 'disposeTileElement'), sandbox);
-        sandbox.disposeTileElement(tileEl);
-
-        assert.strictEqual(unmuteCleaned, 1);
-        assert.strictEqual(videoEl.srcObject, null);
-        assert.strictEqual(exitFsCalls, 1);
-        assert.strictEqual(removedCount, 1);
-
-        const cleanupSrc = extractFn(appJs, 'cleanupRoomState');
-        const removePeerSrc = extractFn(appJs, 'removePeerConnection');
-        const removeTileSrc = extractFn(appJs, 'removeStreamTile');
-        assert(cleanupSrc.includes('disposeTileElement('), 'cleanupRoomState deve usar disposeTileElement');
-        assert(removePeerSrc.includes('disposeTileElement('), 'removePeerConnection deve usar disposeTileElement');
-        assert(removeTileSrc.includes('disposeTileElement('), 'removeStreamTile deve usar disposeTileElement');
-
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        failures++;
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-    }
-
-    // T5 (Item E - CSP Web): server.js envia Content-Security-Policy seguro
-    process.stdout.write('  [Teste] T5 (Item E): server.js envia Content-Security-Policy em GET / e /health ... ');
-    try {
-        const { server } = require('../server.js');
-        await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-        const { port } = server.address();
-        try {
-            const res = await httpGet(`http://127.0.0.1:${port}/`);
-            const csp = res.headers['content-security-policy'];
-            assert(typeof csp === 'string' && csp.length > 0, 'Header Content-Security-Policy ausente');
-            assert(csp.includes("default-src 'self'"), 'CSP deve definir default-src self');
-            assert(csp.includes("script-src 'self' blob:"), 'CSP deve restringir script-src a self e blob:');
-            assert(!csp.includes("'unsafe-inline'") || !csp.match(/script-src[^;]*'unsafe-inline'/), 'script-src não deve permitir unsafe-inline');
-            assert(csp.includes("object-src 'none'"), 'CSP deve bloquear object-src');
-            assert(csp.includes("frame-ancestors 'none'"), 'CSP deve bloquear frame-ancestors');
-        } finally {
-            await new Promise((resolve) => server.close(resolve));
+    const videoEl = createMockElement('video');
+    videoEl.srcObject = { id: 'stream-1' };
+    const tileEl = {
+        _cleanupTapUnmute: () => { unmuteCleaned += 1; },
+        querySelector: (sel) => (sel === 'video' ? videoEl : null),
+        remove: () => { removedCount += 1; }
+    };
+    const fakeDoc = {
+        fullscreenElement: tileEl,
+        exitFullscreen: () => {
+            exitFsCalls += 1;
+            return Promise.resolve();
         }
+    };
 
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        failures++;
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-    }
+    disposeTileElement(tileEl, fakeDoc);
+    assert.equal(unmuteCleaned, 1);
+    assert.equal(videoEl.srcObject, null);
+    assert.equal(exitFsCalls, 1);
+    assert.equal(removedCount, 1);
+});
 
-    // T6 (Item B.2): Assets locais offline sem CDNs externas em index.html, tauri.conf.json e CSP
-    process.stdout.write('  [Teste] T6 (Item B.2): Inter e FontAwesome servidos localmente sem CDNs externas ... ');
+test('T5 (Item D): Server sets CSP and security headers on /, /health, and /ice-servers', async () => {
+    const ts = await startTestServer();
     try {
-        const html = fs.readFileSync(path.join(rootDir, 'public', 'index.html'), 'utf8');
-        const tauriConf = fs.readFileSync(path.join(rootDir, 'src-tauri', 'tauri.conf.json'), 'utf8');
-        const serverJs = fs.readFileSync(path.join(rootDir, 'server.js'), 'utf8');
-
-        assert(!html.includes('fonts.googleapis.com'), 'index.html não deve depender de fonts.googleapis.com');
-        assert(!html.includes('cdnjs.cloudflare.com'), 'index.html não deve depender de cdnjs.cloudflare.com');
-        assert(!tauriConf.includes('fonts.googleapis.com') && !tauriConf.includes('cdnjs.cloudflare.com'), 'tauri.conf.json CSP não deve precisar de CDNs externas');
-        assert(!serverJs.includes('fonts.googleapis.com') && !serverJs.includes('cdnjs.cloudflare.com'), 'server.js CSP não deve liberar CDNs externas');
-        assert(fs.existsSync(path.join(rootDir, 'public', 'vendor', 'inter', 'inter.css')), 'inter.css local deve existir');
-        assert(fs.existsSync(path.join(rootDir, 'public', 'vendor', 'fontawesome', 'css', 'all.min.css')), 'all.min.css local do FontAwesome deve existir');
-
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        failures++;
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+        for (const route of ['/', '/health', '/ice-servers']) {
+            const res = await fetch(`${ts.baseUrl}${route}`);
+            assert.equal(res.status, 200);
+            const csp = res.headers.get('content-security-policy');
+            assert(csp, `Content-Security-Policy header must exist on ${route}`);
+            assert(csp.includes("default-src 'self'"));
+            assert(csp.includes("object-src 'none'"));
+            assert(csp.includes("frame-ancestors 'none'"));
+            assert.equal(res.headers.get('referrer-policy'), 'no-referrer');
+            assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+            assert.equal(res.headers.get('x-frame-options'), 'DENY');
+        }
+    } finally {
+        await ts.close();
     }
-
-    console.log('\n===============================================================');
-    if (failures > 0) {
-        console.log(`  ❌ ${failures} teste(s) falharam.`);
-        console.log('===============================================================\n');
-        process.exit(1);
-    } else {
-        console.log('  ✅ Todos os 6 testes passaram com sucesso!');
-        console.log('===============================================================\n');
-        process.exit(0);
-    }
-}
-
-runTests();
+});

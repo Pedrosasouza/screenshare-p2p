@@ -29,21 +29,24 @@ export function setSignalingStatus(status, customLabel) {
     }
 }
 
-export function getOrCreateToastContainer() {
-    let container = document.getElementById('toastContainer');
-    if (!container) {
-        container = document.createElement('div');
+export function getOrCreateToastContainer(doc = typeof document !== 'undefined' ? document : null) {
+    if (!doc || typeof doc.getElementById !== 'function') return null;
+    let container = doc.getElementById('toastContainer');
+    if (!container && typeof doc.createElement === 'function' && doc.body) {
+        container = doc.createElement('div');
         container.id = 'toastContainer';
         container.className = 'toast-container';
-        document.body.appendChild(container);
+        doc.body.appendChild(container);
     }
     return container;
 }
 
-export function showToast(message, type = 'info', durationMs = 4000) {
+export function showToast(message, type = 'info', durationMs = 4000, doc) {
     if (!message) return;
-    const container = getOrCreateToastContainer();
-    const toast = document.createElement('div');
+    const targetDoc = doc || (typeof document !== 'undefined' ? document : null);
+    const container = getOrCreateToastContainer(targetDoc);
+    if (!container || typeof targetDoc.createElement !== 'function') return;
+    const toast = targetDoc.createElement('div');
     toast.className = `toast toast-${type}`;
 
     let iconClass = 'fa-solid fa-circle-info';
@@ -51,14 +54,14 @@ export function showToast(message, type = 'info', durationMs = 4000) {
     else if (type === 'warning') iconClass = 'fa-solid fa-triangle-exclamation';
     else if (type === 'success') iconClass = 'fa-solid fa-circle-check';
 
-    const iconEl = document.createElement('i');
+    const iconEl = targetDoc.createElement('i');
     iconEl.className = `${iconClass} toast-icon`;
 
-    const messageEl = document.createElement('span');
+    const messageEl = targetDoc.createElement('span');
     messageEl.className = 'toast-message';
     messageEl.textContent = message;
 
-    const closeBtn = document.createElement('button');
+    const closeBtn = targetDoc.createElement('button');
     closeBtn.className = 'toast-close';
     closeBtn.type = 'button';
     closeBtn.title = 'Fechar notificação';
@@ -127,22 +130,32 @@ export function playPresenceChime(type = 'join') {
     } catch (_) {}
 }
 
-export function initTheme() {
+export function initTheme(options = {}) {
+    const win = options.windowObj || (typeof window !== 'undefined' ? window : null);
+    const storageObj = options.storage || (typeof localStorage !== 'undefined' ? localStorage : null);
     let savedTheme = null;
-    try { savedTheme = localStorage.getItem(THEME_KEY); } catch(e) {}
-    
+    if (storageObj && typeof storageObj.getItem === 'function') {
+        try { savedTheme = storageObj.getItem(THEME_KEY); } catch (e) {}
+    }
+
     if (!savedTheme) {
-        const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        const prefersDark = Boolean(win && win.matchMedia && win.matchMedia('(prefers-color-scheme: dark)').matches);
         savedTheme = prefersDark ? 'dark' : 'light';
     }
-    applyTheme(savedTheme);
+    applyTheme(savedTheme, null, options);
 }
 
-export function applyTheme(theme) {
-    document.documentElement.setAttribute('data-theme', theme);
-    try { localStorage.setItem(THEME_KEY, theme); } catch(e) {}
-    
-    const themeBtn = typeof btnThemeToggle !== 'undefined' && btnThemeToggle ? btnThemeToggle : (typeof document !== 'undefined' ? document.getElementById('btnThemeToggle') : null);
+export function applyTheme(theme, themeBtnEl = null, options = {}) {
+    const doc = options.documentObj || (typeof document !== 'undefined' ? document : null);
+    const storageObj = options.storage || (typeof localStorage !== 'undefined' ? localStorage : null);
+    if (doc && doc.documentElement && typeof doc.documentElement.setAttribute === 'function') {
+        doc.documentElement.setAttribute('data-theme', theme);
+    }
+    if (storageObj && typeof storageObj.setItem === 'function') {
+        try { storageObj.setItem(THEME_KEY, theme); } catch (e) {}
+    }
+
+    const themeBtn = themeBtnEl || (doc && typeof doc.getElementById === 'function' ? doc.getElementById('btnThemeToggle') : null);
     if (themeBtn) {
         if (theme === 'dark') {
             themeBtn.innerHTML = '<i class="fa-solid fa-sun"></i>';
@@ -154,8 +167,11 @@ export function applyTheme(theme) {
     }
 }
 
-export function toggleTheme() {
-    const currentTheme = document.documentElement.getAttribute('data-theme') || 'dark';
+export function toggleTheme(options = {}) {
+    const doc = options.documentObj || (typeof document !== 'undefined' ? document : null);
+    const currentTheme = (doc && doc.documentElement && typeof doc.documentElement.getAttribute === 'function'
+        ? doc.documentElement.getAttribute('data-theme')
+        : null) || 'dark';
     const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
-    applyTheme(newTheme);
+    applyTheme(newTheme, null, options);
 }

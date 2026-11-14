@@ -1,384 +1,331 @@
-const fs = require('fs');
-const path = require('path');
-const vm = require('vm');
-const assert = require('assert');
+'use strict';
 
-function extractFn(source, name, isAsync = false) {
-    const prefix = isAsync ? 'async\\s+function' : '(?:async\\s+)?function';
-    const regex = new RegExp(`${prefix}\\s+${name}\\s*\\([\\s\\S]*?\\n\\}`);
-    const match = source.match(regex);
-    if (!match) {
-        throw new Error(`Função ${name} não encontrada em public/app.js`);
-    }
-    return match[0];
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
+
+const {
+    MockMediaStream,
+    MockRTCSessionDescription,
+    MockRTCIceCandidate,
+    createMockTrack,
+    createMockSender,
+    createMockPeerConnection
+} = require('./helpers/mock-webrtc');
+const { createMockElement, createMockDocument, createMockStorage } = require('./helpers/mock-dom');
+
+const ROOT_DIR = path.resolve(__dirname, '..');
+
+async function loadModules() {
+    const [shareMod, webrtcMod] = await Promise.all([
+        import(pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/screen-share.js')).href),
+        import(pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/webrtc-mesh.js')).href)
+    ]);
+    return { ...shareMod, ...webrtcMod };
 }
 
-function createScreenShareSandbox(appJs, overrides = {}) {
+function createScreenShareEnv(mods, overrides = {}) {
     const events = [];
+    const emitted = [];
+    const offersSent = [];
+    const appendedTiles = [];
 
-    class MockMediaStream {
-        constructor(tracks = []) {
-            this._tracks = tracks;
-        }
-        getTracks() {
-            return this._tracks;
-        }
-        getVideoTracks() {
-            return this._tracks.filter((t) => t.kind === 'video');
-        }
-        getAudioTracks() {
-            return this._tracks.filter((t) => t.kind === 'audio');
-        }
-    }
-
-    const sandbox = {
-        Promise,
-        Error,
-        Math,
-        Number,
-        Map,
-        Set,
-        MediaStream: MockMediaStream,
-        console: {
-            log: () => {},
-            warn: () => {},
-            error: () => {}
-        },
-        navigator: {
-            connection: null,
-            mediaDevices: {
-                getDisplayMedia: async () => new MockMediaStream([]),
-                enumerateDevices: async () => [],
-                getUserMedia: async () => new MockMediaStream([])
-            }
-        },
+    const state = {
+        myId: 'self-1',
         selectedVideoResolution: '1080p',
         selectedVideoFps: 60,
         contentHintMode: 'motion',
         currentUserName: 'Tester',
         roomId: 'sala-teste',
-        localStream: null,
-        peers: new Map(),
-        streamGrid: { appendChild: () => {} },
-        btnStartShare: { hidden: false },
-        btnStopShare: { hidden: true },
-        btnQualityToggle: { hidden: true },
-        document: { getElementById: () => null },
-        socket: { emit: () => {} },
-        getVideoConstraints: () => ({ width: 1920, height: 1080 }),
-        configureSenderParams: () => {},
-        addLocalTracksToPC: () => {},
-        sendOffer: () => {},
-        updateGridState: () => {},
-        startQualityMonitor: () => {},
-        stopQualityMonitor: () => {},
-        showToast: (msg, type) => events.push({ type: 'toast', msg, toastType: type }),
-        createStreamTile: () => ({ id: '' }),
-        startExcludeDiscordCapture: async () => null,
-        startAppAudioCapture: async () => null,
-        stopAppAudioCapture: () => events.push({ type: 'stopAppAudioCapture' }),
-        ...overrides
+        localStream: null
+    };
+    const peers = overrides.peers || new Map();
+
+    const streamGrid = createMockElement('div', { id: 'streamGrid' });
+    streamGrid.appendChild = (el) => {
+        appendedTiles.push(el);
+        return el;
+    };
+    const dom = {
+        streamGrid,
+        btnStartShare: createMockElement('button', { id: 'btnStartShare', hidden: false }),
+        btnStopShare: createMockElement('button', { id: 'btnStopShare', hidden: true }),
+        btnQualityToggle: createMockElement('button', { id: 'btnQualityToggle', hidden: true })
+    };
+    const doc = createMockDocument(dom);
+    const socket = overrides.socket || {
+        emit(ev, payload) {
+            emitted.push({ ev, payload });
+        }
     };
 
-    vm.createContext(sandbox);
-    vm.runInContext(extractFn(appJs, 'addLocalTracksToPC'), sandbox);
-    vm.runInContext(extractFn(appJs, 'stopScreenShare'), sandbox);
-    vm.runInContext(extractFn(appJs, 'startScreenShare', true), sandbox);
+    const navigatorObj = overrides.navigatorObj || {
+        connection: null,
+        mediaDevices: {
+            getDisplayMedia: async () => new MockMediaStream([]),
+            enumerateDevices: async () => [],
+            getUserMedia: async () => new MockMediaStream([])
+        }
+    };
 
-    return { sandbox, events, MockMediaStream };
+    const mesh = mods.createWebRtcMesh({
+        state,
+        dom,
+        getSocket: () => socket,
+        getQosMonitor: () => ({ configureSenderParams: () => {} }),
+        getGrid: () => ({ updateGridState: () => {} }),
+        getScreenShare: () => ({ invalidateGeneration: () => {}, stopScreenShare: () => {} }),
+        getRoomModal: () => null,
+        getServerUrl: () => '',
+        rtcConfig: { iceServers: [] },
+        refreshIceServers: async () => {},
+        scheduleIceRefreshTimer: () => {},
+        registerFullscreenChangeHandler: () => {},
+        saveSessionRoomPassword: () => {},
+        clearSessionRoomPassword: () => {},
+        showToast: () => {},
+        playPresenceChime: () => {},
+        RTCPeerConnectionCtor: function () { return createMockPeerConnection(); },
+        RTCSessionDescriptionCtor: MockRTCSessionDescription,
+        RTCIceCandidateCtor: MockRTCIceCandidate,
+        MediaStreamCtor: MockMediaStream,
+        documentObj: doc,
+        windowObj: { addEventListener() {} },
+        storage: createMockStorage()
+    });
+
+    const controller = mods.createScreenShareController({
+        state,
+        dom,
+        getSocket: () => socket,
+        getPeers: () => peers,
+        getWebRtc: () => ({
+            addLocalTracksToPC: () => {},
+            sendOffer: overrides.sendOffer || ((pid) => offersSent.push(pid))
+        }),
+        getGrid: () => ({
+            createStreamTile: overrides.createStreamTile || (() => createMockElement('div', { id: 'localStreamTile' })),
+            startTilePlayback: () => {},
+            updateGridState: () => {}
+        }),
+        getQosMonitor: () => ({
+            startQualityMonitor: () => {},
+            stopQualityMonitor: () => {},
+            applyQualityModeUI: () => {}
+        }),
+        startExcludeDiscordCapture: overrides.startExcludeDiscordCapture || (async () => null),
+        startAppAudioCapture: overrides.startAppAudioCapture || (async () => null),
+        stopAppAudioCapture: () => events.push({ type: 'stopAppAudioCapture' }),
+        showToast: (msg, toastType) => events.push({ type: 'toast', msg, toastType }),
+        documentObj: doc,
+        navigatorObj,
+        MediaStreamCtor: MockMediaStream
+    });
+
+    return { controller, mesh, state, peers, navigatorObj, events, emitted, offersSent, appendedTiles };
 }
 
-async function runTests() {
-    console.log('\n===============================================================');
-    console.log('  🧪 SUÍTE DE TESTES: CICLO DE VIDA SCREENSHARE & REPLACETRACK');
-    console.log('===============================================================\n');
-
-    let failures = 0;
-    const { loadClientBundleSource } = require('./helpers/client-source');
-    const appJs = loadClientBundleSource();
-    // T1: startScreenShare chamado com localStream ativo chama stopScreenShare antes de nova captura
-    process.stdout.write('  [Teste] T1: startScreenShare chama stopScreenShare antes de nova captura quando localStream está ativo ... ');
-    try {
-        const callOrder = [];
-        const oldTrack = { id: 'old-v', kind: 'video', stopped: false, stop() { this.stopped = true; callOrder.push('oldTrack.stop'); } };
-        const newVideoTrack = { id: 'new-v', kind: 'video', stopped: false, stop() { this.stopped = true; } };
-
-        const { sandbox, MockMediaStream } = createScreenShareSandbox(appJs);
-        sandbox.localStream = new MockMediaStream([oldTrack]);
-
-        const origStop = sandbox.stopScreenShare;
-        sandbox.stopScreenShare = function () {
-            callOrder.push('stopScreenShare');
-            return origStop.call(this);
-        };
-        sandbox.navigator.mediaDevices.getDisplayMedia = async () => {
-            callOrder.push('getDisplayMedia');
-            return new MockMediaStream([newVideoTrack]);
-        };
-
-        await sandbox.startScreenShare('none');
-
-        assert.strictEqual(callOrder[0], 'stopScreenShare', 'stopScreenShare deve executar antes da nova captura');
-        assert.strictEqual(callOrder[1], 'oldTrack.stop', 'Tracks antigas devem ser paradas antes de getDisplayMedia');
-        assert.strictEqual(callOrder[2], 'getDisplayMedia', 'getDisplayMedia deve rodar após stopScreenShare');
-        assert.strictEqual(oldTrack.stopped, true);
-        assert.strictEqual(sandbox.localStream.getVideoTracks()[0], newVideoTrack);
-
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        failures++;
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-    }
-
-    // T2: Erro após getDisplayMedia limpa screenStream, audioTrack, cableStream e chama stopAppAudioCapture
-    process.stdout.write('  [Teste] T2: Erro pós-getDisplayMedia limpa tracks, cableStream e chama stopAppAudioCapture ... ');
-    try {
-        // 2a: getVideoTracks() vazio no modo exclude_discord
-        const leakedScreenAudio = { id: 'scr-a', kind: 'audio', stopped: false, stop() { this.stopped = true; } };
-        const wasapiAudioTrack = { id: 'wasapi-a', kind: 'audio', stopped: false, stop() { this.stopped = true; } };
-
-        const envA = createScreenShareSandbox(appJs, {
-            startExcludeDiscordCapture: async () => wasapiAudioTrack
-        });
-        envA.sandbox.navigator.mediaDevices.getDisplayMedia = async () =>
-            new envA.MockMediaStream([leakedScreenAudio]); // sem videoTrack!
-
-        await envA.sandbox.startScreenShare('exclude_discord');
-
-        assert.strictEqual(leakedScreenAudio.stopped, true, 'Tracks de screenStream devem ser paradas quando não há vídeo');
-        assert.strictEqual(wasapiAudioTrack.stopped, true, 'audioTrack WASAPI deve ser parado');
-        assert(envA.events.some((e) => e.type === 'stopAppAudioCapture'), 'stopAppAudioCapture deve ser chamado no modo exclude_discord');
-        assert.strictEqual(envA.sandbox.localStream, null, 'localStream deve permanecer null');
-
-        // 2b: Falha em createStreamTile após localStream atribuído no modo app
-        const videoTrackB = { id: 'v-b', kind: 'video', stopped: false, stop() { this.stopped = true; } };
-        const appAudioTrackB = { id: 'app-a', kind: 'audio', stopped: false, stop() { this.stopped = true; } };
-
-        const envB = createScreenShareSandbox(appJs, {
-            startAppAudioCapture: async () => appAudioTrackB,
-            createStreamTile: () => { throw new Error('DOM tile failure'); }
-        });
-        envB.sandbox.navigator.mediaDevices.getDisplayMedia = async () =>
-            new envB.MockMediaStream([videoTrackB]);
-
-        await envB.sandbox.startScreenShare('app', 1234);
-
-        assert.strictEqual(videoTrackB.stopped, true, 'videoTrack de screenStream deve ser parado quando createStreamTile falha');
-        assert.strictEqual(appAudioTrackB.stopped, true, 'audioTrack do modo app deve ser parado quando createStreamTile falha');
-        assert(envB.events.some((e) => e.type === 'stopAppAudioCapture'), 'stopAppAudioCapture deve ser chamado no modo app');
-        assert.strictEqual(envB.sandbox.localStream, null, 'localStream deve ser revertido para null após falha');
-
-        // 2c: Modo system com cableOutputId e múltiplas tracks no cableStream + erro em createStreamTile
-        const videoTrackC = { id: 'v-c', kind: 'video', stopped: false, stop() { this.stopped = true; } };
-        const cableTrack1 = { id: 'cab-1', kind: 'audio', stopped: false, stop() { this.stopped = true; } };
-        const cableTrackExtra = { id: 'cab-2', kind: 'audio', stopped: false, stop() { this.stopped = true; } };
-
-        const envC = createScreenShareSandbox(appJs, {
-            createStreamTile: () => { throw new Error('Tile fail on cable'); }
-        });
-        envC.sandbox.navigator.mediaDevices.enumerateDevices = async () => [
-            { kind: 'audioinput', deviceId: 'cable-id-1', label: 'CABLE Output (VB-Audio Virtual Cable)' }
-        ];
-        envC.sandbox.navigator.mediaDevices.getDisplayMedia = async () =>
-            new envC.MockMediaStream([videoTrackC]);
-        envC.sandbox.navigator.mediaDevices.getUserMedia = async () =>
-            new envC.MockMediaStream([cableTrack1, cableTrackExtra]);
-
-        await envC.sandbox.startScreenShare('system');
-
-        assert.strictEqual(cableTrackExtra.stopped, true, 'Tracks excedentes de cableStream devem ser paradas');
-        assert.strictEqual(cableTrack1.stopped, true, 'audioTrack principal de cableStream deve ser parado no rollback');
-        assert.strictEqual(videoTrackC.stopped, true, 'videoTrack deve ser parado no rollback');
-        assert.strictEqual(envC.sandbox.localStream, null);
-
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        failures++;
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-    }
-
-    // T3: replaceTrack retornando Promise.reject(...) e retorno síncrono undefined não geram unhandledRejection
-    process.stdout.write('  [Teste] T3: replaceTrack rejeitado em addLocalTracksToPC, stopScreenShare e user-joined sem unhandledRejection ... ');
-    let unhandledError = null;
-    const onUnhandled = (reason) => {
-        unhandledError = reason;
+test('T1: startScreenShare calls stopScreenShare and stops old tracks before new capture', async () => {
+    const mods = await loadModules();
+    const callOrder = [];
+    const oldTrack = createMockTrack('video', 'old-v');
+    const origOldStop = oldTrack.stop.bind(oldTrack);
+    oldTrack.stop = () => {
+        origOldStop();
+        callOrder.push('oldTrack.stop');
     };
+    const newVideoTrack = createMockTrack('video', 'new-v');
+
+    const env = createScreenShareEnv(mods, {
+        socket: {
+            emit(ev, payload) {
+                if (ev === 'stream-state' && payload && payload.state === 'stopped') {
+                    callOrder.push('stream-state:stopped');
+                }
+            }
+        }
+    });
+    env.state.localStream = new MockMediaStream([oldTrack]);
+
+    env.navigatorObj.mediaDevices.getDisplayMedia = async () => {
+        callOrder.push('getDisplayMedia');
+        return new MockMediaStream([newVideoTrack]);
+    };
+
+    await env.controller.startScreenShare('none');
+
+    const captureIdx = callOrder.indexOf('getDisplayMedia');
+    assert.notEqual(captureIdx, -1, 'getDisplayMedia must be called');
+    assert.ok(callOrder.includes('oldTrack.stop'), 'oldTrack must be stopped before new capture');
+    assert.ok(callOrder.includes('stream-state:stopped'), 'stopScreenShare must emit stream-state:stopped before new capture');
+    assert.ok(callOrder.indexOf('oldTrack.stop') < captureIdx);
+    assert.ok(callOrder.indexOf('stream-state:stopped') < captureIdx);
+    assert.equal(oldTrack.stopped, true);
+    assert.equal(env.state.localStream.getVideoTracks()[0], newVideoTrack);
+});
+
+test('T2: Errors after getDisplayMedia roll back tracks, WASAPI capture, cable tracks, and localStream', async () => {
+    const mods = await loadModules();
+
+    // 2a: empty videoTracks in exclude_discord mode
+    const leakedScreenAudio = createMockTrack('audio', 'scr-a');
+    const wasapiAudioTrack = createMockTrack('audio', 'wasapi-a');
+    const envA = createScreenShareEnv(mods, {
+        startExcludeDiscordCapture: async () => wasapiAudioTrack
+    });
+    envA.navigatorObj.mediaDevices.getDisplayMedia = async () => new MockMediaStream([leakedScreenAudio]);
+
+    await envA.controller.startScreenShare('exclude_discord');
+    assert.equal(leakedScreenAudio.stopped, true);
+    assert.equal(wasapiAudioTrack.stopped, true);
+    assert.ok(envA.events.some((e) => e.type === 'stopAppAudioCapture'));
+    assert.equal(envA.state.localStream, null);
+
+    // 2b: createStreamTile failure in app mode
+    const videoTrackB = createMockTrack('video', 'v-b');
+    const appAudioTrackB = createMockTrack('audio', 'app-a');
+    const envB = createScreenShareEnv(mods, {
+        startAppAudioCapture: async () => appAudioTrackB,
+        createStreamTile: () => { throw new Error('DOM tile failure'); }
+    });
+    envB.navigatorObj.mediaDevices.getDisplayMedia = async () => new MockMediaStream([videoTrackB]);
+
+    await envB.controller.startScreenShare('app', 1234);
+    assert.equal(videoTrackB.stopped, true);
+    assert.equal(appAudioTrackB.stopped, true);
+    assert.ok(envB.events.some((e) => e.type === 'stopAppAudioCapture'));
+    assert.equal(envB.state.localStream, null);
+
+    // 2c: system mode with extra cableStream tracks + tile error
+    const videoTrackC = createMockTrack('video', 'v-c');
+    const cableTrack1 = createMockTrack('audio', 'cab-1');
+    const cableTrackExtra = createMockTrack('audio', 'cab-2');
+    const envC = createScreenShareEnv(mods, {
+        createStreamTile: () => { throw new Error('Tile fail on cable'); }
+    });
+    envC.navigatorObj.mediaDevices.enumerateDevices = async () => [
+        { kind: 'audioinput', deviceId: 'cable-id-1', label: 'CABLE Output (VB-Audio Virtual Cable)' }
+    ];
+    envC.navigatorObj.mediaDevices.getDisplayMedia = async () => new MockMediaStream([videoTrackC]);
+    envC.navigatorObj.mediaDevices.getUserMedia = async () => new MockMediaStream([cableTrack1, cableTrackExtra]);
+
+    await envC.controller.startScreenShare('system');
+    assert.equal(cableTrackExtra.stopped, true);
+    assert.equal(cableTrack1.stopped, true);
+    assert.equal(videoTrackC.stopped, true);
+    assert.equal(envC.state.localStream, null);
+});
+
+test('T3: Rejected/undefined replaceTrack never triggers unhandledRejection across addLocalTracksToPC, stopScreenShare, and handleUserJoined', async () => {
+    const mods = await loadModules();
+    let unhandledError = null;
+    const onUnhandled = (reason) => { unhandledError = reason; };
     process.on('unhandledRejection', onUnhandled);
 
     try {
-        const { sandbox, MockMediaStream } = createScreenShareSandbox(appJs);
-        const videoTrack = { id: 'v-1', kind: 'video', stop() {} };
-        const audioTrack = { id: 'a-1', kind: 'audio', stop() {} };
-        sandbox.localStream = new MockMediaStream([videoTrack, audioTrack]);
-
+        const videoTrack = createMockTrack('video', 'v-1');
+        const audioTrack = createMockTrack('audio', 'a-1');
         let replaceCalls = 0;
-        const rejectingVideoSender = {
-            track: null,
-            _kind: 'video',
-            dtlsTransport: {},
-            replaceTrack: () => {
-                replaceCalls++;
-                return Promise.reject(new Error('InvalidStateError: sender stopped'));
-            }
+
+        const rejectingVideoSender = createMockSender(null, { _kind: 'video' });
+        rejectingVideoSender.replaceTrack = () => {
+            replaceCalls += 1;
+            return Promise.reject(new Error('InvalidStateError: sender stopped'));
         };
-        const syncAudioSender = {
-            track: null,
-            _kind: 'audio',
-            dtlsTransport: {},
-            replaceTrack: () => {
-                replaceCalls++;
-                return undefined;
-            }
+        const syncAudioSender = createMockSender(null, { _kind: 'audio' });
+        syncAudioSender.replaceTrack = () => {
+            replaceCalls += 1;
+            return undefined;
         };
 
-        const mockPC = {
-            getSenders: () => [rejectingVideoSender, syncAudioSender],
-            addTrack: () => ({})
-        };
+        const mockPC = createMockPeerConnection({ senders: [rejectingVideoSender, syncAudioSender] });
+        const env = createScreenShareEnv(mods, { peers: new Map([['peer-1', { pc: mockPC }]]) });
+        env.state.localStream = new MockMediaStream([videoTrack, audioTrack]);
 
-        sandbox.addLocalTracksToPC(mockPC);
-        assert.strictEqual(replaceCalls, 2);
+        env.mesh.addLocalTracksToPC(mockPC);
+        assert.equal(replaceCalls, 2);
 
-        sandbox.peers.set('peer-1', { pc: mockPC });
-        sandbox.stopScreenShare();
-        assert.strictEqual(replaceCalls, 4);
+        await env.controller.stopScreenShare();
+        assert.equal(replaceCalls, 4);
 
-        // Verifica também que o bloco de user-joined trata Promise.reject no replaceTrack
-        const userJoinedBlock = appJs.match(/socket\.on\('user-joined'[\s\S]*?\n\}\);/);
-        assert(userJoinedBlock, 'Handler user-joined deve existir em public/app.js');
-        assert(
-            userJoinedBlock[0].includes('Promise.resolve(vSender.replaceTrack('),
-            'user-joined deve encapsular vSender.replaceTrack com Promise.resolve(...).catch(...)'
-        );
+        const webrtcSrc = fs.readFileSync(path.join(ROOT_DIR, 'public/js/modules/webrtc-mesh.js'), 'utf8');
+        assert.ok(webrtcSrc.includes('Promise.resolve(vSender.replaceTrack('));
 
-        // Permite drenar microtasks para garantir que nenhum unhandledRejection dispare
         await new Promise((resolve) => setTimeout(resolve, 30));
-        assert.strictEqual(unhandledError, null, `Não deve ocorrer unhandledRejection (capturado: ${unhandledError})`);
-
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        failures++;
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+        assert.equal(unhandledError, null);
     } finally {
         process.off('unhandledRejection', onUnhandled);
     }
+});
 
-    // T4: Modo 'system' evita prompt espúrio de microfone e avisa se captura VB-Cable falhar
-    process.stdout.write('  [Teste] T4: Modo system evita getUserMedia({ audio: true }) sem permissão e avisa falha VB-Cable ... ');
-    try {
-        // 4a: labels vazias e permissão microphone = prompt -> NÃO chama getUserMedia({ audio: true })
-        let micPromptCalled = false;
-        let displayMediaAudioOpt = null;
-        const envA = createScreenShareSandbox(appJs);
-        envA.sandbox.navigator.permissions = {
-            query: async () => ({ state: 'prompt' })
-        };
-        envA.sandbox.navigator.mediaDevices.enumerateDevices = async () => [
-            { kind: 'audioinput', deviceId: 'dev-1', label: '' }
-        ];
-        envA.sandbox.navigator.mediaDevices.getUserMedia = async (constraints) => {
-            if (constraints && constraints.audio === true) {
-                micPromptCalled = true;
-            }
-            return new envA.MockMediaStream([]);
-        };
-        envA.sandbox.navigator.mediaDevices.getDisplayMedia = async (opts) => {
-            displayMediaAudioOpt = opts && opts.audio;
-            return new envA.MockMediaStream([{ id: 'v-sys', kind: 'video', stop() {} }]);
-        };
+test('T4: system mode avoids spurious mic permission prompt and warns when VB-Cable capture fails', async () => {
+    const mods = await loadModules();
 
-        await envA.sandbox.startScreenShare('system');
-        assert.strictEqual(micPromptCalled, false, 'Modo system não deve pedir permissão de microfone quando status é prompt');
-        assert(displayMediaAudioOpt && typeof displayMediaAudioOpt === 'object', 'Deve seguir direto para getDisplayMedia com áudio do sistema');
+    // 4a: permission prompt + empty labels -> does NOT call getUserMedia({ audio: true })
+    let micPromptCalled = false;
+    let displayMediaAudioOpt = null;
+    const envA = createScreenShareEnv(mods);
+    envA.navigatorObj.permissions = { query: async () => ({ state: 'prompt' }) };
+    envA.navigatorObj.mediaDevices.enumerateDevices = async () => [{ kind: 'audioinput', deviceId: 'dev-1', label: '' }];
+    envA.navigatorObj.mediaDevices.getUserMedia = async (constraints) => {
+        if (constraints && constraints.audio === true) micPromptCalled = true;
+        return new MockMediaStream([]);
+    };
+    envA.navigatorObj.mediaDevices.getDisplayMedia = async (opts) => {
+        displayMediaAudioOpt = opts && opts.audio;
+        return new MockMediaStream([createMockTrack('video', 'v-sys')]);
+    };
 
-        // 4b: VB-Cable encontrado, screenStream abre (audio: false), getUserMedia(cableOutputId) falha -> exibe toast de aviso
-        const envB = createScreenShareSandbox(appJs);
-        envB.sandbox.navigator.permissions = {
-            query: async () => ({ state: 'granted' })
-        };
-        envB.sandbox.navigator.mediaDevices.enumerateDevices = async () => [
-            { kind: 'audioinput', deviceId: 'cable-1', label: 'CABLE Output (VB-Audio Virtual Cable)' }
-        ];
-        envB.sandbox.navigator.mediaDevices.getDisplayMedia = async () =>
-            new envB.MockMediaStream([{ id: 'v-cable', kind: 'video', stop() {} }]);
-        envB.sandbox.navigator.mediaDevices.getUserMedia = async () => {
-            throw new Error('NotReadableError: Device in use');
-        };
+    await envA.controller.startScreenShare('system');
+    assert.equal(micPromptCalled, false);
+    assert.ok(displayMediaAudioOpt && typeof displayMediaAudioOpt === 'object');
 
-        await envB.sandbox.startScreenShare('system');
-        const cableWarnToast = envB.events.find((e) => e.type === 'toast' && e.toastType === 'warning');
-        assert(cableWarnToast, 'Falha na captura VB-Cable deve exibir toast warning acionável');
+    // 4b: VB-Cable fails -> emits actionable warning toast
+    const envB = createScreenShareEnv(mods);
+    envB.navigatorObj.permissions = { query: async () => ({ state: 'granted' }) };
+    envB.navigatorObj.mediaDevices.enumerateDevices = async () => [
+        { kind: 'audioinput', deviceId: 'cable-1', label: 'CABLE Output (VB-Audio Virtual Cable)' }
+    ];
+    envB.navigatorObj.mediaDevices.getDisplayMedia = async () => new MockMediaStream([createMockTrack('video', 'v-cable')]);
+    envB.navigatorObj.mediaDevices.getUserMedia = async () => {
+        throw new Error('NotReadableError: Device in use');
+    };
 
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        failures++;
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-    }
+    await envB.controller.startScreenShare('system');
+    assert.ok(envB.events.some((e) => e.type === 'toast' && e.toastType === 'warning'));
+});
 
-    // T5: Cancelamento via stopScreenShare ou cleanupRoomState enquanto getDisplayMedia aguarda impede vazamento
-    process.stdout.write('  [Teste] T5: Cancelamento em voo de startScreenShare para tracks e não publica stream ... ');
-    try {
-        let resolveDisplay;
-        let markEntered;
-        const enteredPrompt = new Promise((r) => { markEntered = r; });
-        const emitted = [];
-        const offersSent = [];
-        const appendedTiles = [];
+test('T5: In-flight cancellation via stopScreenShare stops late tracks and avoids publishing stream', async () => {
+    const mods = await loadModules();
+    let resolveDisplay;
+    let markEntered;
+    const enteredPrompt = new Promise((r) => { markEntered = r; });
 
-        const lateVideoTrack = { id: 'late-v', kind: 'video', stopped: false, stop() { this.stopped = true; } };
-        const lateAudioTrack = { id: 'late-a', kind: 'audio', stopped: false, stop() { this.stopped = true; } };
+    const lateVideoTrack = createMockTrack('video', 'late-v');
+    const lateAudioTrack = createMockTrack('audio', 'late-a');
 
-        const { sandbox, MockMediaStream } = createScreenShareSandbox(appJs, {
-            socket: { emit: (ev, payload) => emitted.push({ ev, payload }) },
-            sendOffer: (pid) => offersSent.push(pid),
-            streamGrid: { appendChild: (el) => appendedTiles.push(el) },
-            peers: new Map([['peer-1', { pc: { getSenders: () => [], addTrack: () => ({}) } }]])
-        });
+    const env = createScreenShareEnv(mods, {
+        peers: new Map([['peer-1', { pc: createMockPeerConnection() }]])
+    });
+    env.navigatorObj.mediaDevices.getDisplayMedia = () => {
+        markEntered();
+        return new Promise((resolve) => { resolveDisplay = resolve; });
+    };
 
-        sandbox.navigator.mediaDevices.getDisplayMedia = () => {
-            markEntered();
-            return new Promise((resolve) => { resolveDisplay = resolve; });
-        };
+    const sharePromise = env.controller.startScreenShare('none');
+    await enteredPrompt;
 
-        const sharePromise = sandbox.startScreenShare('none');
-        await enteredPrompt;
+    await env.controller.stopScreenShare({ silent: true });
 
-        // Usuário troca de sala / cancela share antes do seletor do SO responder
-        sandbox.stopScreenShare({ silent: true });
+    resolveDisplay(new MockMediaStream([lateVideoTrack, lateAudioTrack]));
+    await sharePromise;
 
-        resolveDisplay(new MockMediaStream([lateVideoTrack, lateAudioTrack]));
-        await sharePromise;
-
-        assert.strictEqual(sandbox.localStream, null, 'localStream deve continuar null após cancelamento em voo');
-        assert.strictEqual(lateVideoTrack.stopped, true, 'Track de vídeo tardia deve ser parada imediatamente');
-        assert.strictEqual(lateAudioTrack.stopped, true, 'Track de áudio tardia deve ser parada imediatamente');
-        assert.strictEqual(appendedTiles.length, 0, 'Tile local não deve ser montado após cancelamento');
-        assert.strictEqual(offersSent.length, 0, 'Ofertas WebRTC não devem ser enviadas após cancelamento');
-        assert.strictEqual(
-            emitted.filter((e) => e.ev === 'stream-state' && e.payload && e.payload.state === 'started').length,
-            0,
-            'stream-state:started não deve ser emitido após cancelamento'
-        );
-
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        failures++;
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-    }
-
-    console.log('\n===============================================================');
-    if (failures > 0) {
-        console.log(`  ❌ Resultado: ${failures} teste(s) falharam.`);
-        console.log('===============================================================\n');
-        process.exit(1);
-    } else {
-        console.log('  ✅ Resultado: Todos os testes passaram com sucesso.');
-        console.log('===============================================================\n');
-        process.exit(0);
-    }
-}
-
-runTests().catch((err) => {
-    console.error('Erro fatal na suíte:', err);
-    process.exit(1);
+    assert.equal(env.state.localStream, null);
+    assert.equal(lateVideoTrack.stopped, true);
+    assert.equal(lateAudioTrack.stopped, true);
+    assert.equal(env.appendedTiles.length, 0);
+    assert.equal(env.offersSent.length, 0);
+    assert.equal(env.emitted.filter((e) => e.ev === 'stream-state' && e.payload.state === 'started').length, 0);
 });

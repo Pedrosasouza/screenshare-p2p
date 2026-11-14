@@ -1,59 +1,83 @@
-const fs = require('fs');
-const path = require('path');
-const assert = require('assert');
+'use strict';
 
-async function runTests() {
-    console.log('\n===============================================================');
-    console.log('  🧪 SUÍTE DE TESTES: FECHAMENTO DE MODAL VIA ESC E BACKDROP');
-    console.log('===============================================================\n');
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 
-    let failures = 0;
+const { createMockElement, createMockDocument, createMockStorage } = require('./helpers/mock-dom');
 
-    const appJsPath = path.resolve(__dirname, '../public/app.js');
-    const { loadClientBundleSource } = require('./helpers/client-source');
-    const appJs = loadClientBundleSource();
-    // Teste 1: shareConfigModal possui ouvinte de clique no backdrop
-    process.stdout.write('  [Teste] T1: shareConfigModal fecha ao clicar no backdrop (e.target === shareConfigModal) ... ');
-    const hasBackdropListener = appJs.includes("shareConfigModal.addEventListener('click'") || appJs.includes('shareConfigModal.addEventListener("click"');
-    const checksBackdropTarget = appJs.includes('e.target === shareConfigModal') && appJs.includes('closeShareConfigModal()');
+const ROOT_DIR = path.resolve(__dirname, '..');
 
-    if (hasBackdropListener && checksBackdropTarget) {
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } else {
-        console.log('\x1b[31mFALHOU (ouvinte de clique no backdrop ausente para shareConfigModal)\x1b[0m');
-        failures++;
-    }
-
-    // Teste 2: Tecla Escape fecha shareConfigModal quando aberto
-    process.stdout.write('  [Teste] T2: Handler keydown (Escape) fecha shareConfigModal ... ');
-    const escIndex = appJs.indexOf("e.key === 'Escape'");
-    let escClosesShareConfig = false;
-
-    if (escIndex !== -1) {
-        const handlerBlock = appJs.substring(escIndex, escIndex + 500);
-        escClosesShareConfig = handlerBlock.includes('shareConfigModal') && handlerBlock.includes('closeShareConfigModal()');
-    }
-
-    if (escClosesShareConfig) {
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } else {
-        console.log('\x1b[31mFALHOU (Escape não verifica nem fecha shareConfigModal)\x1b[0m');
-        failures++;
-    }
-
-    console.log('\n===============================================================');
-    if (failures === 0) {
-        console.log('  ✅ Resultado: Todos os testes de fechamento de modais passaram.');
-        console.log('===============================================================\n');
-        process.exit(0);
-    } else {
-        console.log(`  ❌ Resultado: ${failures} validação(ões) falharam conforme esperado no código antigo.`);
-        console.log('===============================================================\n');
-        process.exit(1);
-    }
+async function loadModules() {
+    const [shareModalMod, appMod] = await Promise.all([
+        import(pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/share-config-modal.js')).href),
+        import(`${pathToFileURL(path.join(ROOT_DIR, 'public/app.js')).href}?escape=${Date.now()}`)
+    ]);
+    return { ...shareModalMod, ...appMod };
 }
 
-runTests().catch(err => {
-    console.error('Erro inesperado no teste:', err);
-    process.exit(1);
+test('shareConfigModal closes on backdrop click (e.target === shareConfigModal) and stays open on inner click', async () => {
+    const { createShareConfigModalController } = await loadModules();
+    const shareConfigModal = createMockElement('div', { id: 'shareConfigModal' });
+    const innerCard = createMockElement('div', { className: 'modal-card' });
+    shareConfigModal.appendChild(innerCard);
+
+    const doc = createMockDocument({ shareConfigModal });
+    const ctrl = createShareConfigModalController({
+        state: { selectedVideoResolution: '1080p', selectedVideoFps: 60 },
+        dom: { shareConfigModal },
+        isDesktopApp: () => false,
+        documentObj: doc,
+        storage: createMockStorage()
+    });
+    ctrl.bindEvents();
+
+    ctrl.openShareConfigModal();
+    assert.equal(ctrl.isShareConfigModalOpen(), true);
+
+    // Click inside modal content must NOT close
+    shareConfigModal.dispatchEvent({ type: 'click', target: innerCard });
+    assert.equal(ctrl.isShareConfigModalOpen(), true, 'Clicking inside modal card must keep modal open');
+
+    // Click directly on backdrop closes modal
+    shareConfigModal.dispatchEvent({ type: 'click', target: shareConfigModal });
+    assert.equal(ctrl.isShareConfigModalOpen(), false, 'Backdrop click must close shareConfigModal');
+});
+
+test('Escape key closes open shareConfigModal via initApp keydown handler', async () => {
+    const { initApp } = await loadModules();
+    const winListeners = {};
+    const shareConfigModal = createMockElement('div', { id: 'shareConfigModal' });
+    const statsModal = createMockElement('div', { id: 'statsModal', style: { display: 'none' }, hidden: true });
+    const roomModal = createMockElement('div', { id: 'roomModal', style: { display: 'none' }, hidden: true });
+    const fakeDoc = createMockDocument({ shareConfigModal, statsModal, roomModal }, {
+        createElement: (tag) => createMockElement(tag)
+    });
+
+    const app = initApp({
+        windowObj: {
+            location: { protocol: 'http:', origin: 'http://localhost:3000', pathname: '/', search: '', hash: '' },
+            addEventListener(ev, fn) { winListeners[ev] = fn; },
+            removeEventListener() {},
+            matchMedia: () => ({ matches: false })
+        },
+        documentObj: fakeDoc,
+        navigatorObj: { clipboard: { writeText: async () => {} } },
+        storage: createMockStorage(),
+        ioFactory: () => ({ id: 's1', connected: false, on() {}, emit() {}, disconnect() {} }),
+        serverUrl: 'http://localhost:3000'
+    });
+
+    try {
+        app.shareConfigCtrl.openShareConfigModal();
+        assert.equal(app.shareConfigCtrl.isShareConfigModalOpen(), true);
+
+        assert.equal(typeof winListeners.keydown, 'function', 'initApp must register Escape keydown listener');
+        winListeners.keydown({ key: 'Escape' });
+
+        assert.equal(app.shareConfigCtrl.isShareConfigModalOpen(), false, 'Escape key must close open shareConfigModal');
+    } finally {
+        app.teardownClientSession();
+    }
 });

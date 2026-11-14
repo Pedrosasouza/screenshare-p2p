@@ -1,1144 +1,709 @@
-const assert = require('assert');
-const vm = require('vm');
-const { loadClientBundleSource } = require('./helpers/client-source');
+'use strict';
 
-function extractFn(source, name, isAsync = false) {
-    const prefix = isAsync ? 'async\\s+function' : '(?:async\\s+)?function';
-    const regex = new RegExp(`${prefix}\\s+${name}\\s*\\([\\s\\S]*?\\n\\}`);
-    const match = source.match(regex);
-    if (!match) {
-        throw new Error(`Função ${name} não encontrada no bundle`);
-    }
-    return match[0];
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
+
+const {
+    MockMediaStream,
+    MockRTCSessionDescription,
+    MockRTCIceCandidate,
+    createMockTrack,
+    createMockSender,
+    createMockPeerConnection
+} = require('./helpers/mock-webrtc');
+const { createMockElement, createMockDocument, createMockStorage } = require('./helpers/mock-dom');
+
+const ROOT_DIR = path.resolve(__dirname, '..');
+
+async function loadModules() {
+    const [webrtcMod, shareMod, appMod, iceMod] = await Promise.all([
+        import(pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/webrtc-mesh.js')).href),
+        import(pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/screen-share.js')).href),
+        import(pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/room-utils.js')).href),
+        import(`${pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/ice-config.js')).href}?reneg=${Date.now()}`)
+    ]);
+    return { webrtcMod, shareMod, appMod, iceMod };
 }
 
-function extractSocketHandler(source, eventName) {
-    const regex = new RegExp(`socket\\.on\\('${eventName}'[\\s\\S]*?\\n\\}\\);`);
-    const match = source.match(regex);
-    if (!match) {
-        throw new Error(`Handler socket.on('${eventName}') não encontrado no bundle`);
+function createMeshEnv(createWebRtcMesh, overrides = {}) {
+    const emitted = [];
+    const socket = overrides.socket || {
+        id: overrides.myId || 'me-1',
+        emit(event, payload) {
+            emitted.push({ event, payload });
+        }
+    };
+    const state = {
+        myId: socket.id,
+        roomId: 'room-init',
+        currentRoomPassword: '',
+        currentUserName: 'Pedro',
+        pendingRoomJoin: null,
+        localStream: null,
+        selectedVideoFps: 60,
+        contentHintMode: 'motion',
+        ...(overrides.state || {})
+    };
+    const streamGrid = createMockElement('div', { id: 'streamGrid' });
+    const displayRoomId = createMockElement('span', { id: 'displayRoomId' });
+    const dom = {
+        streamGrid,
+        displayRoomId,
+        btnStartShare: createMockElement('button', { id: 'btnStartShare' }),
+        btnStopShare: createMockElement('button', { id: 'btnStopShare' }),
+        btnQualityToggle: createMockElement('button', { id: 'btnQualityToggle' }),
+        ...(overrides.dom || {})
+    };
+    const doc = overrides.documentObj || createMockDocument({
+        streamGrid,
+        displayRoomId,
+        btnStartShare: dom.btnStartShare,
+        btnStopShare: dom.btnStopShare,
+        btnQualityToggle: dom.btnQualityToggle
+    });
+
+    const createdPcs = [];
+    class FakePeerConnection {
+        constructor(cfg) {
+            const pc = overrides.pcFactory ? overrides.pcFactory(cfg) : createMockPeerConnection();
+            createdPcs.push(pc);
+            return pc;
+        }
     }
-    return match[0];
+
+    const cleanupCalls = [];
+    const gridStub = overrides.grid || {
+        updateMemberCount: () => {},
+        updateGridState: () => {},
+        updateEchoWarningVisibility: () => {},
+        updatePeerUserName: () => {},
+        createStreamTile: (peerId) => createMockElement('div', { id: `tile-${peerId}`, className: 'stream-tile' }),
+        startTilePlayback: () => {}
+    };
+    const screenShareStub = overrides.screenShare || {
+        invalidateGeneration: () => {},
+        stopScreenShare: (opts) => {
+            cleanupCalls.push(opts || {});
+            if (state.localStream) {
+                state.localStream.getTracks().forEach((t) => t.stop());
+                state.localStream = null;
+            }
+        }
+    };
+
+    const mesh = createWebRtcMesh({
+        state,
+        dom,
+        getSocket: () => socket,
+        getQosMonitor: () => ({
+            configureSenderParams: () => {},
+            updateSendersForActivePeers: () => {}
+        }),
+        getGrid: () => gridStub,
+        getScreenShare: () => screenShareStub,
+        getRoomModal: () => overrides.roomModal || {
+            closeRoomModal: () => {},
+            updateRoomModalCloseButton: () => {}
+        },
+        getServerUrl: () => (overrides.serverUrl !== undefined ? overrides.serverUrl : 'https://screenshare-p2p.onrender.com'),
+        rtcConfig: overrides.rtcConfig || { iceServers: [] },
+        refreshIceServers: overrides.refreshIceServers || (async () => {}),
+        scheduleIceRefreshTimer: overrides.scheduleIceRefreshTimer || (() => {}),
+        registerFullscreenChangeHandler: () => {},
+        saveSessionRoomPassword: () => {},
+        clearSessionRoomPassword: () => {},
+        showToast: () => {},
+        playPresenceChime: () => {},
+        RTCPeerConnectionCtor: FakePeerConnection,
+        RTCSessionDescriptionCtor: MockRTCSessionDescription,
+        RTCIceCandidateCtor: MockRTCIceCandidate,
+        MediaStreamCtor: MockMediaStream,
+        documentObj: doc,
+        windowObj: overrides.windowObj || {
+            location: { protocol: 'http:', pathname: '/' },
+            history: { pushState: () => {} },
+            addEventListener: () => {}
+        },
+        storage: createMockStorage()
+    });
+
+    return { mesh, state, socket, emitted, dom, doc, createdPcs, cleanupCalls };
 }
 
-function delay(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-}
+test('T1: handleStreamState stopped preserves remote track and started recreates tile from getReceivers()', async () => {
+    const { webrtcMod } = await loadModules();
+    const { mesh } = createMeshEnv(webrtcMod.createWebRtcMesh);
 
-async function runTests() {
-    console.log('\n===============================================================');
-    console.log('  🧪 SUÍTE DE TESTES: RENEGOCIAÇÃO WEBRTC, TRANSCEIVERS & ICE');
-    console.log('===============================================================\n');
+    const remoteVideoTrack = createMockTrack('video', 'remote-v1');
+    const pc = createMockPeerConnection({
+        connectionState: 'connected',
+        receivers: [{ track: remoteVideoTrack }]
+    });
+    mesh.peers.set('peer-a', {
+        userName: 'Alice',
+        pc,
+        stream: new MockMediaStream([remoteVideoTrack]),
+        tileEl: createMockElement('div', { className: 'stream-tile' })
+    });
 
-    const bundleSrc = loadClientBundleSource();
-    let failures = 0;
+    mesh.handleStreamState({ senderId: 'peer-a', state: 'stopped' });
+    assert.equal(remoteVideoTrack.stopped, false, 'removeStreamTile must never stop remote track');
+    assert.equal(mesh.peers.get('peer-a').tileEl, null, 'Tile must be cleared on stopped');
 
-    // T1: removeStreamTile não chama stop() em tracks remotas e stream-state:'started' recria tile via getReceivers()
-    process.stdout.write('  [Teste] T1: removeStreamTile preserva tracks remotas e stream-state:started restaura tile ... ');
+    mesh.handleStreamState({ senderId: 'peer-a', state: 'started' });
+    assert.notEqual(mesh.peers.get('peer-a').tileEl, null, 'stream-state:started must recreate tile via getReceivers()');
+    assert.equal(mesh.peers.get('peer-a').stream.getVideoTracks().length, 1);
+});
+
+test('T2: addLocalTracksToPC promotes recvonly transceiver to sendrecv without duplicate addTrack', async () => {
+    const { webrtcMod } = await loadModules();
+    const localVideo = createMockTrack('video', 'local-v1');
+    const { mesh } = createMeshEnv(webrtcMod.createWebRtcMesh, {
+        state: { localStream: new MockMediaStream([localVideo]) }
+    });
+
+    const sender = createMockSender(null);
+    const recvonlyTransceiver = {
+        direction: 'recvonly',
+        currentDirection: 'recvonly',
+        receiver: { track: { id: 'remote-v1', kind: 'video' } },
+        sender
+    };
+    const pc = createMockPeerConnection({
+        senders: [sender],
+        transceivers: [recvonlyTransceiver]
+    });
+    pc.addTrack = () => {
+        throw new Error('Should reuse existing transceiver instead of calling addTrack');
+    };
+
+    mesh.addLocalTracksToPC(pc);
+    assert.equal(sender.track, localVideo);
+    assert.equal(recvonlyTransceiver.direction, 'sendrecv');
+});
+
+test('T3: sendOffer queues pendingOffer when makingOffer is active and dispatches once stable', async () => {
+    const { webrtcMod } = await loadModules();
+    let resolveGate;
+    const gate = new Promise((r) => { resolveGate = r; });
+    let offerCount = 0;
+
+    const pc = createMockPeerConnection({ connectionState: 'connected' });
+    pc.createOffer = async () => {
+        offerCount += 1;
+        if (offerCount === 1) await gate;
+        return { type: 'offer', sdp: `v=0\r\noffer-${offerCount}` };
+    };
+
+    const { mesh, emitted } = createMeshEnv(webrtcMod.createWebRtcMesh);
+    const peerObj = {
+        pc,
+        stream: new MockMediaStream(),
+        makingOffer: false,
+        pendingOffer: false,
+        iceCandidateQueue: [],
+        _signalChain: Promise.resolve()
+    };
+    mesh.peers.set('p1', peerObj);
+
+    const firstRun = mesh.sendOffer('p1');
+    await new Promise((r) => setTimeout(r, 5));
+    await mesh.sendOffer('p1');
+    assert.equal(peerObj.pendingOffer, true, 'Concurrent sendOffer must queue pendingOffer');
+
+    resolveGate();
+    await firstRun;
+    await new Promise((r) => setTimeout(r, 15));
+
+    const sentOffers = emitted.filter((e) => e.event === 'signal');
+    assert.equal(sentOffers.length, 2, 'Queued pendingOffer must dispatch after first offer completes');
+    assert.equal(peerObj.pendingOffer, false);
+});
+
+test('T4: handleSignal ignores candidates when ignoreOffer=true and blocks zombie signals after user-left', async () => {
+    const { webrtcMod } = await loadModules();
+    const { mesh } = createMeshEnv(webrtcMod.createWebRtcMesh, {
+        myId: 'z-impolite' // 'z-impolite' > 'a-peer' => isPolite = false
+    });
+    mesh.activeRoomPeers.add('a-peer');
+    mesh.membership.hasRoomMembershipSnapshot = true;
+
+    const pcA = mesh.getOrCreatePeerConnection('a-peer');
+    pcA.signalingState = 'have-local-offer';
+    const peerObjA = mesh.peers.get('a-peer');
+    assert.equal(peerObjA.isPolite, false);
+
+    mesh.handleSignal({ senderId: 'a-peer', signal: { type: 'offer', sdp: 'v=0\r\nignored' } });
+    await peerObjA._signalChain;
+    assert.equal(peerObjA.ignoreOffer, true);
+
+    mesh.handleSignal({ senderId: 'a-peer', signal: { candidate: { candidate: 'cand-from-ignored-offer', sdpMid: '0' } } });
+    await peerObjA._signalChain;
+    assert.equal(peerObjA.iceCandidateQueue.length, 0);
+    assert.equal(pcA.addedCandidates.length, 0);
+
+    mesh.handleUserLeft({ socketId: 'a-peer', memberCount: 1 });
+    assert.equal(mesh.peers.has('a-peer'), false);
+
+    mesh.handleSignal({ senderId: 'a-peer', signal: { candidate: { candidate: 'zombie-cand', sdpMid: '0' } } });
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(mesh.peers.has('a-peer'), false, 'Delayed signal after user-left must not recreate zombie PeerConnection');
+});
+
+test('T5: app.js passes { peers } to refreshIceServers and viewer without localStream triggers ICE restart on failure', async () => {
+    const { webrtcMod } = await loadModules();
+    const appSrc = fs.readFileSync(path.join(ROOT_DIR, 'public/app.js'), 'utf8');
+    assert.match(appSrc, /refreshIceServers\s*\(\s*serverUrl\s*,\s*\{\s*peers:\s*webrtc\.peers\s*\}\s*\)/);
+
+    const origSetTimeout = global.setTimeout;
+    const origClearTimeout = global.clearTimeout;
+    let triggerRestart = null;
+    global.setTimeout = (fn) => {
+        triggerRestart = fn;
+        return 1234;
+    };
+    global.clearTimeout = () => {};
+
     try {
-        let remoteStopped = false;
-        const remoteVideoTrack = {
-            id: 'remote-v1',
-            kind: 'video',
-            readyState: 'live',
-            muted: false,
-            stop() { remoteStopped = true; }
-        };
-
-        class MockMediaStream {
-            constructor(tracks = []) {
-                this._tracks = [...tracks];
-            }
-            getTracks() { return [...this._tracks]; }
-            getVideoTracks() { return this._tracks.filter((t) => t.kind === 'video'); }
-            getAudioTracks() { return this._tracks.filter((t) => t.kind === 'audio'); }
-            addTrack(t) { if (!this._tracks.some((x) => x.id === t.id)) this._tracks.push(t); }
-            removeTrack(t) { this._tracks = this._tracks.filter((x) => x.id !== t.id); }
-        }
-
-        const appendedTiles = [];
-        const socketHandlers = {};
-        const peers = new Map();
-        const remoteActiveStreams = new Set();
-
-        const sandbox = {
-            Map,
-            Set,
-            Array,
-            Promise,
-            MediaStream: MockMediaStream,
-            peers,
-            activeRoomPeers: new Set(['a-peer']),
-            recentlyRemovedPeers: new Map(),
-            hasRoomMembershipSnapshot: true,
-            remoteActiveStreams,
-            document: { fullscreenElement: null, exitFullscreen: () => {} },
-            streamGrid: { appendChild: (el) => appendedTiles.push(el) },
-            socket: {
-                on(ev, fn) { socketHandlers[ev] = fn; },
-                emit() {}
-            },
-            updateGridState() {},
-            updateEchoWarningVisibility() {},
-            updateBackgroundTracksOptimization() {},
-            createStreamTile(peerId, stream, label) {
-                return {
-                    id: `tile-${peerId}`,
-                    peerId,
-                    stream,
-                    label,
-                    querySelector: () => ({ srcObject: stream, play: async () => {} }),
-                    remove() {}
-                };
-            },
-            startTilePlayback() {}
-        };
-
-        vm.createContext(sandbox);
-        vm.runInContext([
-            extractFn(bundleSrc, 'disposeTileElement'),
-            extractFn(bundleSrc, 'ensureRemoteStreamTile'),
-            extractFn(bundleSrc, 'removeStreamTile'),
-            extractSocketHandler(bundleSrc, 'stream-state')
-        ].join('\n\n'), sandbox);
-
-        const initialStream = new MockMediaStream([remoteVideoTrack]);
-        peers.set('peer-a', {
-            userName: 'Alice',
-            stream: initialStream,
-            tileEl: { remove() {}, querySelector: () => null },
-            pc: {
-                signalingState: 'stable',
-                connectionState: 'connected',
-                getReceivers: () => [{ track: remoteVideoTrack }]
-            }
-        });
-
-        socketHandlers['stream-state']({ senderId: 'peer-a', state: 'stopped' });
-        assert.strictEqual(remoteStopped, false, 'removeStreamTile nunca deve chamar .stop() em track remota');
-        assert.strictEqual(peers.get('peer-a').tileEl, null, 'Tile deve ser removido ao parar stream');
-
-        socketHandlers['stream-state']({ senderId: 'peer-a', state: 'started' });
-        assert.notStrictEqual(peers.get('peer-a').tileEl, null, 'stream-state:started deve recriar o tile via getReceivers() mesmo sem novo ontrack');
-        assert.strictEqual(peers.get('peer-a').stream.getVideoTracks().length, 1);
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        failures++;
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-    }
-
-    // T2: addLocalTracksToPC atualiza transceiver.direction de recvonly para sendrecv / sendonly
-    process.stdout.write('  [Teste] T2: addLocalTracksToPC promove transceiver recvonly para sendrecv/sendonly ... ');
-    try {
-        const localVideo = { id: 'local-v1', kind: 'video', stop() {} };
-        const sandbox = {
-            Promise,
-            localStream: {
-                getTracks: () => [localVideo],
-                getVideoTracks: () => [localVideo],
-                getAudioTracks: () => []
-            },
-            configureSenderParams() {}
-        };
-        vm.createContext(sandbox);
-        vm.runInContext(extractFn(bundleSrc, 'addLocalTracksToPC'), sandbox);
-
-        const recvonlyTransceiver = {
-            direction: 'recvonly',
-            currentDirection: 'recvonly',
-            receiver: { track: { id: 'remote-v1', kind: 'video' } },
-            sender: {
-                track: null,
-                _replacedWith: null,
-                replaceTrack(t) { this._replacedWith = t; this.track = t; return Promise.resolve(); }
-            }
-        };
-        const mockPc = {
-            getSenders: () => [recvonlyTransceiver.sender],
-            getTransceivers: () => [recvonlyTransceiver],
-            addTrack() { throw new Error('Deveria reutilizar transceiver existente'); }
-        };
-
-        sandbox.addLocalTracksToPC(mockPc);
-        assert.strictEqual(recvonlyTransceiver.sender._replacedWith, localVideo);
-        assert.strictEqual(recvonlyTransceiver.direction, 'sendrecv', 'Transceiver recvonly deve passar para sendrecv ao adicionar mídia local');
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        failures++;
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-    }
-
-    // T3: sendOffer enfileira pendingOffer quando makingOffer ou signalingState !== 'stable' e reenvia após estabilizar
-    process.stdout.write('  [Teste] T3: sendOffer agenda pendingOffer em estado ocupado e reenvia ao estabilizar ... ');
-    try {
-        let createOfferGate = null;
-        const gatePromise = new Promise((r) => { createOfferGate = r; });
-        const sentOffers = [];
-        let offerCount = 0;
-
-        const peerObj = {
-            makingOffer: false,
-            pendingOffer: false,
-            pc: {
-                signalingState: 'stable',
-                connectionState: 'connected',
-                async createOffer() {
-                    offerCount++;
-                    if (offerCount === 1) await gatePromise;
-                    return { type: 'offer', sdp: `v=0\r\noffer-${offerCount}` };
-                },
-                async setLocalDescription(d) {
-                    this.localDescription = d;
-                }
-            }
-        };
-
-        const sandbox = {
-            Promise,
-            Boolean,
-            Map,
-            RTCSessionDescription: class { constructor(d) { Object.assign(this, d); } },
-            peers: new Map([['p1', peerObj]]),
-            optimizeSDP: (sdp) => sdp,
-            socket: {
-                emit(ev, payload) {
-                    if (ev === 'signal') sentOffers.push(payload.signal.sdp);
-                }
-            },
-            console: { log: () => {}, warn: () => {}, error: () => {} }
-        };
-        vm.createContext(sandbox);
-        vm.runInContext([
-            extractFn(bundleSrc, 'isPeerConnectionActive'),
-            extractFn(bundleSrc, 'sendOffer', true)
-        ].join('\n\n'), sandbox);
-
-        const firstRun = sandbox.sendOffer('p1');
-        await delay(5);
-        // Chamada concorrente enquanto firstRun ainda cria o offer
-        await sandbox.sendOffer('p1');
-        assert.strictEqual(peerObj.pendingOffer, true, 'sendOffer ocupado deve marcar pendingOffer = true');
-
-        createOfferGate();
-        await firstRun;
-        await delay(10);
-
-        assert.strictEqual(sentOffers.length, 2, 'Oferta pendente deve ser despachada após conclusão da primeira');
-        assert.strictEqual(peerObj.pendingOffer, false);
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        failures++;
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-    }
-
-    // T4: signal ignora candidatos quando ignoreOffer=true e rejeita sinais de peer removido (user-left)
-    process.stdout.write('  [Teste] T4: signal ignora candidatos com ignoreOffer e bloqueia zombie após user-left ... ');
-    try {
-        const socketHandlers = {};
-        const peers = new Map();
-        const remoteActiveStreams = new Set();
-        const addedCandidates = [];
-
-        class MockPC {
-            constructor() {
-                this.signalingState = 'have-local-offer';
-                this.connectionState = 'connected';
-                this.remoteDescription = null;
-                this.localDescription = null;
-            }
-            async setRemoteDescription(d) { this.remoteDescription = d; }
-            async createAnswer() { return { type: 'answer', sdp: 'v=0' }; }
-            async setLocalDescription(d) {
-                if (d.type === 'rollback') this.signalingState = 'stable';
-                else this.localDescription = d;
-            }
-            async addIceCandidate(c) { addedCandidates.push(c.candidate); }
-            close() { this.signalingState = 'closed'; this.connectionState = 'closed'; }
-        }
-
-        const sandbox = {
-            Promise,
-            Map,
-            Set,
-            Boolean,
-            Date,
-            RTCPeerConnection: MockPC,
-            RTCSessionDescription: class { constructor(d) { Object.assign(this, d); } },
-            RTCIceCandidate: class { constructor(d) { Object.assign(this, d); } },
-            MediaStream: class { getTracks() { return []; } },
-            rtcConfig: {},
-            myId: 'z-impolite', // 'z-impolite' > 'a-peer' => isPolite = false
-            peers,
-            activeRoomPeers: new Set(['a-peer']),
-            recentlyRemovedPeers: new Map(),
-            hasRoomMembershipSnapshot: true,
-            remoteActiveStreams,
-            localStream: null,
-            console: { log: () => {}, warn: () => {}, error: () => {} },
-            socket: {
-                on(ev, fn) { socketHandlers[ev] = fn; },
-                emit() {}
-            },
-            optimizeSDP: (s) => s,
-            updateEchoWarningVisibility() {},
-            showToast() {},
-            playPresenceChime() {},
-            updateMemberCount() {},
-            updateGridState() {},
-            updateBackgroundTracksOptimization() {},
-            setPeerConnectionStatus() {},
-            logPeerConnectionTelemetry() {},
-            disposeTileElement() {},
-            clearPeerTimers(p) { if (p && p._iceRestartTimeout) clearTimeout(p._iceRestartTimeout); },
-            setTimeout,
-            clearTimeout
-        };
-        sandbox.removePeerConnection = (peerId) => {
-            const p = peers.get(peerId);
-            if (p) {
-                p.pc.close();
-                peers.delete(peerId);
-            }
-        };
-
-        vm.createContext(sandbox);
-        vm.runInContext([
-            extractFn(bundleSrc, 'isPeerConnectionActive'),
-            extractFn(bundleSrc, 'getOrCreatePeerConnection'),
-            extractSocketHandler(bundleSrc, 'signal'),
-            extractSocketHandler(bundleSrc, 'user-left')
-        ].join('\n\n'), sandbox);
-
-        const pcA = sandbox.getOrCreatePeerConnection('a-peer');
-        pcA.signalingState = 'have-local-offer';
-        const peerObjA = peers.get('a-peer');
-        assert.strictEqual(peerObjA.isPolite, false);
-
-        // Oferta em colisão sendo impolite => ignoreOffer = true
-        socketHandlers.signal({ senderId: 'a-peer', signal: { type: 'offer', sdp: 'v=0\r\nignored' } });
-        await peerObjA._signalChain;
-        assert.strictEqual(peerObjA.ignoreOffer, true);
-
-        // Candidato subsequente da oferta ignorada não deve ser enfileirado nem aplicado
-        socketHandlers.signal({ senderId: 'a-peer', signal: { candidate: { candidate: 'cand-from-ignored-offer' } } });
-        await peerObjA._signalChain;
-        assert.strictEqual(peerObjA.iceCandidateQueue.length, 0, 'Candidato sob ignoreOffer=true não deve ir para iceCandidateQueue');
-        assert.strictEqual(addedCandidates.length, 0);
-
-        // Após user-left, sinal atrasado do peer removido não deve recriar PeerConnection zumbi
-        socketHandlers['user-left']({ socketId: 'a-peer', memberCount: 1 });
-        assert.strictEqual(peers.has('a-peer'), false);
-        socketHandlers.signal({ senderId: 'a-peer', signal: { candidate: { candidate: 'zombie-cand' } } });
-        await delay(10);
-        assert.strictEqual(peers.has('a-peer'), false, 'Sinal atrasado pós user-left não deve criar PeerConnection zumbi');
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        failures++;
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-    }
-
-    // T5: refreshIceServers recebe { peers } e espectador (localStream === null) dispara ICE restart em falha
-    process.stdout.write('  [Teste] T5: app.js passa { peers } ao refreshIceServers e espectador recupera via ICE restart ... ');
-    try {
-        assert(
-            /refreshIceServers\s*\(\s*SERVER_URL\s*,\s*\{\s*peers\s*\}/.test(bundleSrc),
-            'app.js deve passar { peers } para refreshIceServers(SERVER_URL, { peers })'
-        );
-
-        let restartCalled = 0;
-        let sendOfferCalled = 0;
-        const peers = new Map();
-
-        class MockPC {
-            constructor() {
-                this.signalingState = 'stable';
-                this.iceConnectionState = 'new';
-                this.connectionState = 'new';
-            }
-            restartIce() { restartCalled++; }
-        }
-
-        const sandbox = {
-            Map,
-            Promise,
-            Boolean,
-            RTCPeerConnection: MockPC,
-            MediaStream: class {},
-            rtcConfig: {},
+        const pc = createMockPeerConnection();
+        const { mesh, emitted } = createMeshEnv(webrtcMod.createWebRtcMesh, {
             myId: 'viewer-1',
-            peers,
-            localStream: null, // espectador sem stream local!
-            setTimeout: (fn) => { fn(); return 1; },
-            clearTimeout: () => {},
-            console: { log: () => {}, warn: () => {}, error: () => {} },
-            socket: { emit() {} },
-            sendOffer() { sendOfferCalled++; },
-            setPeerConnectionStatus() {},
-            logPeerConnectionTelemetry() {},
-            updateGridState() {}
-        };
-        vm.createContext(sandbox);
-        vm.runInContext([
-            extractFn(bundleSrc, 'isPeerConnectionActive'),
-            extractFn(bundleSrc, 'getOrCreatePeerConnection')
-        ].join('\n\n'), sandbox);
-
-        const pc = sandbox.getOrCreatePeerConnection('broadcaster-1');
+            state: { localStream: null },
+            pcFactory: () => pc
+        });
+        mesh.getOrCreatePeerConnection('broadcaster-1');
         pc.iceConnectionState = 'failed';
         pc.oniceconnectionstatechange();
 
-        assert.strictEqual(restartCalled, 1, 'Espectador também deve iniciar restartIce() em falha ICE');
-        assert.strictEqual(sendOfferCalled, 1, 'Espectador deve chamar sendOffer no ICE restart');
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        failures++;
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-    }
+        assert.equal(typeof triggerRestart, 'function');
+        triggerRestart();
+        await new Promise((r) => origSetTimeout(r, 15));
 
-    // T6: cleanupRoomState silencioso em troca de sala + teardown no pagehide
-    process.stdout.write('  [Teste] T6: Troca de sala faz cleanup silencioso e pagehide encerra peers/tracks ... ');
-    try {
-        const emitted = [];
-        const sentOffers = [];
-        let localStopped = false;
-        let peerClosed = false;
-
-        const sandbox = {
-            Map,
-            Set,
-            Promise,
-            MediaStream: class {},
-            peers: new Map([['old-peer', { pc: { close() { peerClosed = true; } }, stream: null, tileEl: null }]]),
-            remoteActiveStreams: new Set(['old-peer']),
-            localStream: { getTracks: () => [{ stop() { localStopped = true; } }] },
-            roomId: 'sala-antiga',
-            pendingRoomJoin: { roomId: 'sala-nova', password: '', userName: 'Pedro' },
-            currentRoomPassword: '',
-            myId: 'me',
-            displayRoomId: { textContent: '', appendChild() {} },
-            memberCountText: { textContent: '' },
-            streamGrid: { querySelectorAll: () => [], appendChild() {} },
-            document: { getElementById: () => null },
-            btnStartShare: { hidden: true },
-            btnStopShare: { hidden: false },
-            btnQualityToggle: { hidden: false },
-            window: { location: { protocol: 'http:', pathname: '/' }, history: { pushState() {} } },
-            localStorage: { setItem() {} },
-            socket: {
-                on(ev, fn) { sandbox._handlers[ev] = fn; },
-                emit(ev, p) { emitted.push({ ev, p }); }
-            },
-            _handlers: {},
-            console: { log: () => {}, warn: () => {}, error: () => {} },
-            clearPeerTimers() {},
-            disposeTileElement() {},
-            updateEchoWarningVisibility() {},
-            updateMemberCount() {},
-            updateGridState() {},
-            updateBackgroundTracksOptimization() {},
-            stopQualityMonitor() {},
-            stopAppAudioCapture() {},
-            closeRoomModal() {},
-            updateRoomModalCloseButton() {},
-            sendOffer(id) { sentOffers.push(id); }
-        };
-
-        vm.createContext(sandbox);
-        vm.runInContext([
-            extractFn(bundleSrc, 'stopScreenShare'),
-            extractFn(bundleSrc, 'cleanupRoomState'),
-            extractSocketHandler(bundleSrc, 'room-users')
-        ].join('\n\n'), sandbox);
-
-        await sandbox._handlers['room-users']({
-            users: [],
-            userNames: {},
-            activeStreams: [],
-            socketId: 'me',
-            memberCount: 1,
-            hasPassword: false
-        });
-
-        assert.strictEqual(localStopped, true, 'localStream anterior deve parar na troca de sala');
-        assert.strictEqual(peerClosed, true, 'Peer anterior deve fechar na troca de sala');
-        assert.strictEqual(sentOffers.length, 0, 'Troca de sala não deve enviar sendOffer aos peers encerrados');
-        const leakedStreamStopped = emitted.filter((e) => e.ev === 'stream-state');
-        assert.strictEqual(leakedStreamStopped.length, 0, 'Troca de sala não deve emitir stream-state para a nova sala');
-
-        assert(
-            bundleSrc.includes("addEventListener('pagehide'"),
-            'app.js deve registrar teardown no evento pagehide'
+        assert.equal(pc.iceRestarts, 1, 'Viewer must trigger restartIce() on ICE failure');
+        assert.ok(
+            emitted.some((e) => e.event === 'signal' && e.payload.targetId === 'broadcaster-1' && e.payload.signal.type === 'offer'),
+            'Viewer must send offer on ICE restart'
         );
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        failures++;
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+    } finally {
+        global.setTimeout = origSetTimeout;
+        global.clearTimeout = origClearTimeout;
     }
+});
 
-    // T7: stopScreenShare aguarda sender.replaceTrack(null) resolver antes de sendOffer(peerId)
-    process.stdout.write('  [Teste] T7: stopScreenShare aguarda replaceTrack(null) resolver antes de sendOffer ... ');
-    try {
-        const sentOffers = [];
-        let resolve1, resolve2;
-        const p1 = new Promise((r) => { resolve1 = r; });
-        const p2 = new Promise((r) => { resolve2 = r; });
+test('T6: Room switch performs silent cleanup without leaking stream-state, and pagehide triggers teardown', async () => {
+    const { webrtcMod } = await loadModules();
+    const appSrc = fs.readFileSync(path.join(ROOT_DIR, 'public/app.js'), 'utf8');
+    assert.ok(appSrc.includes("windowObj.addEventListener('pagehide'"), 'app.js must bind pagehide teardown');
 
-        const s1 = { track: { id: 'v1', kind: 'video' }, replaceTrack(t) { this.track = t; return p1; } };
-        const s2 = { track: { id: 'a1', kind: 'audio' }, replaceTrack(t) { this.track = t; return p2; } };
-        const sClosed = { track: { id: 'vc', kind: 'video' }, replaceTrack() { return Promise.resolve(); } };
+    const localTrack = createMockTrack('video', 'local-old');
+    const oldPc = createMockPeerConnection();
+    let oldClosed = false;
+    oldPc.close = () => { oldClosed = true; };
 
-        const pcOpen = {
-            signalingState: 'stable',
-            connectionState: 'connected',
-            getTransceivers: () => [{ sender: s1, direction: 'sendrecv' }, { sender: s2, direction: 'sendonly' }],
-            getSenders: () => [s1, s2]
-        };
-        const pcClosing = {
-            signalingState: 'stable',
-            connectionState: 'closed',
-            getTransceivers: () => [{ sender: sClosed, direction: 'sendonly' }],
-            getSenders: () => [sClosed]
-        };
+    const { mesh, emitted, cleanupCalls } = createMeshEnv(webrtcMod.createWebRtcMesh, {
+        myId: 'me',
+        state: {
+            roomId: 'sala-antiga',
+            localStream: new MockMediaStream([localTrack]),
+            pendingRoomJoin: { roomId: 'sala-nova', password: '', userName: 'Pedro' }
+        }
+    });
+    mesh.peers.set('old-peer', { pc: oldPc, stream: null, tileEl: null });
+    mesh.remoteActiveStreams.add('old-peer');
 
-        const peers = new Map([
-            ['peer-open', { pc: pcOpen }],
-            ['peer-closed', { pc: pcClosing }]
-        ]);
+    await mesh.handleRoomUsers({
+        users: [],
+        userNames: {},
+        activeStreams: [],
+        socketId: 'me',
+        memberCount: 1,
+        hasPassword: false
+    });
 
-        const sandbox = {
-            Map,
-            Promise,
-            Boolean,
-            peers,
-            roomId: 'room-1',
-            localStream: { getTracks: () => [{ stop() {} }] },
-            document: { getElementById: () => null },
-            btnStartShare: { hidden: true },
-            btnStopShare: { hidden: false },
-            btnQualityToggle: { hidden: false },
-            socket: { emit() {} },
-            stopQualityMonitor() {},
-            stopAppAudioCapture() {},
-            updateGridState() {},
-            sendOffer(id) { sentOffers.push(id); }
-        };
+    assert.equal(localTrack.stopped, true, 'Previous localStream must stop when switching rooms');
+    assert.equal(oldClosed, true, 'Previous peer connection must close when switching rooms');
+    assert.ok(cleanupCalls.some((c) => c.silent === true), 'Room switch must call stopScreenShare({ silent: true })');
+    assert.equal(emitted.filter((e) => e.event === 'stream-state').length, 0, 'Room switch must not leak stream-state to new room');
+});
 
-        vm.createContext(sandbox);
-        vm.runInContext(extractFn(bundleSrc, 'stopScreenShare'), sandbox);
+test('T7: stopScreenShare awaits all replaceTrack(null) promises before sendOffer and skips closed peers', async () => {
+    const { shareMod } = await loadModules();
+    let resolve1, resolve2;
+    const p1 = new Promise((r) => { resolve1 = r; });
+    const p2 = new Promise((r) => { resolve2 = r; });
 
-        const stopPromise = sandbox.stopScreenShare();
-        assert.strictEqual(sentOffers.length, 0, 'sendOffer não pode disparar antes de replaceTrack(null) resolver');
+    const s1 = createMockSender(createMockTrack('video', 'v1'));
+    s1.replaceTrack = (t) => { s1.track = t; return p1; };
+    const s2 = createMockSender(createMockTrack('audio', 'a1'));
+    s2.replaceTrack = (t) => { s2.track = t; return p2; };
+    const sClosed = createMockSender(createMockTrack('video', 'vc'));
 
-        resolve1();
-        await delay(10);
-        assert.strictEqual(sentOffers.length, 0, 'sendOffer deve aguardar TODOS os senders de replaceTrack(null)');
+    const pcOpen = createMockPeerConnection({
+        connectionState: 'connected',
+        senders: [s1, s2],
+        transceivers: [
+            { sender: s1, direction: 'sendrecv' },
+            { sender: s2, direction: 'sendonly' }
+        ]
+    });
+    const pcClosed = createMockPeerConnection({
+        connectionState: 'closed',
+        signalingState: 'closed',
+        senders: [sClosed],
+        transceivers: [{ sender: sClosed, direction: 'sendonly' }]
+    });
 
-        resolve2();
-        await Promise.resolve(stopPromise);
-        await delay(10);
+    const peers = new Map([
+        ['peer-open', { pc: pcOpen }],
+        ['peer-closed', { pc: pcClosed }]
+    ]);
+    const sentOffers = [];
+    const controller = shareMod.createScreenShareController({
+        state: { roomId: 'room-1', localStream: new MockMediaStream([createMockTrack('video', 'v-loc')]) },
+        dom: {
+            btnStartShare: createMockElement('button'),
+            btnStopShare: createMockElement('button'),
+            btnQualityToggle: createMockElement('button')
+        },
+        getSocket: () => ({ emit: () => {} }),
+        getPeers: () => peers,
+        getWebRtc: () => ({ sendOffer: (id) => { sentOffers.push(id); } }),
+        getGrid: () => ({ updateGridState: () => {} }),
+        getQosMonitor: () => ({ stopQualityMonitor: () => {} }),
+        startExcludeDiscordCapture: async () => {},
+        startAppAudioCapture: async () => {},
+        stopAppAudioCapture: () => {},
+        showToast: () => {},
+        documentObj: createMockDocument(),
+        navigatorObj: {},
+        MediaStreamCtor: MockMediaStream
+    });
 
-        assert.deepStrictEqual(sentOffers, ['peer-open'], 'sendOffer deve disparar apenas após replaceTrack(null) e ignorar peer fechado');
-        assert.strictEqual(s1.track, null);
-        assert.strictEqual(s2.track, null);
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        failures++;
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-    }
+    const stopPromise = controller.stopScreenShare();
+    assert.equal(sentOffers.length, 0, 'sendOffer must wait for replaceTrack(null)');
 
-    // T8: socket connect aguarda refreshIceServers concluir antes de scheduleIceRefreshTimer
-    process.stdout.write('  [Teste] T8: Timer inicial ICE usa TTL real após refreshIceServers resolver ... ');
-    try {
-        const fs = require('fs');
-        const path = require('path');
-        const iceConfigSrc = fs.readFileSync(path.resolve(__dirname, '../public/js/modules/ice-config.js'), 'utf8')
-            .replace(/^export\s+/gm, '')
-            .replace(/^import\s+[\s\S]*?;\s*$/gm, '');
+    resolve1();
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(sentOffers.length, 0, 'sendOffer must wait for all replaceTrack(null) promises');
 
-        let resolveFetch = null;
-        const fetchGate = new Promise((r) => { resolveFetch = r; });
-        const scheduledDelays = [];
-        const socketHandlers = {};
+    resolve2();
+    await stopPromise;
+    await new Promise((r) => setTimeout(r, 10));
 
-        const sandbox = {
-            Map,
-            Set,
-            Array,
-            Number,
-            Math,
-            Date,
-            Promise,
-            AbortController: undefined,
-            SERVER_URL: 'https://screenshare-p2p.onrender.com',
-            peers: new Map(),
-            myId: '',
-            pendingRoomJoin: null,
-            roomId: '',
-            clientId: 'c1',
-            currentRoomPassword: '',
-            currentUserName: '',
-            wasSocketDisconnected: false,
-            hasShownConnectErrorToast: false,
-            console: { log: () => {}, warn: () => {}, error: () => {} },
-            setTimeout: (_fn, ms) => {
-                scheduledDelays.push(ms);
-                return scheduledDelays.length;
-            },
-            clearTimeout: () => {},
-            fetch: async () => {
-                await fetchGate;
+    assert.deepEqual(sentOffers, ['peer-open']);
+    assert.equal(s1.track, null);
+    assert.equal(s2.track, null);
+});
+
+test('T8: socket connect awaits refreshIceServers before scheduleIceRefreshTimer uses server TTL', async () => {
+    const appMod = await import(`${pathToFileURL(path.join(ROOT_DIR, 'public/app.js')).href}?t8=${Date.now()}`);
+    let resolveFetch;
+    const fetchGate = new Promise((r) => { resolveFetch = r; });
+
+    const origFetch = global.fetch;
+    const origSetTimeout = global.setTimeout;
+    const origClearTimeout = global.clearTimeout;
+    const scheduledDelays = [];
+
+    global.fetch = async () => {
+        await fetchGate;
+        return {
+            ok: true,
+            status: 200,
+            async json() {
                 return {
-                    ok: true,
-                    status: 200,
-                    async json() {
-                        return {
-                            provider: 'cloudflare',
-                            ttlSeconds: 14400,
-                            iceServers: [{ urls: 'turn:turn.cloudflare.com:3478', username: 'u', credential: 'p' }]
-                        };
-                    }
+                    provider: 'cloudflare',
+                    ttlSeconds: 14400,
+                    iceServers: [{ urls: 'turn:turn.cloudflare.com:3478', username: 'u', credential: 'p' }]
                 };
-            },
-            socket: {
-                id: 'sock-1',
-                on(ev, fn) { socketHandlers[ev] = fn; }
-            },
-            cancelColdStartNotice() {},
-            setSignalingStatus() {},
-            showToast() {},
-            document: { getElementById: () => null },
-            updateStatsDisplay() {}
+            }
         };
+    };
+    global.setTimeout = (fn, ms, ...args) => {
+        if (ms > 10000) {
+            scheduledDelays.push(ms);
+            return 9000 + scheduledDelays.length;
+        }
+        return origSetTimeout(fn, ms, ...args);
+    };
+    global.clearTimeout = (id) => {
+        if (id >= 9000) return;
+        return origClearTimeout(id);
+    };
 
-        vm.createContext(sandbox);
-        vm.runInContext(iceConfigSrc + '\n\n' + extractSocketHandler(bundleSrc, 'connect'), sandbox);
+    const socketHandlers = {};
+    const fakeSocket = {
+        id: 'sock-1',
+        on(ev, fn) { socketHandlers[ev] = fn; },
+        emit() {},
+        disconnect() {}
+    };
+    const doc = createMockDocument({}, { createElement: () => createMockElement('div') });
+    const app = appMod.initApp({
+        windowObj: {
+            location: { protocol: 'http:', origin: 'https://screenshare-p2p.onrender.com', pathname: '/', search: '', hash: '' },
+            addEventListener: () => {},
+            removeEventListener: () => {},
+            matchMedia: () => ({ matches: false })
+        },
+        documentObj: doc,
+        navigatorObj: { clipboard: { writeText: async () => {} } },
+        storage: createMockStorage(),
+        ioFactory: () => fakeSocket,
+        serverUrl: 'https://screenshare-p2p.onrender.com'
+    });
 
+    try {
         socketHandlers.connect();
-        assert.strictEqual(scheduledDelays.length, 0, 'Não deve agendar timer de 4 min antes de refreshIceServers resolver');
+        assert.equal(scheduledDelays.length, 0, 'Must not schedule ICE refresh timer before refreshIceServers resolves');
 
         resolveFetch();
-        await delay(15);
+        await new Promise((r) => origSetTimeout(r, 25));
 
-        assert.strictEqual(scheduledDelays.length, 1, 'Deve agendar timer único após refreshIceServers concluir');
-        assert(scheduledDelays[0] > 10_000_000, `Esperado delay próximo de ~3h55m para ttl=14400s, recebido ${scheduledDelays[0]}ms`);
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        failures++;
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+        assert.equal(scheduledDelays.length, 1, 'Should schedule ICE timer after refreshIceServers settles');
+        assert.ok(scheduledDelays[0] > 10_000_000, `Expected ~3h55m timer for ttl=14400s, got ${scheduledDelays[0]}`);
+    } finally {
+        app.teardownClientSession();
+        global.fetch = origFetch;
+        global.setTimeout = origSetTimeout;
+        global.clearTimeout = origClearTimeout;
     }
+});
 
-    // T9: wasapi-capture-stopped remove trilha WASAPI morta, mantém vídeo e renegocia peers
-    process.stdout.write('  [Teste] T9: handleDesktopCaptureStopped remove áudio morto e renegocia peers mantendo vídeo ... ');
-    try {
-        const fs = require('fs');
-        const path = require('path');
-        const desktopAudioSrc = fs.readFileSync(path.resolve(__dirname, '../public/js/modules/desktop-audio.js'), 'utf8');
-        assert(
-            desktopAudioSrc.includes('_isDesktopWasapiTrack'),
-            'desktop-audio.js deve marcar track WASAPI com _isDesktopWasapiTrack'
-        );
+test('T9: handleDesktopCaptureStopped stops WASAPI audio track, preserves video, and renegotiates peers', async () => {
+    const { shareMod } = await loadModules();
+    const desktopAudioSrc = fs.readFileSync(path.join(ROOT_DIR, 'public/js/modules/desktop-audio.js'), 'utf8');
+    assert.ok(desktopAudioSrc.includes('_isDesktopWasapiTrack'));
 
-        const videoTrack = { id: 'v1', kind: 'video', stopped: false, stop() { this.stopped = true; } };
-        const audioTrack = { id: 'a1', kind: 'audio', _isDesktopWasapiTrack: true, stopped: false, stop() { this.stopped = true; } };
+    const videoTrack = createMockTrack('video', 'v1');
+    const audioTrack = createMockTrack('audio', 'a1', { _isDesktopWasapiTrack: true });
 
-        class MockLocalStream {
-            constructor(tracks) { this._tracks = [...tracks]; }
-            getTracks() { return [...this._tracks]; }
-            getVideoTracks() { return this._tracks.filter((t) => t.kind === 'video'); }
-            getAudioTracks() { return this._tracks.filter((t) => t.kind === 'audio'); }
-            removeTrack(t) { this._tracks = this._tracks.filter((x) => x !== t); }
-        }
+    let resolveAudioReplace;
+    const audioReplacePromise = new Promise((r) => { resolveAudioReplace = r; });
+    const videoSender = createMockSender(videoTrack);
+    videoSender.replaceTrack = () => { throw new Error('Must not clear video sender'); };
+    const audioSender = createMockSender(audioTrack);
+    audioSender.replaceTrack = (t) => { audioSender.track = t; return audioReplacePromise; };
+    const videoTransceiver = { direction: 'sendrecv', sender: videoSender };
+    const audioTransceiver = { direction: 'sendrecv', sender: audioSender };
 
-        let resolveAudioReplace;
-        const audioReplacePromise = new Promise((r) => { resolveAudioReplace = r; });
-        const videoSender = { track: videoTrack, replaceTrack() { throw new Error('Não deve limpar vídeo'); } };
-        const audioSender = { track: audioTrack, replaceTrack(t) { this.track = t; return audioReplacePromise; } };
-        const audioTransceiver = { direction: 'sendrecv', sender: audioSender };
-        const videoTransceiver = { direction: 'sendrecv', sender: videoSender };
+    const pc = createMockPeerConnection({
+        connectionState: 'connected',
+        senders: [videoSender, audioSender],
+        transceivers: [videoTransceiver, audioTransceiver]
+    });
+    const peers = new Map([['peer-1', { pc }]]);
+    const localStream = new MockMediaStream([videoTrack, audioTrack]);
+    const sentOffers = [];
+    const toasts = [];
 
-        const sentOffers = [];
-        const toasts = [];
-        const localStream = new MockLocalStream([videoTrack, audioTrack]);
-        const peers = new Map([
-            ['peer-1', {
-                pc: {
-                    signalingState: 'stable',
-                    connectionState: 'connected',
-                    getTransceivers: () => [videoTransceiver, audioTransceiver],
-                    getSenders: () => [videoSender, audioSender]
-                }
-            }]
-        ]);
+    const controller = shareMod.createScreenShareController({
+        state: { roomId: 'room-1', localStream },
+        dom: {},
+        getSocket: () => ({ emit: () => {} }),
+        getPeers: () => peers,
+        getWebRtc: () => ({ sendOffer: (id) => { sentOffers.push(id); } }),
+        getGrid: () => null,
+        getQosMonitor: () => null,
+        startExcludeDiscordCapture: async () => {},
+        startAppAudioCapture: async () => {},
+        stopAppAudioCapture: () => {},
+        showToast: (msg, type) => toasts.push({ msg, type }),
+        documentObj: createMockDocument(),
+        navigatorObj: {},
+        MediaStreamCtor: MockMediaStream
+    });
 
-        const sandbox = {
-            Map,
-            Set,
-            Promise,
-            Boolean,
-            peers,
-            localStream,
-            showToast: (msg, type) => toasts.push({ msg, type }),
-            sendOffer: (id) => sentOffers.push(id)
-        };
+    const done = controller.handleDesktopCaptureStopped({ pid: 4321, reason: 'process_exited' });
+    assert.equal(toasts.length, 1);
+    assert.equal(audioTrack.stopped, true);
+    assert.equal(videoTrack.stopped, false);
+    assert.equal(localStream.getAudioTracks().length, 0);
+    assert.equal(localStream.getVideoTracks().length, 1);
+    assert.equal(audioTransceiver.direction, 'recvonly');
+    assert.equal(sentOffers.length, 0, 'sendOffer must await replaceTrack(null) completion');
 
-        vm.createContext(sandbox);
-        vm.runInContext(extractFn(bundleSrc, 'handleDesktopCaptureStopped', true), sandbox);
+    resolveAudioReplace();
+    await done;
+    assert.deepEqual(sentOffers, ['peer-1']);
+    assert.equal(audioSender.track, null);
+});
 
-        const done = sandbox.handleDesktopCaptureStopped({ pid: 4321, reason: 'process_exited' });
-        assert.strictEqual(toasts.length, 1);
-        assert.strictEqual(audioTrack.stopped, true, 'Track WASAPI morta deve ser parada');
-        assert.strictEqual(videoTrack.stopped, false, 'Track de vídeo deve continuar ativa');
-        assert.strictEqual(localStream.getAudioTracks().length, 0, 'Track WASAPI morta deve ser removida de localStream');
-        assert.strictEqual(localStream.getVideoTracks().length, 1);
-        assert.strictEqual(audioTransceiver.direction, 'recvonly');
-        assert.strictEqual(sentOffers.length, 0, 'sendOffer deve aguardar replaceTrack(null) do áudio');
+test('T10: handleRoomUsers applies snapshot before await refreshIceServers and preserves concurrent events', async () => {
+    const { webrtcMod } = await loadModules();
+    let resolveIceGate;
+    const iceGate = new Promise((r) => { resolveIceGate = r; });
 
-        resolveAudioReplace();
-        await done;
-        assert.deepStrictEqual(sentOffers, ['peer-1']);
-        assert.strictEqual(audioSender.track, null);
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        failures++;
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-    }
-
-    // T10: room-users durante await de refreshIceServers não descarta sinais nem apaga user-joined/stream-state concorrentes
-    process.stdout.write('  [Teste] T10: room-users aplica snapshot antes do await de ICE e preserva eventos concorrentes ... ');
-    try {
-        let resolveIceGate = null;
-        const iceGate = new Promise((r) => { resolveIceGate = r; });
-
-        class MockPC {
-            constructor() {
-                this.signalingState = 'stable';
-                this.connectionState = 'connected';
-                this.remoteDescription = null;
-                this.localDescription = null;
-            }
-            async setRemoteDescription(d) { this.remoteDescription = d; }
-            async createAnswer() { return { type: 'answer', sdp: 'v=0\r\nans' }; }
-            async setLocalDescription(d) { this.localDescription = d; }
-            close() { this.signalingState = 'closed'; this.connectionState = 'closed'; }
-        }
-
-        const socketHandlers = {};
-        const peers = new Map([
-            ['old-peer', { pc: new MockPC(), stream: null, tileEl: null }]
-        ]);
-        const activeRoomPeers = new Set(['old-peer']);
-        const recentlyRemovedPeers = new Map();
-        const remoteActiveStreams = new Set(['old-peer']);
-
-        const sandbox = {
-            Map,
-            Set,
-            Array,
-            Boolean,
-            Date,
-            Promise,
-            encodeURIComponent,
-            setTimeout,
-            clearTimeout,
-            SERVER_URL: 'https://screenshare-p2p.onrender.com',
-            RTCPeerConnection: MockPC,
-            RTCSessionDescription: class { constructor(d) { Object.assign(this, d); } },
-            RTCIceCandidate: class { constructor(d) { Object.assign(this, d); } },
-            MediaStream: class { constructor() { this._t = []; } getTracks() { return this._t; } getVideoTracks() { return []; } },
-            rtcConfig: {},
-            myId: 'sock-old',
+    const { mesh } = createMeshEnv(webrtcMod.createWebRtcMesh, {
+        myId: 'sock-old',
+        state: {
             roomId: 'sala-antiga',
-            currentRoomPassword: '',
-            currentUserName: 'Pedro',
-            pendingRoomJoin: { roomId: 'sala-nova', password: '', userName: 'Pedro' },
-            hasRoomMembershipSnapshot: true,
-            lastJoinedSocketId: 'sock-old',
-            roomUsersGeneration: 0,
-            localStream: null,
-            peers,
-            activeRoomPeers,
-            recentlyRemovedPeers,
-            remoteActiveStreams,
-            STORAGE_KEY: 'streamgrid_last_room',
-            displayRoomId: { textContent: '', appendChild() {} },
-            memberCountText: { textContent: '' },
-            streamGrid: { querySelectorAll: () => [], appendChild() {} },
-            document: { getElementById: () => null },
-            btnStartShare: { hidden: false },
-            btnStopShare: { hidden: true },
-            btnQualityToggle: { hidden: true },
-            localStorage: { setItem() {}, removeItem() {} },
-            window: { location: { protocol: 'http:', pathname: '/' }, history: { pushState() {} } },
-            socket: {
-                id: 'sock-old',
-                on(ev, fn) { socketHandlers[ev] = fn; },
-                emit() {}
-            },
-            console: { log: () => {}, warn: () => {}, error: () => {} },
-            refreshIceServers: async () => { await iceGate; },
-            scheduleIceRefreshTimer: () => {},
-            saveSessionRoomPassword: () => {},
-            clearSessionRoomPassword: () => {},
-            closeRoomModal: () => {},
-            updateRoomModalCloseButton: () => {},
-            clearPeerTimers: () => {},
-            disposeTileElement: () => {},
-            removeStreamTile: () => {},
-            ensureRemoteStreamTile: () => {},
-            updateEchoWarningVisibility: () => {},
-            updateMemberCount: () => {},
-            updateGridState: () => {},
-            updateBackgroundTracksOptimization: () => {},
-            stopQualityMonitor: () => {},
-            stopAppAudioCapture: () => {},
-            setPeerConnectionStatus: () => {},
-            logPeerConnectionTelemetry: () => {},
-            showToast: () => {},
-            playPresenceChime: () => {},
-            optimizeSDP: (s) => s,
-            updateSendersForActivePeers: () => {}
-        };
+            pendingRoomJoin: { roomId: 'sala-nova', password: '', userName: 'Pedro' }
+        },
+        refreshIceServers: async () => { await iceGate; }
+    });
 
-        vm.createContext(sandbox);
-        vm.runInContext([
-            extractFn(bundleSrc, 'isPeerConnectionActive'),
-            extractFn(bundleSrc, 'getOrCreatePeerConnection'),
-            extractFn(bundleSrc, 'updatePeerUserName'),
-            extractFn(bundleSrc, 'removePeerConnection'),
-            extractFn(bundleSrc, 'stopScreenShare'),
-            extractFn(bundleSrc, 'cleanupRoomState'),
-            extractSocketHandler(bundleSrc, 'room-users'),
-            extractSocketHandler(bundleSrc, 'user-joined'),
-            extractSocketHandler(bundleSrc, 'user-left'),
-            extractSocketHandler(bundleSrc, 'signal'),
-            extractSocketHandler(bundleSrc, 'stream-state')
-        ].join('\n\n'), sandbox);
+    mesh.peers.set('old-peer', { pc: createMockPeerConnection(), stream: new MockMediaStream(), tileEl: null });
+    mesh.activeRoomPeers.add('old-peer');
+    mesh.remoteActiveStreams.add('old-peer');
+    mesh.membership.hasRoomMembershipSnapshot = true;
+    mesh.membership.lastJoinedSocketId = 'sock-old';
 
-        // Inicia room-users (trava no await refreshIceServers)
-        const roomUsersPromise = socketHandlers['room-users']({
-            users: ['peer-b', 'sock-old'],
-            userNames: { 'peer-b': 'Bob' },
-            activeStreams: ['peer-b'],
-            socketId: 'sock-old',
-            memberCount: 2,
-            hasPassword: false
-        });
+    const roomUsersPromise = mesh.handleRoomUsers({
+        users: ['peer-b', 'sock-old'],
+        userNames: { 'peer-b': 'Bob' },
+        activeStreams: ['peer-b'],
+        socketId: 'sock-old',
+        memberCount: 2,
+        hasPassword: false
+    });
 
-        // Enquanto room-users aguarda refreshIceServers:
-        // 1) Chega oferta de peer-b (não pode ser descartada como estranho da sala antiga)
-        socketHandlers.signal({ senderId: 'peer-b', signal: { type: 'offer', sdp: 'v=0\r\noffer-from-b' } });
-        // 2) peer-c entra e começa a transmitir durante o await
-        socketHandlers['user-joined']({ socketId: 'peer-c', userName: 'Carol', memberCount: 3 });
-        socketHandlers['stream-state']({ senderId: 'peer-c', state: 'started' });
-        // 3) peer-b sai durante o await
-        socketHandlers['user-left']({ socketId: 'peer-b', memberCount: 2 });
+    mesh.handleSignal({ senderId: 'peer-b', signal: { type: 'offer', sdp: 'v=0\r\noffer-from-b' } });
+    mesh.handleUserJoined({ socketId: 'peer-c', userName: 'Carol', memberCount: 3 });
+    mesh.handleStreamState({ senderId: 'peer-c', state: 'started' });
+    mesh.handleUserLeft({ socketId: 'peer-b', memberCount: 2 });
 
-        resolveIceGate();
-        await roomUsersPromise;
+    resolveIceGate();
+    await roomUsersPromise;
 
-        assert.strictEqual(peers.has('old-peer'), false, 'old-peer deve ter sido limpo');
-        assert.strictEqual(peers.has('peer-b'), false, 'peer-b que saiu durante o await NÃO pode ser ressuscitado');
-        assert.strictEqual(peers.has('peer-c'), true, 'peer-c que entrou durante o await NÃO pode ser destruído');
-        assert.strictEqual(activeRoomPeers.has('peer-c'), true, 'peer-c deve permanecer em activeRoomPeers');
-        assert.strictEqual(remoteActiveStreams.has('peer-c'), true, 'stream-state:started de peer-c deve ser preservado');
-        assert.strictEqual(remoteActiveStreams.has('peer-b'), false, 'stream de peer-b removido deve sair de remoteActiveStreams');
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        failures++;
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-    }
+    assert.equal(mesh.peers.has('old-peer'), false, 'old-peer must be removed');
+    assert.equal(mesh.peers.has('peer-b'), false, 'peer-b that left during await must not be resurrected');
+    assert.equal(mesh.peers.has('peer-c'), true, 'peer-c that joined during await must be retained');
+    assert.equal(mesh.activeRoomPeers.has('peer-c'), true);
+    assert.equal(mesh.remoteActiveStreams.has('peer-c'), true);
+    assert.equal(mesh.remoteActiveStreams.has('peer-b'), false);
+});
 
-    // T11: Reconexão Socket.IO com novo socketId recria PCs obsoletas, recalcula isPolite e re-emite stream-state:started
-    process.stdout.write('  [Teste] T11: Reconexão com novo socketId fecha PC antiga, recalcula isPolite e re-emite stream-state ... ');
-    try {
-        class MockPC {
-            constructor() {
-                this.signalingState = 'stable';
-                this.connectionState = 'connected';
-                this.closed = false;
-                this._senders = [];
-            }
-            getSenders() { return this._senders; }
-            close() { this.closed = true; this.signalingState = 'closed'; this.connectionState = 'closed'; }
-        }
+test('T11: Reconnect with new socketId closes stale PCs, recalculates isPolite, sends new offer, and re-emits stream-state', async () => {
+    const { webrtcMod } = await loadModules();
+    const oldPc = createMockPeerConnection();
+    const localVideo = createMockTrack('video', 'v1');
 
-        const emitted = [];
-        const sentOffers = [];
-        const socketHandlers = {};
-        const oldPc = new MockPC();
-        const peers = new Map([
-            ['m-peer', { pc: oldPc, stream: null, tileEl: null, isPolite: false }]
-        ]);
-
-        const sandbox = {
-            Map,
-            Set,
-            Array,
-            Boolean,
-            Date,
-            Promise,
-            encodeURIComponent,
-            RTCPeerConnection: MockPC,
-            MediaStream: class { getTracks() { return []; } getVideoTracks() { return []; } },
-            rtcConfig: {},
-            myId: 'a-new-id', // após connect com novo socket.id ('a-new-id' < 'm-peer' => true)
-            lastJoinedSocketId: 'z-old-id', // anteriormente era 'z-old-id' ('z-old-id' < 'm-peer' => false)
-            roomUsersGeneration: 0,
+    const { mesh, emitted } = createMeshEnv(webrtcMod.createWebRtcMesh, {
+        myId: 'a-new-id', // 'a-new-id' < 'm-peer' => true
+        serverUrl: '', // skip ICE refresh delay
+        state: {
             roomId: 'sala-1',
-            pendingRoomJoin: null,
-            currentRoomPassword: '',
-            currentUserName: 'Pedro',
-            hasRoomMembershipSnapshot: true,
-            activeRoomPeers: new Set(['m-peer']),
-            recentlyRemovedPeers: new Map(),
-            remoteActiveStreams: new Set(),
-            localStream: { getTracks: () => [{ id: 'v1', kind: 'video' }], getVideoTracks: () => [{ id: 'v1', kind: 'video' }] },
-            peers,
-            displayRoomId: { textContent: '', appendChild() {} },
-            memberCountText: { textContent: '' },
-            streamGrid: { querySelectorAll: () => [], appendChild() {} },
-            socket: {
-                id: 'a-new-id',
-                on(ev, fn) { socketHandlers[ev] = fn; },
-                emit(ev, payload) { emitted.push({ ev, payload }); }
-            },
-            console: { log: () => {}, warn: () => {}, error: () => {} },
-            clearPeerTimers() {},
-            disposeTileElement() {},
-            updateEchoWarningVisibility() {},
-            updateMemberCount() {},
-            updateGridState() {},
-            updateBackgroundTracksOptimization() {},
-            updatePeerUserName() {},
-            addLocalTracksToPC() {},
-            sendOffer(id) { sentOffers.push(id); },
-            updateSendersForActivePeers() {}
-        };
-
-        vm.createContext(sandbox);
-        vm.runInContext([
-            extractFn(bundleSrc, 'getOrCreatePeerConnection'),
-            extractFn(bundleSrc, 'removePeerConnection'),
-            extractSocketHandler(bundleSrc, 'room-users')
-        ].join('\n\n'), sandbox);
-
-        await socketHandlers['room-users']({
-            users: ['m-peer', 'a-new-id'],
-            userNames: { 'm-peer': 'Maria' },
-            activeStreams: [],
-            socketId: 'a-new-id',
-            memberCount: 2,
-            hasPassword: false
-        });
-
-        assert.strictEqual(oldPc.closed, true, 'PC antiga de socket desconectado deve ser fechada');
-        const currentPeer = peers.get('m-peer');
-        assert(currentPeer && currentPeer.pc !== oldPc, 'Deve criar nova RTCPeerConnection para m-peer');
-        assert.strictEqual(currentPeer.isPolite, true, 'isPolite deve ser recalculado com o novo socketId');
-        assert(sentOffers.includes('m-peer'), 'Deve enviar nova oferta pela PC recriada');
-        assert(
-            emitted.some((e) => e.ev === 'stream-state' && e.payload && e.payload.roomId === 'sala-1' && e.payload.state === 'started'),
-            'Deve re-emitir stream-state:started ao reconectar transmitindo'
-        );
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        failures++;
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-    }
-
-    // T12: updateBackgroundTracksOptimization mantém vídeo ativo para stream em Picture-in-Picture
-    process.stdout.write('  [Teste] T12: updateBackgroundTracksOptimization preserva track em Picture-in-Picture ... ');
-    try {
-        const pipTrack = { enabled: true };
-        const bgTrack = { enabled: true };
-        const pipVideoEl = { id: 'vid-pip' };
-        const bgVideoEl = { id: 'vid-bg' };
-        const pipTileEl = {
-            dataset: { peerId: 'peer-pip' },
-            contains: (el) => el === pipVideoEl,
-            querySelector: (sel) => (sel === 'video' ? pipVideoEl : null)
-        };
-        const bgTileEl = {
-            dataset: { peerId: 'peer-bg' },
-            contains: (el) => el === bgVideoEl,
-            querySelector: (sel) => (sel === 'video' ? bgVideoEl : null)
-        };
-
-        const sandbox = {
-            document: {
-                hidden: true,
-                fullscreenElement: null,
-                pictureInPictureElement: pipVideoEl,
-                querySelector: () => null
-            },
-            peers: new Map([
-                ['peer-pip', { tileEl: pipTileEl, stream: { getVideoTracks: () => [pipTrack] } }],
-                ['peer-bg', { tileEl: bgTileEl, stream: { getVideoTracks: () => [bgTrack] } }]
-            ])
-        };
-
-        vm.createContext(sandbox);
-        vm.runInContext(extractFn(bundleSrc, 'updateBackgroundTracksOptimization'), sandbox);
-
-        sandbox.updateBackgroundTracksOptimization();
-        assert.strictEqual(pipTrack.enabled, true, 'Track do vídeo em Picture-in-Picture deve permanecer ativa');
-        assert.strictEqual(bgTrack.enabled, false, 'Demais tracks em segundo plano devem pausar quando oculto');
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        failures++;
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-    }
-
-    // T13: user-joined durante await de ICE não duplica sendOffer e offer inicial sincroniza setConfiguration antes de setRemoteDescription
-    process.stdout.write('  [Teste] T13: room-users evita oferta duplicada para user-joined concorrente e sincroniza TURN no signal ... ');
-    try {
-        let resolveIce;
-        const iceGate = new Promise((r) => { resolveIce = r; });
-        const socketHandlers = {};
-        const peers = new Map();
-        const sentOffers = [];
-        const opLog = [];
-        const activeRoomPeers = new Set();
-
-        class MockPcT13 {
-            constructor() {
-                this.signalingState = 'stable';
-                this.connectionState = 'new';
-                this.localDescription = null;
-                this.remoteDescription = null;
-            }
-            setConfiguration(cfg) {
-                opLog.push({ op: 'setConfiguration', urls: cfg && cfg.iceServers ? cfg.iceServers[0].urls : null });
-            }
-            async setRemoteDescription(desc) {
-                opLog.push({ op: 'setRemoteDescription', type: desc && desc.type });
-                this.remoteDescription = desc;
-            }
-            async createAnswer() {
-                return { type: 'answer', sdp: 'v=0\r\n' };
-            }
-            async setLocalDescription(desc) {
-                this.localDescription = desc;
-            }
-            getSenders() { return []; }
-            addTrack() { return {}; }
-            close() { this.connectionState = 'closed'; }
+            localStream: new MockMediaStream([localVideo])
         }
+    });
+    mesh.membership.lastJoinedSocketId = 'z-old-id'; // previously 'z-old-id' < 'm-peer' => false
+    mesh.peers.set('m-peer', { pc: oldPc, stream: new MockMediaStream(), tileEl: null, isPolite: false });
 
-        const rtcConfigObj = { iceServers: [{ urls: 'stun:fallback' }] };
-        const sandbox = {
-            Promise,
-            Set,
-            Map,
-            Math,
-            setTimeout,
-            clearTimeout,
-            RTCSessionDescription: class { constructor(d) { Object.assign(this, d); } },
-            SERVER_URL: 'https://srv.test',
+    await mesh.handleRoomUsers({
+        users: ['m-peer', 'a-new-id'],
+        userNames: { 'm-peer': 'Maria' },
+        activeStreams: [],
+        socketId: 'a-new-id',
+        memberCount: 2,
+        hasPassword: false
+    });
+    await new Promise((r) => setTimeout(r, 15));
+
+    assert.equal(oldPc.closed, true, 'Stale PeerConnection from previous socket must be closed');
+    const currentPeer = mesh.peers.get('m-peer');
+    assert.ok(currentPeer && currentPeer.pc !== oldPc);
+    assert.equal(currentPeer.isPolite, true);
+    assert.ok(emitted.some((e) => e.event === 'signal' && e.payload.targetId === 'm-peer' && e.payload.signal.type === 'offer'));
+    assert.ok(emitted.some((e) => e.event === 'stream-state' && e.payload.roomId === 'sala-1' && e.payload.state === 'started'));
+});
+
+test('T12: updateBackgroundTracksOptimization keeps Picture-in-Picture track active while pausing hidden background tracks', async () => {
+    const { webrtcMod } = await loadModules();
+    const pipTrack = createMockTrack('video', 'v-pip');
+    const bgTrack = createMockTrack('video', 'v-bg');
+    const pipVideoEl = createMockElement('video', { id: 'vid-pip' });
+    const bgVideoEl = createMockElement('video', { id: 'vid-bg' });
+
+    const pipTileEl = createMockElement('div');
+    pipTileEl.dataset.peerId = 'peer-pip';
+    pipTileEl.contains = (el) => el === pipVideoEl;
+    pipTileEl.querySelector = (sel) => (sel === 'video' ? pipVideoEl : null);
+
+    const bgTileEl = createMockElement('div');
+    bgTileEl.dataset.peerId = 'peer-bg';
+    bgTileEl.contains = (el) => el === bgVideoEl;
+    bgTileEl.querySelector = (sel) => (sel === 'video' ? bgVideoEl : null);
+
+    const doc = createMockDocument();
+    doc.hidden = true;
+    doc.fullscreenElement = null;
+    doc.pictureInPictureElement = pipVideoEl;
+
+    const { mesh } = createMeshEnv(webrtcMod.createWebRtcMesh, { documentObj: doc });
+    mesh.peers.set('peer-pip', { pc: createMockPeerConnection(), tileEl: pipTileEl, stream: new MockMediaStream([pipTrack]) });
+    mesh.peers.set('peer-bg', { pc: createMockPeerConnection(), tileEl: bgTileEl, stream: new MockMediaStream([bgTrack]) });
+
+    mesh.updateBackgroundTracksOptimization();
+    assert.equal(pipTrack.enabled, true, 'PiP track must stay enabled when document is hidden');
+    assert.equal(bgTrack.enabled, false, 'Non-PiP background tracks must pause when hidden');
+});
+
+test('T13: handleRoomUsers avoids duplicate offer for concurrent user-joined and applies setConfiguration before setRemoteDescription', async () => {
+    const { webrtcMod } = await loadModules();
+    let resolveIce;
+    const iceGate = new Promise((r) => { resolveIce = r; });
+    const opLog = [];
+    const rtcConfigObj = { iceServers: [{ urls: 'stun:fallback' }] };
+
+    const { mesh, emitted } = createMeshEnv(webrtcMod.createWebRtcMesh, {
+        myId: 'me-13',
+        rtcConfig: rtcConfigObj,
+        state: {
             roomId: 'sala-t13',
-            myId: null,
-            lastJoinedSocketId: '',
-            roomUsersGeneration: 0,
-            isRoomMembershipConfirmed: false,
-            hasRoomMembershipSnapshot: false,
-            activeRoomPeers,
-            recentlyRemovedPeers: new Set(),
-            pendingRoomJoin: null,
-            localStream: { getTracks: () => [{ id: 'v1', kind: 'video' }], getVideoTracks: () => [{ id: 'v1', kind: 'video' }] },
-            remoteActiveStreams: new Set(),
-            peers,
-            rtcConfig: rtcConfigObj,
-            displayRoomId: { textContent: '', appendChild() {} },
-            document: { createElement: () => ({ style: {} }) },
-            socket: {
-                id: 'me-13',
-                on(ev, fn) { socketHandlers[ev] = fn; },
-                emit() {}
-            },
-            refreshIceServers: async () => {
-                await iceGate;
-                rtcConfigObj.iceServers = [{ urls: 'turns:cf.turn:443' }];
-            },
-            scheduleIceRefreshTimer() {},
-            cleanupRoomState() {},
-            closeRoomModal() {},
-            updateRoomModalCloseButton() {},
-            updateEchoWarningVisibility() {},
-            updateMemberCount() {},
-            updatePeerUserName() {},
-            updateSendersForActivePeers() {},
-            removePeerConnection(id) { peers.delete(id); activeRoomPeers.delete(id); },
-            showToast() {},
-            playPresenceChime() {},
-            addLocalTracksToPC() {},
-            sendOffer(id) { sentOffers.push(id); },
-            isPeerConnectionActive: (id, obj, pc) => Boolean(obj && obj.pc === pc && pc.connectionState !== 'closed'),
-            getOrCreatePeerConnection(id) {
-                if (peers.has(id)) return peers.get(id).pc;
-                const pc = new MockPcT13();
-                peers.set(id, { pc, isPolite: id > 'me-13', iceCandidateQueue: [], isRemoteDescriptionSet: false });
-                return pc;
-            }
-        };
+            localStream: new MockMediaStream([createMockTrack('video', 'v1')])
+        },
+        refreshIceServers: async () => {
+            await iceGate;
+            rtcConfigObj.iceServers = [{ urls: 'turns:cf.turn:443' }];
+        },
+        pcFactory: () => {
+            const pc = createMockPeerConnection();
+            pc.setConfiguration = (cfg) => {
+                opLog.push({ op: 'setConfiguration', urls: cfg && cfg.iceServers ? cfg.iceServers[0].urls : null });
+            };
+            pc.setRemoteDescription = async (desc) => {
+                opLog.push({ op: 'setRemoteDescription', type: desc && desc.type });
+                pc.remoteDescription = desc;
+            };
+            return pc;
+        }
+    });
 
-        vm.createContext(sandbox);
-        vm.runInContext([
-            extractSocketHandler(bundleSrc, 'room-users'),
-            extractSocketHandler(bundleSrc, 'user-joined'),
-            extractSocketHandler(bundleSrc, 'signal')
-        ].join('\n\n'), sandbox);
+    const roomUsersPromise = mesh.handleRoomUsers({
+        users: ['peer-a'],
+        userNames: { 'peer-a': 'Alice' },
+        activeStreams: ['peer-a'],
+        socketId: 'me-13',
+        memberCount: 2,
+        hasPassword: false
+    });
 
-        // Inicia room-users com peer existente 'peer-a' (awaiting ICE)
-        const roomUsersPromise = socketHandlers['room-users']({
-            users: ['peer-a'],
-            userNames: { 'peer-a': 'Alice' },
-            activeStreams: ['peer-a'],
-            socketId: 'me-13',
-            memberCount: 2,
-            hasPassword: false
-        });
+    mesh.handleSignal({ senderId: 'peer-a', signal: { type: 'offer', sdp: 'v=0\r\n' } });
+    mesh.handleUserJoined({ socketId: 'peer-d', userName: 'Daniel', memberCount: 3 });
 
-        // Enquanto room-users aguarda ICE:
-        // 1) peer-a envia offer inicial via signal
-        socketHandlers['signal']({ senderId: 'peer-a', signal: { type: 'offer', sdp: 'v=0\r\n' } });
-        // 2) Novo peer-d entra na sala via user-joined
-        await socketHandlers['user-joined']({ socketId: 'peer-d', userName: 'Daniel', memberCount: 3 });
+    await new Promise((r) => setTimeout(r, 15));
+    assert.equal(
+        emitted.filter((e) => e.event === 'signal' && e.payload.targetId === 'peer-d' && e.payload.signal.type === 'offer').length,
+        1,
+        'Concurrent user-joined must send 1 offer immediately'
+    );
 
-        assert.strictEqual(sentOffers.filter((id) => id === 'peer-d').length, 1, 'user-joined deve enviar 1 oferta para peer-d');
+    resolveIce();
+    await roomUsersPromise;
+    await new Promise((r) => setTimeout(r, 20));
 
-        resolveIce();
-        await roomUsersPromise;
-        await delay(20);
+    assert.equal(
+        emitted.filter((e) => e.event === 'signal' && e.payload.targetId === 'peer-d' && e.payload.signal.type === 'offer').length,
+        1,
+        'peer-d must NOT receive a duplicate offer once handleRoomUsers resumes'
+    );
 
-        assert.strictEqual(
-            sentOffers.filter((id) => id === 'peer-d').length,
-            1,
-            `peer-d não deve receber segunda oferta duplicada após room-users retomar (total=${sentOffers.filter((id) => id === 'peer-d').length})`
-        );
-
-        const idxSetCfg = opLog.findIndex((o) => o.op === 'setConfiguration' && o.urls === 'turns:cf.turn:443');
-        const idxSetRemote = opLog.findIndex((o) => o.op === 'setRemoteDescription');
-        assert(idxSetCfg !== -1 && idxSetRemote !== -1, 'setConfiguration e setRemoteDescription devem executar para offer inicial');
-        assert(idxSetCfg < idxSetRemote, 'setConfiguration com TURN novo deve rodar antes de setRemoteDescription ao responder offer inicial');
-
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } catch (err) {
-        failures++;
-        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
-    }
-
-    console.log('\n===============================================================');
-    if (failures === 0) {
-        console.log('  ✅ Todos os 12 testes de renegociação/ICE passaram!');
-        console.log('===============================================================\n');
-    } else {
-        console.log(`  ❌ ${failures} teste(s) falharam.`);
-        console.log('===============================================================\n');
-        process.exit(1);
-    }
-}
-
-runTests().catch((err) => {
-    console.error('❌ Erro fatal:', err);
-    process.exit(1);
+    const idxSetCfg = opLog.findIndex((o) => o.op === 'setConfiguration' && o.urls === 'turns:cf.turn:443');
+    const idxSetRemote = opLog.findIndex((o) => o.op === 'setRemoteDescription');
+    assert.ok(idxSetCfg !== -1 && idxSetRemote !== -1);
+    assert.ok(idxSetCfg < idxSetRemote, 'setConfiguration with updated TURN must run before setRemoteDescription');
 });

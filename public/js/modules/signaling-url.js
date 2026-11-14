@@ -126,3 +126,30 @@ export function clearSessionRoomPassword() {
         sessionStorage.removeItem(SESSION_PASS_STORAGE_KEY);
     } catch (_) {}
 }
+
+export function buildInviteUrl({
+    roomId,
+    password = '',
+    isDesktop = isDesktopApp(),
+    serverUrl = '',
+    origin = (typeof window !== 'undefined' && window.location ? window.location.origin : ''),
+    pathname = (typeof window !== 'undefined' && window.location ? window.location.pathname : '/')
+} = {}) {
+    const normalizedOrigin = typeof origin === 'string' ? origin : '';
+    const isTauriOrigin = normalizedOrigin.startsWith('tauri://')
+        || normalizedOrigin.startsWith('http://tauri.localhost')
+        || normalizedOrigin.startsWith('https://tauri.localhost');
+
+    let baseUrl;
+    if ((isDesktop || isTauriOrigin) && serverUrl) {
+        baseUrl = `${String(serverUrl).replace(/\/+$/, '')}/`;
+    } else {
+        baseUrl = `${normalizedOrigin}${pathname || '/'}`;
+    }
+
+    let inviteUrl = `${baseUrl}?room=${encodeURIComponent(roomId)}`;
+    if (password) {
+        inviteUrl += `#pass=${encodeURIComponent(password)}`;
+    }
+    return inviteUrl;
+}

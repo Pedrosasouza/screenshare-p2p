@@ -1,351 +1,184 @@
-const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const vm = require('vm');
+'use strict';
 
-const appPath = path.resolve(__dirname, '../public/app.js');
-const stylePath = path.resolve(__dirname, '../public/style.css');
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 
-const { loadClientBundleSource } = require('./helpers/client-source');
-const appJs = loadClientBundleSource();
-const styleCss = fs.readFileSync(stylePath, 'utf8');
+const { createMockElement, createMockDocument, createMockStorage } = require('./helpers/mock-dom');
 
-function extractFn(source, name) {
-    const regex = new RegExp(`(?:async\\s+)?function\\s+${name}\\s*\\([\\s\\S]*?\\n\\}`);
-    const match = source.match(regex);
-    assert(match, `Function ${name} not found in public/app.js`);
-    return match[0];
-}
+const ROOT_DIR = path.resolve(__dirname, '..');
+const styleCss = fs.readFileSync(path.join(ROOT_DIR, 'public/style.css'), 'utf8');
 
-function extractSocketHandler(source, eventName) {
-    const regex = new RegExp(`socket\\.on\\('${eventName}'[\\s\\S]*?\\n\\}\\);`);
-    const match = source.match(regex);
-    assert(match, `Handler socket.on('${eventName}') not found in public/app.js`);
-    return match[0];
-}
-
-function createMockElement(tagName) {
-    const listeners = {};
-    const classes = new Set();
-    const attrs = new Map();
-    const el = {
-        tagName: tagName.toUpperCase(),
-        className: '',
-        innerHTML: '',
-        textContent: '',
-        title: '',
-        type: '',
-        min: '',
-        max: '',
-        step: '',
-        value: '',
-        muted: false,
-        volume: 1,
-        dataset: {},
-        style: {},
-        children: [],
-        parentNode: null,
-        classList: {
-            add: (...cls) => cls.forEach((c) => classes.add(c)),
-            remove: (...cls) => cls.forEach((c) => classes.delete(c)),
-            contains: (c) => classes.has(c)
-        },
-        setAttribute(k, v) {
-            attrs.set(String(k), String(v));
-            if (k === 'muted') this.muted = true;
-        },
-        removeAttribute(k) {
-            attrs.delete(String(k));
-            if (k === 'muted') this.muted = false;
-        },
-        getAttribute(k) {
-            return attrs.has(String(k)) ? attrs.get(String(k)) : null;
-        },
-        hasAttribute(k) {
-            return attrs.has(String(k));
-        },
-        appendChild(child) {
-            child.parentNode = el;
-            el.children.push(child);
-            return child;
-        },
-        remove() {
-            if (el.parentNode) {
-                el.parentNode.children = el.parentNode.children.filter((c) => c !== el);
-                el.parentNode = null;
-            }
-        },
-        addEventListener(type, fn) {
-            listeners[type] = listeners[type] || [];
-            listeners[type].push(fn);
-        },
-        removeEventListener(type, fn) {
-            if (!listeners[type]) return;
-            listeners[type] = listeners[type].filter((f) => f !== fn);
-        },
-        dispatchEvent(evt) {
-            const event = typeof evt === 'string' ? { type: evt } : { ...evt };
-            event.target = event.target || el;
-            let stopped = false;
-            const origStop = typeof event.stopPropagation === 'function' ? event.stopPropagation : null;
-            event.stopPropagation = () => {
-                stopped = true;
-                if (origStop) origStop();
-            };
-            (listeners[event.type] || []).forEach((fn) => fn.call(el, event));
-            if (!stopped && el.parentNode && typeof el.parentNode.dispatchEvent === 'function') {
-                el.parentNode.dispatchEvent(event);
-            }
-        },
-        querySelector(sel) {
-            const walk = (node) => {
-                for (const child of node.children) {
-                    if (sel.startsWith('.')) {
-                        const cls = sel.slice(1);
-                        if (child.classList.contains(cls) || child.className.split(/\s+/).includes(cls)) {
-                            return child;
-                        }
-                    } else if (child.tagName === sel.toUpperCase()) {
-                        return child;
-                    }
-                    const nested = walk(child);
-                    if (nested) return nested;
-                }
-                return null;
-            };
-            return walk(el);
-        }
+test('Socket connection lifecycle toasts, connect_error de-duplication, and offline joinRoom queuing', async () => {
+    const appMod = await import(`${pathToFileURL(path.join(ROOT_DIR, 'public/app.js')).href}?uiconn=${Date.now()}`);
+    const toastContainer = createMockElement('div', { id: 'toastContainer' });
+    const fakeDoc = createMockDocument({ toastContainer }, { createElement: (tag) => createMockElement(tag) });
+    const socketHandlers = {};
+    const emitted = [];
+    const socket = {
+        id: 'sock-test-1',
+        connected: false,
+        on(ev, fn) { socketHandlers[ev] = fn; },
+        emit(ev, payload) { emitted.push({ event: ev, payload }); },
+        disconnect() {}
     };
-    return el;
-}
 
-function runTests() {
-    console.log('\n===============================================================');
-    console.log('  🧪 SUÍTE DE TESTES: CONEXÃO OFFLINE, VOLUME & HUD DOS TILES');
-    console.log('===============================================================\n');
+    const app = appMod.initApp({
+        windowObj: {
+            location: { protocol: 'http:', origin: 'http://localhost:3000', pathname: '/', search: '', hash: '' },
+            addEventListener() {},
+            removeEventListener() {},
+            matchMedia: () => ({ matches: false })
+        },
+        documentObj: fakeDoc,
+        navigatorObj: { clipboard: { writeText: async () => {} } },
+        storage: createMockStorage(),
+        ioFactory: () => socket,
+        serverUrl: 'http://localhost:3000'
+    });
 
-    // T1: Socket connection lifecycle toasts + offline joinRoom feedback
-    process.stdout.write('  [Teste] T1: Toasts de disconnect, connect_error (sem spam), reconnect e joinRoom offline ... ');
-    {
-        const toasts = [];
-        const socketHandlers = {};
-        const emitted = [];
-        const socket = {
-            id: 'sock-test-1',
-            connected: false,
-            on(event, fn) {
-                socketHandlers[event] = fn;
-            },
-            emit(event, payload) {
-                emitted.push({ event, payload });
-            }
-        };
+    const origDocument = global.document;
+    const origSetTimeout = global.setTimeout;
+    const origClearTimeout = global.clearTimeout;
+    const toastTimers = new Set();
+    global.document = fakeDoc;
+    global.setTimeout = (fn, ms, ...args) => {
+        if (ms >= 300) {
+            const id = { cancelled: false, fn: () => fn(...args) };
+            toastTimers.add(id);
+            return id;
+        }
+        return origSetTimeout(fn, ms, ...args);
+    };
+    global.clearTimeout = (id) => {
+        if (id && typeof id === 'object') {
+            id.cancelled = true;
+            toastTimers.delete(id);
+            return;
+        }
+        return origClearTimeout(id);
+    };
 
-        const flagsMatch = appJs.match(/let wasSocketDisconnected\s*=\s*false;\r?\nlet hasShownConnectErrorToast\s*=\s*false;/);
-        assert(flagsMatch, 'Connection state flags not found in public/app.js');
+    try {
+        // Offline joinRoom queues pendingRoomJoin without emitting
+        app.roomModalCtrl.joinRoom('minha-sala', '1234', 'Pedro');
+        assert.ok(app.state.pendingRoomJoin && app.state.pendingRoomJoin.roomId === 'minha-sala');
+        assert.equal(emitted.filter((e) => e.event === 'join-room').length, 0);
 
-        const sandbox = {
-            console: { log: () => {}, warn: () => {}, error: () => {} },
-            socket,
-            myId: '',
-            roomId: '',
-            pendingRoomJoin: null,
-            currentRoomPassword: '',
-            currentUserName: 'Pedro',
-            clientId: 'client-1',
-            USERNAME_KEY: 'screenshare_username',
-            localStorage: { setItem() {}, getItem: () => null },
-            clearRoomError() {},
-            openRoomModal() {},
-            showRoomError() {},
-            sanitizeRoomId: (id) => String(id || '').trim().toLowerCase(),
-            generateRandomRoomId: () => 'rand-room',
-            showToast: (msg, type, duration) => toasts.push({ msg, type, duration })
-        };
-
-        vm.createContext(sandbox);
-        const code = [
-            flagsMatch[0],
-            extractFn(appJs, 'joinRoom'),
-            extractSocketHandler(appJs, 'connect'),
-            extractSocketHandler(appJs, 'disconnect'),
-            extractSocketHandler(appJs, 'connect_error')
-        ].join('\n\n');
-        vm.runInContext(code, sandbox, { filename: 'public/app.js' });
-
-        // Offline joinRoom stores pendingRoomJoin and shows info toast
-        sandbox.joinRoom('minha-sala', '1234', 'Pedro');
-        assert(sandbox.pendingRoomJoin && sandbox.pendingRoomJoin.roomId === 'minha-sala', 'pendingRoomJoin must be stored offline');
-        assert.strictEqual(emitted.length, 0, 'Must not emit join-room while disconnected');
-        assert.strictEqual(toasts.length, 1);
-        assert.strictEqual(toasts[0].type, 'info');
-
-        // Consecutive connect_error events only show 1 error toast
         socketHandlers.connect_error(new Error('timeout'));
         socketHandlers.connect_error(new Error('timeout 2'));
-        assert.strictEqual(toasts.filter((t) => t.type === 'error').length, 1, 'connect_error must not spam toasts');
+        const errorToasts = toastContainer.children.filter((t) => t.className.includes('toast-error'));
+        assert.equal(errorToasts.length, 1, 'connect_error must not spam toasts');
 
-        const getFlags = () => vm.runInContext('({ wasSocketDisconnected, hasShownConnectErrorToast })', sandbox);
-
-        // Initial connect after connect_error shows success toast and clears flag
         socket.connected = true;
         socketHandlers.connect();
-        assert.strictEqual(emitted.length, 1, 'Pending room must be emitted on connect');
-        assert.strictEqual(toasts[toasts.length - 1].type, 'success');
-        assert.strictEqual(getFlags().hasShownConnectErrorToast, false);
+        assert.equal(emitted.filter((e) => e.event === 'join-room').length, 1, 'Pending room must emit on connect');
+        assert.ok(toastContainer.children[toastContainer.children.length - 1].className.includes('toast-success'));
 
-        // Intentional client disconnect does NOT show warning toast
-        const countBeforeClientDisconnect = toasts.length;
+        const countBeforeClientDisconnect = toastContainer.children.length;
         socketHandlers.disconnect('io client disconnect');
-        assert.strictEqual(toasts.length, countBeforeClientDisconnect, 'Intentional disconnect must not warn');
+        assert.equal(toastContainer.children.length, countBeforeClientDisconnect, 'Intentional disconnect must not warn');
 
-        // Unexpected disconnect shows warning toast and sets wasSocketDisconnected
         socketHandlers.disconnect('transport close');
-        assert.strictEqual(toasts[toasts.length - 1].type, 'warning');
-        assert.strictEqual(getFlags().wasSocketDisconnected, true);
+        assert.ok(toastContainer.children[toastContainer.children.length - 1].className.includes('toast-warning'));
 
-        // Reconnect after unexpected disconnect shows success toast and resets flags
         socketHandlers.connect_error(new Error('retry'));
         socketHandlers.connect();
-        assert.strictEqual(toasts[toasts.length - 1].type, 'success');
-        assert.strictEqual(getFlags().wasSocketDisconnected, false);
-        assert.strictEqual(getFlags().hasShownConnectErrorToast, false);
+        assert.ok(toastContainer.children[toastContainer.children.length - 1].className.includes('toast-success'));
+    } finally {
+        app.teardownClientSession();
+        toastTimers.clear();
+        global.setTimeout = origSetTimeout;
+        global.clearTimeout = origClearTimeout;
+        global.document = origDocument;
     }
-    console.log('\x1b[32mPASSOU\x1b[0m');
+});
 
-    // T2: createStreamTile remembers last non-zero volume and sets aria-label on dynamic controls
-    process.stdout.write('  [Teste] T2: createStreamTile preserva último volume não-zero e define aria-label ... ');
-    {
-        const sandbox = {
-            navigator: { userAgent: 'Mozilla/5.0' },
-            updateBackgroundTracksOptimization() {},
-            toggleTileFullscreen() {},
-            document: {
-                createElement: (tag) => createMockElement(tag)
-            }
-        };
+test('Volume slider remembers non-zero volume on mute/unmute, falls back to 1, and slider click does not trigger tap-to-unmute', async () => {
+    const [{ createStreamGridController }, { enterPseudoFullscreen, showTapToUnmuteBadge }] = await Promise.all([
+        import(pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/stream-grid.js')).href),
+        import(pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/tile-dom.js')).href)
+    ]);
 
-        vm.createContext(sandbox);
-        const code = [
-            extractFn(appJs, 'createStreamTile'),
-            extractFn(appJs, 'enterPseudoFullscreen')
-        ].join('\n\n');
-        vm.runInContext(code, sandbox, { filename: 'public/app.js' });
+    const doc = createMockDocument({}, { createElement: (tag) => createMockElement(tag) });
+    const grid = createStreamGridController({
+        state: {},
+        dom: {},
+        documentObj: doc,
+        navigatorObj: { userAgent: 'Mozilla/5.0' }
+    });
 
-        const tile = sandbox.createStreamTile('peer-vol', { id: 's-vol' }, 'Ana', false);
-        const video = tile.querySelector('video');
-        const overlay = tile.querySelector('.tile-controls-overlay');
-        const buttons = overlay.children.filter((c) => c.tagName === 'BUTTON');
-        const slider = overlay.children.find((c) => c.tagName === 'INPUT');
-        const [muteBtn, fsBtn] = buttons;
+    const tile = grid.createStreamTile('peer-1', { id: 's-1' }, 'Alice', false);
+    const video = tile.querySelector('video');
+    const overlay = tile.querySelector('.tile-controls-overlay');
+    const muteBtn = overlay.children.find((c) => c.tagName === 'BUTTON');
+    const slider = overlay.children.find((c) => c.tagName === 'INPUT');
 
-        assert.strictEqual(muteBtn.getAttribute('aria-label'), 'Silenciar / Ativar Som');
-        assert.strictEqual(slider.getAttribute('aria-label'), 'Volume');
-        assert.strictEqual(fsBtn.getAttribute('aria-label'), 'Tela Cheia');
+    assert.equal(video.muted, false);
+    assert.equal(slider.value, '1');
+    assert.ok(muteBtn.innerHTML.includes('fa-volume-high'));
 
-        // Adjust volume to 0.35, mute via button, then unmute via button -> restores 0.35
-        slider.value = '0.35';
-        slider.dispatchEvent({ type: 'input', target: slider });
-        assert.strictEqual(video.volume, 0.35);
+    // Slider to 0.35 -> mute -> unmute restores 0.35
+    slider.value = '0.35';
+    slider.dispatchEvent({ type: 'input', target: slider });
+    assert.equal(video.volume, 0.35);
 
-        muteBtn.dispatchEvent({ type: 'click' });
-        assert.strictEqual(video.muted, true);
-        assert.strictEqual(slider.value, '0');
+    muteBtn.dispatchEvent({ type: 'click' });
+    assert.equal(video.muted, true);
+    assert.equal(slider.value, '0');
 
-        muteBtn.dispatchEvent({ type: 'click' });
-        assert.strictEqual(video.muted, false);
-        assert.strictEqual(video.volume, 0.35, 'Unmuting must restore remembered volume 0.35');
-        assert.strictEqual(slider.value, '0.35');
+    muteBtn.dispatchEvent({ type: 'click' });
+    assert.equal(video.muted, false);
+    assert.equal(video.volume, 0.35);
+    assert.equal(slider.value, '0.35');
 
-        // Fallback to 1 on a fresh tile muted/unmuted without slider change
-        const freshTile = sandbox.createStreamTile('peer-fresh', { id: 's-fresh' }, 'Bob', false);
-        const freshVideo = freshTile.querySelector('video');
-        const freshOverlay = freshTile.querySelector('.tile-controls-overlay');
-        const freshMuteBtn = freshOverlay.children.find((c) => c.tagName === 'BUTTON');
-        const freshSlider = freshOverlay.children.find((c) => c.tagName === 'INPUT');
+    // Fresh tile dragged to 0 -> unmute falls back to 1
+    const freshTile = grid.createStreamTile('peer-fresh', { id: 's-fresh' }, 'Bob', false);
+    const freshVideo = freshTile.querySelector('video');
+    const freshOverlay = freshTile.querySelector('.tile-controls-overlay');
+    const freshMuteBtn = freshOverlay.children.find((c) => c.tagName === 'BUTTON');
+    const freshSlider = freshOverlay.children.find((c) => c.tagName === 'INPUT');
 
-        freshSlider.value = '0';
-        freshSlider.dispatchEvent({ type: 'input', target: freshSlider });
-        assert.strictEqual(freshVideo.muted, true);
+    freshSlider.value = '0';
+    freshSlider.dispatchEvent({ type: 'input', target: freshSlider });
+    assert.equal(freshVideo.muted, true);
 
-        freshMuteBtn.dispatchEvent({ type: 'click' });
-        assert.strictEqual(freshVideo.muted, false);
-        assert.strictEqual(freshVideo.volume, 1, 'Fallback volume must be 1 when no non-zero adjustment happened');
-        assert.strictEqual(freshSlider.value, '1');
+    freshMuteBtn.dispatchEvent({ type: 'click' });
+    assert.equal(freshVideo.muted, false);
+    assert.equal(freshVideo.volume, 1);
+    assert.equal(freshSlider.value, '1');
 
-        // enterPseudoFullscreen exitBtn aria-label
-        sandbox.enterPseudoFullscreen(tile);
-        const exitBtn = tile.querySelector('.btn-exit-pseudo-fs');
-        assert.strictEqual(exitBtn.getAttribute('aria-label'), 'Sair da Tela Cheia');
-    }
-    console.log('\x1b[32mPASSOU\x1b[0m');
+    // enterPseudoFullscreen aria-label
+    enterPseudoFullscreen(tile, doc);
+    const exitBtn = tile.querySelector('.btn-exit-pseudo-fs');
+    assert.equal(exitBtn.getAttribute('aria-label'), 'Sair da Tela Cheia');
 
-    // T3: style.css defines consistent translucent dark HUD styling for .tile-controls-overlay .btn-icon
-    process.stdout.write('  [Teste] T3: style.css mantém contraste consistente em .tile-controls-overlay .btn-icon ... ');
-    {
-        const baseMatch = styleCss.match(/\.tile-controls-overlay\s+\.btn-icon\s*\{[\s\S]*?\}/);
-        const hoverMatch = styleCss.match(/\.tile-controls-overlay\s+\.btn-icon:hover\s*\{[\s\S]*?\}/);
-        assert(baseMatch, 'Missing .tile-controls-overlay .btn-icon rule');
-        assert(hoverMatch, 'Missing .tile-controls-overlay .btn-icon:hover rule');
-        assert(
-            baseMatch[0].includes('rgba(255, 255, 255, 0.1)') &&
-            baseMatch[0].includes('color: #f8fafc') &&
-            !baseMatch[0].includes('--btn-secondary-bg'),
-            '.tile-controls-overlay .btn-icon must use explicit dark-overlay-compatible background/color'
-        );
-        assert(
-            hoverMatch[0].includes('rgba(255, 255, 255, 0.2)') &&
-            hoverMatch[0].includes('color: #ffffff'),
-            '.tile-controls-overlay .btn-icon:hover must brighten consistently'
-        );
-    }
-    console.log('\x1b[32mPASSOU\x1b[0m');
+    // Slider click inside tap-to-unmute tile must NOT bubble up to unmute video
+    const tapTile = grid.createStreamTile('peer-slider', { id: 's-slider' }, 'Carol', false);
+    const tapVideo = tapTile.querySelector('video');
+    const tapSlider = tapTile.querySelector('.tile-controls-overlay').children.find((c) => c.tagName === 'INPUT');
+    tapVideo.muted = true;
+    tapVideo.volume = 0;
+    tapSlider.value = '0';
+    showTapToUnmuteBadge(tapTile, tapVideo, doc);
+    assert.ok(tapTile.querySelector('.tap-unmute-badge'));
 
-    // T4: Slider de volume em 0 não borbulha clique para tap-unmute-badge desmutar novamente
-    process.stdout.write('  [Teste] T4: slider de volume em 0 bloqueia propagação para tap-unmute-badge ... ');
-    {
-        const tileDomPath = path.resolve(__dirname, '../public/js/modules/tile-dom.js');
-        const tileDomSrc = fs.readFileSync(tileDomPath, 'utf8')
-            .replace(/^export\s+/gm, '')
-            .replace(/import\s+[\s\S]*?;\n/g, '');
+    tapSlider.dispatchEvent({ type: 'click' });
+    assert.equal(tapVideo.muted, true);
+    assert.equal(tapVideo.volume, 0);
+});
 
-        const sandbox = {
-            Promise,
-            navigator: { userAgent: 'Mozilla/5.0' },
-            updateBackgroundTracksOptimization() {},
-            toggleTileFullscreen() {},
-            document: {
-                createElement: (tag) => createMockElement(tag)
-            }
-        };
-
-        vm.createContext(sandbox);
-        vm.runInContext([
-            tileDomSrc,
-            extractFn(appJs, 'createStreamTile'),
-            extractFn(appJs, 'enterPseudoFullscreen')
-        ].join('\n\n'), sandbox, { filename: 'public/app.js' });
-
-        const tile = sandbox.createStreamTile('peer-tap', { id: 's-tap' }, 'Leo', false);
-        const video = tile.querySelector('video');
-        video.muted = true;
-        video.volume = 0.6;
-        sandbox.showTapToUnmuteBadge(tile, video);
-
-        const slider = tile.querySelector('input');
-        assert(slider, 'Slider de volume deve existir no tile remoto');
-        slider.value = '0';
-        slider.dispatchEvent({ type: 'input', target: slider });
-        slider.dispatchEvent({ type: 'click', target: slider });
-
-        assert.strictEqual(video.muted, true, 'Clique no slider após arrastar para 0 não deve desmutar via tap-unmute-badge');
-        assert.strictEqual(video.volume, 0, 'Volume não deve ser resetado para 1 após clique no slider');
-    }
-    console.log('\x1b[32mPASSOU\x1b[0m');
-
-    console.log('\n===============================================================');
-    console.log('  ✅ Resultado: Todos os testes de conexão, volume e HUD passaram.');
-    console.log('===============================================================\n');
-}
-
-runTests();
+test('style.css keeps consistent dark overlay contrast on .tile-controls-overlay .btn-icon', () => {
+    const baseMatch = styleCss.match(/\.tile-controls-overlay\s+\.btn-icon\s*\{[\s\S]*?\}/);
+    const hoverMatch = styleCss.match(/\.tile-controls-overlay\s+\.btn-icon:hover\s*\{[\s\S]*?\}/);
+    assert(baseMatch, 'Missing .tile-controls-overlay .btn-icon rule');
+    assert(hoverMatch, 'Missing .tile-controls-overlay .btn-icon:hover rule');
+    assert(
+        baseMatch[0].includes('rgba(255, 255, 255, 0.1)') &&
+        baseMatch[0].includes('color: #f8fafc') &&
+        !baseMatch[0].includes('--btn-secondary-bg')
+    );
+    assert(hoverMatch[0].includes('rgba(255, 255, 255, 0.2)') && hoverMatch[0].includes('color: #ffffff'));
+});

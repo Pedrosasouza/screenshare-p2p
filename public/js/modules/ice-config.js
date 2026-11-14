@@ -114,7 +114,7 @@ export async function refreshIceServers(serverUrl = '', options = {}) {
                 const refreshMarginSec = Math.min(300, Math.max(30, Math.floor(ttlSec * 0.15)));
                 iceServersExpiresAt = Date.now() + Math.max(15, ttlSec - refreshMarginSec) * 1000;
 
-                const peerMap = (options && options.peers) || (typeof peers !== 'undefined' ? peers : null);
+                const peerMap = (options && options.peers) || null;
                 if (peerMap && typeof peerMap.values === 'function') {
                     for (const peerObj of peerMap.values()) {
                         const pc = peerObj && peerObj.pc;

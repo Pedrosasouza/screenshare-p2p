@@ -1,83 +1,81 @@
-const fs = require('fs');
-const path = require('path');
-const assert = require('assert');
+const { describe, it } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
+const { createMockDocument } = require('./helpers/mock-dom');
 
-async function runTests() {
-    console.log('\n===============================================================');
-    console.log('  🧪 SUÍTE DE TESTES: ELIMINAÇÃO DE ALERT/PROMPT E SISTEMA TOAST');
-    console.log('===============================================================\n');
+function readAllClientSources() {
+    const appJs = fs.readFileSync(path.resolve(__dirname, '../public/app.js'), 'utf8');
+    const modulesDir = path.resolve(__dirname, '../public/js/modules');
+    const files = fs.readdirSync(modulesDir).filter((f) => f.endsWith('.js')).sort();
+    return [
+        { name: 'public/app.js', content: appJs },
+        ...files.map((f) => ({
+            name: `public/js/modules/${f}`,
+            content: fs.readFileSync(path.join(modulesDir, f), 'utf8')
+        }))
+    ];
+}
 
-    let failures = 0;
-
-    const appJsPath = path.resolve(__dirname, '../public/app.js');
-    const { loadClientBundleSource } = require('./helpers/client-source');
-    const appJs = loadClientBundleSource();
-    // Teste 1: Ausência de chamadas ativas de alert() e prompt()
-    process.stdout.write('  [Teste] T1: public/app.js não contém chamadas ativas a alert() ou prompt() ... ');
-    
-    // Procura por chamadas ativas fora de comentários
-    const lines = appJs.split('\n');
-    const forbiddenMatches = [];
-    lines.forEach((line, index) => {
-        const trimmed = line.trim();
-        if (trimmed.startsWith('//') || trimmed.startsWith('/*')) return;
-        if (/\balert\(/.test(line)) {
-            forbiddenMatches.push(`Linha ${index + 1}: alert() encontrado: "${trimmed}"`);
+describe('Eliminação de alert/prompt e sistema Toast', () => {
+    it('T1: cliente não contém chamadas ativas a alert() ou prompt()', () => {
+        const forbiddenMatches = [];
+        for (const file of readAllClientSources()) {
+            file.content.split('\n').forEach((line, index) => {
+                const trimmed = line.trim();
+                if (trimmed.startsWith('//') || trimmed.startsWith('/*')) return;
+                if (/\balert\(/.test(line)) {
+                    forbiddenMatches.push(`${file.name}:${index + 1}: alert() encontrado: "${trimmed}"`);
+                }
+                if (/\bprompt\(/.test(line)) {
+                    forbiddenMatches.push(`${file.name}:${index + 1}: prompt() encontrado: "${trimmed}"`);
+                }
+            });
         }
-        if (/\bprompt\(/.test(line)) {
-            forbiddenMatches.push(`Linha ${index + 1}: prompt() encontrado: "${trimmed}"`);
+
+        assert.strictEqual(
+            forbiddenMatches.length,
+            0,
+            `Chamadas bloqueantes encontradas:\n${forbiddenMatches.join('\n')}`
+        );
+    });
+
+    it('T2: showToast renderiza mensagem usando textContent seguro (Anti-XSS)', async () => {
+        const { showToast } = await import(
+            pathToFileURL(path.resolve(__dirname, '../public/js/modules/ui-feedback.js')).href
+        );
+        const mockDoc = createMockDocument();
+        const prevDoc = global.document;
+        global.document = mockDoc;
+        try {
+            const payload = '<img src=x onerror=alert(1)>';
+            showToast(payload, 'error', 0);
+
+            const container = mockDoc.getElementById('toastContainer');
+            assert.ok(container, 'toastContainer deve ser criado');
+            assert.strictEqual(container.children.length, 1);
+
+            const toastEl = container.children[0];
+            assert.ok(toastEl.className.includes('toast-error'));
+
+            const messageEl = toastEl.children.find((c) => c.className === 'toast-message');
+            assert.ok(messageEl, 'span.toast-message deve existir');
+            assert.strictEqual(messageEl.textContent, payload);
+            assert.strictEqual(messageEl.innerHTML, '');
+        } finally {
+            if (prevDoc === undefined) delete global.document;
+            else global.document = prevDoc;
         }
     });
 
-    if (forbiddenMatches.length === 0) {
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } else {
-        console.log(`\x1b[31mFALHOU (${forbiddenMatches.length} chamada(s) síncrona(s) encontrada(s))\x1b[0m`);
-        forbiddenMatches.forEach(m => console.log(`    - ${m}`));
-        failures++;
-    }
-
-    // Teste 2: Presença e proteção XSS da função showToast
-    process.stdout.write('  [Teste] T2: public/app.js implementa showToast usando textContent seguro ... ');
-    const hasShowToast = appJs.includes('function showToast(');
-    const usesTextContent = appJs.includes('textContent = message') || appJs.includes('.textContent =');
-
-    if (hasShowToast && usesTextContent) {
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } else {
-        console.log('\x1b[31mFALHOU (showToast ausente ou não utiliza textContent)\x1b[0m');
-        failures++;
-    }
-
-    // Teste 3: Presença das classes CSS de toast
-    process.stdout.write('  [Teste] T3: public/style.css define estilos para toast-container e toast ... ');
-    const cssPath = path.resolve(__dirname, '../public/style.css');
-    const cssContent = fs.readFileSync(cssPath, 'utf8');
-
-    const hasToastContainer = cssContent.includes('.toast-container');
-    const hasToast = cssContent.includes('.toast');
-    const hasToastError = cssContent.includes('.toast-error') || cssContent.includes('.toast.error');
-
-    if (hasToastContainer && hasToast && hasToastError) {
-        console.log('\x1b[32mPASSOU\x1b[0m');
-    } else {
-        console.log('\x1b[31mFALHOU (estilos de toast ausentes em style.css)\x1b[0m');
-        failures++;
-    }
-
-    console.log('\n===============================================================');
-    if (failures === 0) {
-        console.log('  ✅ Resultado: Todos os testes de Toast passaram.');
-        console.log('===============================================================\n');
-        process.exit(0);
-    } else {
-        console.log(`  ❌ Resultado: ${failures} validação(ões) falharam conforme esperado no código antigo.`);
-        console.log('===============================================================\n');
-        process.exit(1);
-    }
-}
-
-runTests().catch(err => {
-    console.error('Erro inesperado no teste:', err);
-    process.exit(1);
+    it('T3: public/style.css define estilos para toast-container e toast', () => {
+        const cssContent = fs.readFileSync(path.resolve(__dirname, '../public/style.css'), 'utf8');
+        assert.ok(cssContent.includes('.toast-container'), 'style.css deve definir .toast-container');
+        assert.ok(cssContent.includes('.toast'), 'style.css deve definir .toast');
+        assert.ok(
+            cssContent.includes('.toast-error') || cssContent.includes('.toast.error'),
+            'style.css deve definir .toast-error'
+        );
+    });
 });
