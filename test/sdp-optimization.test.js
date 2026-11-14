@@ -6,8 +6,8 @@ const assert = require('assert');
 // Extrai prioritizeH264 e optimizeSDP diretamente de public/app.js
 function loadSDPHelpers() {
     const appJsPath = path.resolve(__dirname, '../public/app.js');
-    const appJs = fs.readFileSync(appJsPath, 'utf8');
-
+    const { loadClientBundleSource } = require('./helpers/client-source');
+    const appJs = loadClientBundleSource();
     const fnRegex = /function prioritizeH264[\s\S]*?function optimizeSDP[\s\S]*?\n\}/;
     const match = appJs.match(fnRegex);
     if (!match) {

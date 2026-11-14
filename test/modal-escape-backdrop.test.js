@@ -10,8 +10,8 @@ async function runTests() {
     let failures = 0;
 
     const appJsPath = path.resolve(__dirname, '../public/app.js');
-    const appJs = fs.readFileSync(appJsPath, 'utf8');
-
+    const { loadClientBundleSource } = require('./helpers/client-source');
+    const appJs = loadClientBundleSource();
     // Teste 1: shareConfigModal possui ouvinte de clique no backdrop
     process.stdout.write('  [Teste] T1: shareConfigModal fecha ao clicar no backdrop (e.target === shareConfigModal) ... ');
     const hasBackdropListener = appJs.includes("shareConfigModal.addEventListener('click'") || appJs.includes('shareConfigModal.addEventListener("click"');

@@ -10,8 +10,8 @@ async function runTests() {
     let failures = 0;
 
     const appJsPath = path.resolve(__dirname, '../public/app.js');
-    const appJs = fs.readFileSync(appJsPath, 'utf8');
-
+    const { loadClientBundleSource } = require('./helpers/client-source');
+    const appJs = loadClientBundleSource();
     // Teste 1: Ausência de chamadas ativas de alert() e prompt()
     process.stdout.write('  [Teste] T1: public/app.js não contém chamadas ativas a alert() ou prompt() ... ');
     

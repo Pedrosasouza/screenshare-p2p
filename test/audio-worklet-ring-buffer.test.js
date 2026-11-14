@@ -37,7 +37,8 @@ function loadProcessorClass() {
 }
 
 function loadForwardPcmFn(mockWorkletNode) {
-    const appJs = fs.readFileSync(path.resolve(__dirname, '../public/app.js'), 'utf8');
+    const { loadClientBundleSource } = require('./helpers/client-source');
+    const appJs = loadClientBundleSource();
     const match = appJs.match(/function\s+forwardPcmBufferToWorklet\s*\([\s\S]*?\n\}/);
     assert(match, 'Função forwardPcmBufferToWorklet não encontrada em public/app.js');
 

@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: screenshare-p2p
+    runtime: node
+    plan: free
+    numInstances: 1
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: TRUST_PROXY
+        value: "true"

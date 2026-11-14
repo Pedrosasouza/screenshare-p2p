@@ -28,8 +28,8 @@ async function runTests() {
     // Teste 2: public/app.js implementa togglePictureInPicture
     process.stdout.write('  [Teste] T2: public/app.js implementa togglePictureInPicture ... ');
     const appJsPath = path.resolve(__dirname, '../public/app.js');
-    const appJs = fs.readFileSync(appJsPath, 'utf8');
-
+    const { loadClientBundleSource } = require('./helpers/client-source');
+    const appJs = loadClientBundleSource();
     const hasPipFunc = appJs.includes('function togglePictureInPicture(') || appJs.includes('async function togglePictureInPicture(');
     const usesPipApi = appJs.includes('requestPictureInPicture') || appJs.includes('exitPictureInPicture');
 

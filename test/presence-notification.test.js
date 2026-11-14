@@ -10,8 +10,8 @@ async function runTests() {
     let failures = 0;
 
     const appJsPath = path.resolve(__dirname, '../public/app.js');
-    const appJs = fs.readFileSync(appJsPath, 'utf8');
-
+    const { loadClientBundleSource } = require('./helpers/client-source');
+    const appJs = loadClientBundleSource();
     // Teste 1: Presença da função playPresenceChime com Web Audio API
     process.stdout.write('  [Teste] T1: public/app.js implementa playPresenceChime com AudioContext ... ');
     const hasChimeFunc = appJs.includes('function playPresenceChime(');

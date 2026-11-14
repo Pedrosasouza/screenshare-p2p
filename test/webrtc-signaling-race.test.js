@@ -145,8 +145,8 @@ async function runTests() {
     console.log('===============================================================\n');
 
     let failures = 0;
-    const appJs = fs.readFileSync(path.resolve(__dirname, '../public/app.js'), 'utf8');
-
+    const { loadClientBundleSource } = require('./helpers/client-source');
+    const appJs = loadClientBundleSource();
     // T1: offer lento + candidate concorrente executam serializados em _signalChain sem perder candidate
     process.stdout.write('  [Teste] T1: offer lento + candidate concorrente são serializados via _signalChain ... ');
     try {

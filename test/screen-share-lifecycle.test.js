@@ -94,8 +94,8 @@ async function runTests() {
     console.log('===============================================================\n');
 
     let failures = 0;
-    const appJs = fs.readFileSync(path.resolve(__dirname, '../public/app.js'), 'utf8');
-
+    const { loadClientBundleSource } = require('./helpers/client-source');
+    const appJs = loadClientBundleSource();
     // T1: startScreenShare chamado com localStream ativo chama stopScreenShare antes de nova captura
     process.stdout.write('  [Teste] T1: startScreenShare chama stopScreenShare antes de nova captura quando localStream está ativo ... ');
     try {

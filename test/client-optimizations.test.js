@@ -30,8 +30,8 @@ async function runTests() {
 
     // Carrega o conteúdo de public/app.js para análise estática de lógica
     const appJsPath = path.resolve(__dirname, '../public/app.js');
-    const appJs = fs.readFileSync(appJsPath, 'utf8');
-
+    const { loadClientBundleSource } = require('./helpers/client-source');
+    const appJs = loadClientBundleSource();
     // Teste 2 (Pacote 3): public/app.js deve implementar diagnóstico e feedback de falha P2P
     process.stdout.write('  [Teste] T2: public/app.js possui setPeerConnectionStatus e telemetria ... ');
     const hasStatusHelper = appJs.includes('setPeerConnectionStatus');

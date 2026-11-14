@@ -5,8 +5,8 @@ const assert = require('assert');
 
 function loadAppHelpers() {
     const appJsPath = path.resolve(__dirname, '../public/app.js');
-    const appJs = fs.readFileSync(appJsPath, 'utf8');
-
+    const { loadClientBundleSource } = require('./helpers/client-source');
+    const appJs = loadClientBundleSource();
     const getVideoConstraintsMatch = appJs.match(/function\s+getVideoConstraints\s*\([\s\S]*?\n\}/);
     const getMaxBitrateMatch = appJs.match(/function\s+getMaxBitrateForPeerCount\s*\([\s\S]*?\n\}/);
     const configureSenderParamsMatch = appJs.match(/function\s+configureSenderParams\s*\([\s\S]*?\n\}/);

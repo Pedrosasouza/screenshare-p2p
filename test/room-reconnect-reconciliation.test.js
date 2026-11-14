@@ -4,8 +4,8 @@ const path = require('path');
 const vm = require('vm');
 
 const appPath = path.resolve(__dirname, '../public/app.js');
-const appJs = fs.readFileSync(appPath, 'utf8');
-
+const { loadClientBundleSource } = require('./helpers/client-source');
+const appJs = loadClientBundleSource();
 function extractFn(source, name) {
     const regex = new RegExp(`(?:async\\s+)?function\\s+${name}\\s*\\([\\s\\S]*?\\n\\}`);
     const match = source.match(regex);
@@ -158,6 +158,7 @@ function createHarness(overrides = {}) {
     }
 
     vm.createContext(sandbox);
+    vm.runInContext(extractFn(appJs, 'disposeTileElement'), sandbox);
     vm.runInContext(extractFn(appJs, 'clearPeerTimers'), sandbox);
     vm.runInContext(extractFn(appJs, 'removePeerConnection'), sandbox);
     vm.runInContext(extractFn(appJs, 'removeStreamTile'), sandbox);

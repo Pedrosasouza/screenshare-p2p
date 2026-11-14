@@ -19,7 +19,8 @@ async function runTests() {
     console.log('===============================================================\n');
 
     let failures = 0;
-    const appJs = fs.readFileSync(path.resolve(__dirname, '../public/app.js'), 'utf8');
+    const { loadClientBundleSource } = require('./helpers/client-source');
+    const appJs = loadClientBundleSource();
     const privacyMd = fs.readFileSync(path.resolve(__dirname, '../PRIVACY.md'), 'utf8');
     const tauriCfg = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../src-tauri/tauri.conf.json'), 'utf8'));
 
@@ -135,6 +136,7 @@ async function runTests() {
             updateGridState: () => {}
         };
         vm.createContext(sandbox);
+        vm.runInContext(extractFn(appJs, 'disposeTileElement'), sandbox);
         vm.runInContext(extractFn(appJs, 'clearPeerTimers'), sandbox);
         vm.runInContext(extractFn(appJs, 'removePeerConnection'), sandbox);
 

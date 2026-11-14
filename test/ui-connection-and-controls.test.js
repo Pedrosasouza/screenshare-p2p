@@ -6,7 +6,8 @@ const vm = require('vm');
 const appPath = path.resolve(__dirname, '../public/app.js');
 const stylePath = path.resolve(__dirname, '../public/style.css');
 
-const appJs = fs.readFileSync(appPath, 'utf8');
+const { loadClientBundleSource } = require('./helpers/client-source');
+const appJs = loadClientBundleSource();
 const styleCss = fs.readFileSync(stylePath, 'utf8');
 
 function extractFn(source, name) {

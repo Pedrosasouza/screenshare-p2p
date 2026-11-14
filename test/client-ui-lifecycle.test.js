@@ -4,8 +4,8 @@ const path = require('path');
 const vm = require('vm');
 
 const appPath = path.join(__dirname, '..', 'public', 'app.js');
-const appCode = fs.readFileSync(appPath, 'utf8');
-
+const { loadClientBundleSource } = require('./helpers/client-source');
+const appCode = loadClientBundleSource();
 function extractBlock(source, startRegex, description) {
     const startMatch = source.match(startRegex);
     assert(startMatch, `Could not find start of ${description}`);

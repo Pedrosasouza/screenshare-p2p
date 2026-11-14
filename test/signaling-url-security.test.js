@@ -109,8 +109,8 @@ function runTests() {
     console.log('===============================================================\n');
 
     let failures = 0;
-    const appJs = fs.readFileSync(path.resolve(__dirname, '../public/app.js'), 'utf8');
-
+    const { loadClientBundleSource } = require('./helpers/client-source');
+    const appJs = loadClientBundleSource();
     // T1: Web rejeita ?server=https://evil.com, retorna origin e não grava em localStorage
     process.stdout.write('  [Teste] T1: Web rejeita ?server=https://evil.com e não grava em localStorage ... ');
     try {

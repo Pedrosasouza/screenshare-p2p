@@ -29,6 +29,11 @@
 
             <!-- Room Info & Actions -->
             <div class="room-info-bar">
+                <div class="info-pill connection-status-pill" id="connectionStatusPill" data-status="connecting" title="Status da conexão com o servidor de sinalização" role="status" aria-live="polite">
+                    <span class="status-dot" aria-hidden="true"></span>
+                    <span id="connectionStatusText">Conectando...</span>
+                </div>
+
                 <div class="info-pill">
                     <i class="fa-solid fa-users"></i>
                     <span id="memberCountText">1 Participante</span>
@@ -438,6 +443,15 @@
                             <span style="color: var(--text-muted);"><i class="fa-solid fa-route"></i> Rota ICE Ativa</span>
                             <strong id="statsIceRoute">--</strong>
                         </div>
+                        <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 12px; background: var(--bg-surface); border-radius: var(--radius-sm); border: 1px solid var(--border);">
+                            <span style="color: var(--text-muted); flex-shrink: 0;"><i class="fa-solid fa-server"></i> Servidor</span>
+                            <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
+                                <strong id="statsServerUrl" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.8rem;">--</strong>
+                                <button type="button" class="btn btn-secondary btn-sm" id="btnResetServerUrl" title="Limpar servidor salvo e restaurar padrão" aria-label="Restaurar servidor padrão" hidden>
+                                    <i class="fa-solid fa-rotate-left"></i>
+                                </button>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -447,6 +461,6 @@
 
     <script src="js/socket.io.min.js"></script>
     <script src="js/desktop-bridge.js"></script>
-    <script src="app.js?v=2.2.0"></script>
+    <script type="module" src="app.js?v=2.2.0"></script>
 </body>
 </html>

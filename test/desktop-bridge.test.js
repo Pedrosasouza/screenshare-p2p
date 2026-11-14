@@ -10,7 +10,8 @@ async function runTests() {
 
     let failures = 0;
     const bridgeCode = fs.readFileSync(path.resolve(__dirname, '../public/js/desktop-bridge.js'), 'utf8');
-    const appJs = fs.readFileSync(path.resolve(__dirname, '../public/app.js'), 'utf8');
+    const { loadClientBundleSource } = require('./helpers/client-source');
+    const appJs = loadClientBundleSource();
     const indexHtml = fs.readFileSync(path.resolve(__dirname, '../public/index.html'), 'utf8');
 
     // T1: Modo Web puro (sem __TAURI__) retorna fallbacks seguros sem lançar erro

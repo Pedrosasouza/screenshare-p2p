@@ -1,193 +1,46 @@
-// ==========================================
-// Rust Audio Helper (WASAPI Application Loopback via Tauri v2 IPC)
-// ==========================================
-let availableWindows = [];
-let helperAudioContext = null;
-let activeAudioWorkletNode = null;
-let helperAudioDestination = null;
-let desktopCaptureGeneration = 0;
-const audioWorkletLoadedContexts = new WeakSet();
+import {
+    isDesktopApp,
+    forwardPcmBufferToWorklet,
+    prepareHelperAudioWorklet,
+    checkDiscordStatus,
+    fetchWindowList,
+    updateAudioAppSelect,
+    startDesktopCaptureWith,
+    startAppAudioCapture,
+    startExcludeDiscordCapture,
+    stopAppAudioCapture
+} from './js/modules/desktop-audio.js';
+import { sanitizeRoomId, generateRandomRoomId } from './js/modules/room-utils.js';
+import {
+    SERVER_URL_STORAGE_KEY,
+    COLD_START_NOTICE_DELAY_MS,
+    SESSION_PASS_STORAGE_KEY,
+    resolveSignalingServerUrl,
+    saveSessionRoomPassword,
+    getSessionRoomPassword,
+    clearSessionRoomPassword
+} from './js/modules/signaling-url.js';
+import {
+    THEME_KEY,
+    setSignalingStatus,
+    getOrCreateToastContainer,
+    showToast,
+    playPresenceChime,
+    initTheme,
+    applyTheme,
+    toggleTheme
+} from './js/modules/ui-feedback.js';
+import { prioritizeH264, prioritizePreferredVideoCodecs, optimizeSDP } from './js/modules/sdp.js';
+import { getVideoConstraints, getMaxBitrateForPeerCount, collectPeerTelemetry } from './js/modules/qos.js';
+import {
+    registerFullscreenChangeHandler,
+    disposeTileElement,
+    toggleTileFullscreen,
+    enterPseudoFullscreen,
+    showTapToUnmuteBadge
+} from './js/modules/tile-dom.js';
 
-function isDesktopApp() {
-    if (window.StreamGridDesktop && typeof window.StreamGridDesktop.isDesktop === 'function') {
-        return window.StreamGridDesktop.isDesktop();
-    }
-    return typeof window !== 'undefined' && Boolean(window.__TAURI_INTERNALS__ || window.__TAURI__);
-}
 
-function forwardPcmBufferToWorklet(arrayBuffer) {
-    if (!activeAudioWorkletNode || !(arrayBuffer instanceof ArrayBuffer) || arrayBuffer.byteLength === 0) {
-        return;
-    }
-    const usableBytes = arrayBuffer.byteLength - (arrayBuffer.byteLength % 8);
-    if (usableBytes <= 0) {
-        return;
-    }
-    const alignedBuffer = usableBytes === arrayBuffer.byteLength
-        ? arrayBuffer
-        : arrayBuffer.slice(0, usableBytes);
-    const float32Data = new Float32Array(alignedBuffer);
-    try {
-        activeAudioWorkletNode.port.postMessage(float32Data, [float32Data.buffer]);
-    } catch (_) {}
-}
-
-async function prepareHelperAudioWorklet(expectedGeneration = desktopCaptureGeneration) {
-    if (!helperAudioContext || helperAudioContext.state === 'closed') {
-        helperAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
-    } else if (helperAudioContext.state === 'suspended') {
-        await helperAudioContext.resume();
-    }
-
-    if (expectedGeneration !== desktopCaptureGeneration) {
-        return;
-    }
-
-    if (!audioWorkletLoadedContexts.has(helperAudioContext)) {
-        await helperAudioContext.audioWorklet.addModule('js/audio-worklet-processor.js');
-        if (expectedGeneration !== desktopCaptureGeneration) {
-            return;
-        }
-    }
-
-    if (activeAudioWorkletNode) {
-        try { activeAudioWorkletNode.disconnect(); } catch (e) {}
-    }
-
-    const node = new AudioWorkletNode(helperAudioContext, 'pcm-ring-buffer-processor', {
-        numberOfInputs: 0,
-        numberOfOutputs: 1,
-        outputChannelCount: [2]
-    });
-    if (helperAudioContext.state !== 'closed') {
-        audioWorkletLoadedContexts.add(helperAudioContext);
-    }
-    activeAudioWorkletNode = node;
-    helperAudioDestination = helperAudioContext.createMediaStreamDestination();
-    activeAudioWorkletNode.connect(helperAudioDestination);
-}
-
-async function checkDiscordStatus() {
-    if (!isDesktopApp() || !window.StreamGridDesktop) return;
-    try {
-        const msg = await window.StreamGridDesktop.getDiscordStatus();
-        const badge = document.getElementById('discordStatusBadge');
-        if (badge && msg) {
-            if (msg.detected) {
-                badge.style.color = '#3ba55d';
-                badge.innerHTML = `<i class="fa-solid fa-circle-check"></i> Discord detectado (PID ${Number(msg.pid) || 0}) — Chamadas serão excluídas do stream`;
-            } else {
-                badge.style.color = '#faa81a';
-                badge.innerHTML = `<i class="fa-solid fa-circle-exclamation"></i> Discord Desktop não detectado (inicie-o para isolar a chamada)`;
-            }
-        }
-    } catch (err) {
-        console.warn('[AudioHelper] Erro ao consultar status do Discord:', err);
-    }
-}
-
-async function fetchWindowList() {
-    if (!isDesktopApp() || !window.StreamGridDesktop) return;
-    try {
-        const windows = await window.StreamGridDesktop.listWindows();
-        availableWindows = Array.isArray(windows) ? windows : [];
-        updateAudioAppSelect(availableWindows);
-    } catch (err) {
-        console.warn('[AudioHelper] Erro ao listar janelas compatíveis:', err);
-    }
-}
-
-function updateAudioAppSelect(windows) {
-    const select = document.getElementById('selectAudioApp');
-    if (!select) return;
-
-    select.innerHTML = '';
-    if (!windows || windows.length === 0) {
-        const opt = document.createElement('option');
-        opt.value = '';
-        opt.textContent = 'Nenhuma janela compatível encontrada';
-        select.appendChild(opt);
-        return;
-    }
-
-    windows.forEach(w => {
-        const opt = document.createElement('option');
-        opt.value = w.pid;
-        const exeInfo = w.exe ? ` [${w.exe}]` : '';
-        const titleTrimmed = w.title.length > 40 ? w.title.substring(0, 37) + '...' : w.title;
-        opt.textContent = `${titleTrimmed}${exeInfo}`;
-        select.appendChild(opt);
-    });
-}
-
-async function startDesktopCaptureWith(startFn) {
-    if (!isDesktopApp() || !window.StreamGridDesktop) {
-        throw new Error('Captura WASAPI por processo está disponível apenas no aplicativo Desktop.');
-    }
-
-    const captureGen = ++desktopCaptureGeneration;
-
-    try {
-        await prepareHelperAudioWorklet(captureGen);
-        if (captureGen !== desktopCaptureGeneration) {
-            throw new Error('Captura de áudio cancelada antes do início.');
-        }
-
-        const info = await startFn((buffer) => {
-            if (captureGen === desktopCaptureGeneration) {
-                forwardPcmBufferToWorklet(buffer);
-            }
-        });
-
-        if (captureGen !== desktopCaptureGeneration) {
-            throw new Error('Captura de áudio cancelada durante a inicialização.');
-        }
-
-        if (info) {
-            const modeDesc = info.mode === 'exclude' ? 'Exclusão do Discord' : 'Aplicativo Isolado';
-            console.log(`[AudioHelper] ✅ Captura iniciada no modo [${modeDesc}] para PID ${info.pid} (${info.sample_rate}Hz, ${info.channels} canais)`);
-        }
-
-        const track = helperAudioDestination && helperAudioDestination.stream
-            ? helperAudioDestination.stream.getAudioTracks()[0]
-            : null;
-        if (!track) {
-            throw new Error('Nenhuma trilha de áudio disponível no destino AudioWorklet.');
-        }
-        return track;
-    } catch (err) {
-        if (captureGen === desktopCaptureGeneration) {
-            stopAppAudioCapture();
-        }
-        const message = (err && err.message) ? err.message : String(err);
-        throw new Error(message);
-    }
-}
-
-async function startAppAudioCapture(pid) {
-    return startDesktopCaptureWith((onPcm) => window.StreamGridDesktop.startAppAudioCapture(pid, onPcm));
-}
-
-async function startExcludeDiscordCapture() {
-    return startDesktopCaptureWith((onPcm) => window.StreamGridDesktop.startExcludeDiscordCapture(onPcm));
-}
-
-function stopAppAudioCapture() {
-    desktopCaptureGeneration += 1;
-    if (isDesktopApp() && window.StreamGridDesktop) {
-        window.StreamGridDesktop.stopAppAudioCapture().catch(() => {});
-    }
-    if (activeAudioWorkletNode) {
-        try {
-            activeAudioWorkletNode.port.postMessage({ type: 'flush' });
-            activeAudioWorkletNode.disconnect();
-        } catch (e) {}
-        activeAudioWorkletNode = null;
-    }
-    if (helperAudioContext && helperAudioContext.state !== 'closed') {
-        helperAudioContext.suspend().catch(() => {});
-    }
-}
 
 if (isDesktopApp()) {
     checkDiscordStatus();
@@ -197,81 +50,6 @@ if (isDesktopApp()) {
             window.StreamGridDesktop.stopAppAudioCapture().catch(() => {});
         }
     });
-}
-
-const SERVER_URL_STORAGE_KEY = 'streamgrid_server_url';
-function resolveSignalingServerUrl() {
-    const isLoopbackHost = (hostname) => (
-        hostname === 'localhost' ||
-        hostname === '127.0.0.1' ||
-        hostname === '[::1]' ||
-        hostname === '::1'
-    );
-
-    const desktopMode = isDesktopApp();
-    const hasWindow = typeof window !== 'undefined' && window.location;
-    const pageProtocol = hasWindow ? (window.location.protocol || '') : '';
-    const pageOrigin = hasWindow ? (window.location.origin || '') : '';
-
-    const parseSafeServerUrl = (raw) => {
-        if (typeof raw !== 'string') return null;
-        const trimmed = raw.trim();
-        if (!trimmed) return null;
-
-        let parsed;
-        try {
-            parsed = new URL(trimmed);
-        } catch (_) {
-            return null;
-        }
-
-        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-            return null;
-        }
-        if (parsed.username || parsed.password) {
-            return null;
-        }
-
-        const isLoopback = isLoopbackHost(parsed.hostname);
-        const isSameOrigin = Boolean(pageOrigin && pageOrigin !== 'null' && parsed.origin === pageOrigin);
-
-        if (parsed.protocol === 'http:') {
-            const sameHttpOrigin = pageProtocol === 'http:' && isSameOrigin;
-            if (!isLoopback && !sameHttpOrigin) {
-                return null;
-            }
-        }
-
-        if (!desktopMode && !isSameOrigin && !isLoopback) {
-            return null;
-        }
-
-        return parsed.origin.replace(/\/+$/, '');
-    };
-
-    try {
-        const params = new URLSearchParams(window.location.search);
-        const paramServer = params.get('server');
-        if (paramServer) {
-            const validParam = parseSafeServerUrl(paramServer);
-            if (validParam) {
-                return validParam;
-            }
-        }
-
-        const savedServer = localStorage.getItem(SERVER_URL_STORAGE_KEY);
-        if (savedServer) {
-            const validSaved = parseSafeServerUrl(savedServer);
-            if (validSaved) {
-                return validSaved;
-            }
-            try { localStorage.removeItem(SERVER_URL_STORAGE_KEY); } catch (_) {}
-        }
-    } catch (_) {}
-
-    return (window.location.protocol.startsWith('http') && !window.location.hostname.includes('localhost') && window.location.hostname !== '127.0.0.1')
-        ? window.location.origin
-        : 'https://screenshare-p2p.onrender.com';
 }
 
 const SERVER_URL = resolveSignalingServerUrl();
@@ -284,6 +62,39 @@ const socket = io(SERVER_URL, {
     reconnectionDelayMax: 5000,
     timeout: 20000
 });
+
+let coldStartTimer = null;
+let hasShownColdStartToast = false;
+
+function scheduleColdStartNotice() {
+    if ((socket && socket.connected) || coldStartTimer !== null || hasShownColdStartToast) {
+        return;
+    }
+    coldStartTimer = setTimeout(() => {
+        coldStartTimer = null;
+        if (socket && socket.connected) return;
+        if (typeof hasShownConnectErrorToast !== 'undefined' && hasShownConnectErrorToast) return;
+        hasShownColdStartToast = true;
+        if (typeof setSignalingStatus === 'function') {
+            setSignalingStatus('waking');
+        }
+        if (typeof showToast === 'function') {
+            showToast('Acordando servidor de sinalização... isso pode levar alguns segundos.', 'info', 6000);
+        }
+    }, COLD_START_NOTICE_DELAY_MS);
+}
+
+function cancelColdStartNotice() {
+    if (coldStartTimer !== null) {
+        clearTimeout(coldStartTimer);
+        coldStartTimer = null;
+    }
+}
+
+if (typeof setSignalingStatus === 'function') {
+    setSignalingStatus(socket && socket.connected ? 'connected' : 'connecting');
+}
+scheduleColdStartNotice();
 
 // STUN + TURN servers for high NAT/CGNAT penetration (essential for Brazilian fiber ISPs)
 const rtcConfig = {
@@ -402,142 +213,14 @@ let contentHintMode = 'motion';
 // ==========================================
 // Toast Notification System
 // ==========================================
-function getOrCreateToastContainer() {
-    let container = document.getElementById('toastContainer');
-    if (!container) {
-        container = document.createElement('div');
-        container.id = 'toastContainer';
-        container.className = 'toast-container';
-        document.body.appendChild(container);
-    }
-    return container;
-}
-
-function showToast(message, type = 'info', durationMs = 4000) {
-    if (!message) return;
-    const container = getOrCreateToastContainer();
-    const toast = document.createElement('div');
-    toast.className = `toast toast-${type}`;
-
-    let iconClass = 'fa-solid fa-circle-info';
-    if (type === 'error') iconClass = 'fa-solid fa-circle-xmark';
-    else if (type === 'warning') iconClass = 'fa-solid fa-triangle-exclamation';
-    else if (type === 'success') iconClass = 'fa-solid fa-circle-check';
-
-    const iconEl = document.createElement('i');
-    iconEl.className = `${iconClass} toast-icon`;
-
-    const messageEl = document.createElement('span');
-    messageEl.className = 'toast-message';
-    messageEl.textContent = message;
-
-    const closeBtn = document.createElement('button');
-    closeBtn.className = 'toast-close';
-    closeBtn.type = 'button';
-    closeBtn.title = 'Fechar notificação';
-    closeBtn.innerHTML = '<i class="fa-solid fa-xmark"></i>';
-
-    let timeoutId = null;
-    const dismiss = () => {
-        if (timeoutId) clearTimeout(timeoutId);
-        toast.classList.add('hiding');
-        setTimeout(() => {
-            if (toast.parentNode) toast.parentNode.removeChild(toast);
-        }, 250);
-    };
-
-    closeBtn.addEventListener('click', dismiss);
-    if (durationMs > 0) {
-        timeoutId = setTimeout(dismiss, durationMs);
-    }
-
-    toast.appendChild(iconEl);
-    toast.appendChild(messageEl);
-    toast.appendChild(closeBtn);
-    container.appendChild(toast);
-}
 
 // ==========================================
 // Subtle Audio Chime for Presence (Web Audio API)
 // ==========================================
-function playPresenceChime(type = 'join') {
-    try {
-        const AudioCtx = window.AudioContext || window.webkitAudioContext;
-        if (!AudioCtx) return;
-        if (!window._presenceAudioCtx) {
-            window._presenceAudioCtx = new AudioCtx();
-        }
-        const ctx = window._presenceAudioCtx;
-        if (ctx.state === 'suspended') {
-            ctx.resume().catch(() => {});
-        }
-        const now = ctx.currentTime;
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-
-        osc.type = 'sine';
-        if (type === 'join') {
-            // Dois tons ascendentes suaves (440Hz -> 587.33Hz)
-            osc.frequency.setValueAtTime(440, now);
-            osc.frequency.exponentialRampToValueAtTime(587.33, now + 0.12);
-        } else {
-            // Dois tons descendentes suaves (587.33Hz -> 392Hz)
-            osc.frequency.setValueAtTime(587.33, now);
-            osc.frequency.exponentialRampToValueAtTime(392, now + 0.12);
-        }
-
-        gain.gain.setValueAtTime(0.001, now);
-        gain.gain.exponentialRampToValueAtTime(0.05, now + 0.02);
-        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.22);
-
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-
-        osc.onended = () => {
-            try { osc.disconnect(); } catch (_) {}
-            try { gain.disconnect(); } catch (_) {}
-        };
-
-        osc.start(now);
-        osc.stop(now + 0.23);
-    } catch (_) {}
-}
 
 const btnThemeToggle = document.getElementById('btnThemeToggle');
-const THEME_KEY = 'streamgrid_theme';
 
 // Theme Management (Light / Dark)
-function initTheme() {
-    let savedTheme = null;
-    try { savedTheme = localStorage.getItem(THEME_KEY); } catch(e) {}
-    
-    if (!savedTheme) {
-        const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-        savedTheme = prefersDark ? 'dark' : 'light';
-    }
-    applyTheme(savedTheme);
-}
-
-function applyTheme(theme) {
-    document.documentElement.setAttribute('data-theme', theme);
-    try { localStorage.setItem(THEME_KEY, theme); } catch(e) {}
-    
-    if (btnThemeToggle) {
-        if (theme === 'dark') {
-            btnThemeToggle.innerHTML = '<i class="fa-solid fa-sun"></i>';
-            btnThemeToggle.title = 'Mudar para Tema Claro';
-        } else {
-            btnThemeToggle.innerHTML = '<i class="fa-solid fa-moon"></i>';
-            btnThemeToggle.title = 'Mudar para Tema Escuro';
-        }
-    }
-}
-
-function toggleTheme() {
-    const currentTheme = document.documentElement.getAttribute('data-theme') || 'dark';
-    const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
-    applyTheme(newTheme);
-}
 
 if (btnThemeToggle) {
     btnThemeToggle.addEventListener('click', toggleTheme);
@@ -545,17 +228,6 @@ if (btnThemeToggle) {
 initTheme();
 
 // Error Banner Helpers
-function sanitizeRoomId(raw) {
-    if (typeof raw !== 'string') return '';
-    return raw
-        .trim()
-        .toLowerCase()
-        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-        .replace(/\s+/g, '-')
-        .replace(/[^a-z0-9_-]/g, '')
-        .replace(/-+/g, '-')
-        .slice(0, 64);
-}
 
 function showRoomError(msg) {
     if (!roomErrorBanner) return;
@@ -589,20 +261,6 @@ setupPasswordToggle(btnToggleCreatePass, inputCreateRoomPassword);
 setupPasswordToggle(btnToggleJoinPass, inputJoinRoomPassword);
 
 // Cryptographically Secure Unique Room Generator (e.g. grid-m8kp-7x9v - 850+ billion combinations)
-function generateRandomRoomId() {
-    const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
-    let code = '';
-    const array = new Uint8Array(8);
-    if (window.crypto && window.crypto.getRandomValues) {
-        window.crypto.getRandomValues(array);
-    } else {
-        for (let i = 0; i < 8; i++) array[i] = Math.floor(Math.random() * 256);
-    }
-    for (let i = 0; i < 8; i++) {
-        code += chars[array[i] % chars.length];
-    }
-    return `grid-${code.slice(0, 4)}-${code.slice(4)}`;
-}
 
 // Subview Switcher
 function switchRoomView(viewName) {
@@ -852,15 +510,24 @@ function handleConfirmJoin() {
 // Auto populate room code from URL params or localStorage
 window.addEventListener('DOMContentLoaded', () => {
     initTheme();
+    if (typeof loadSavedClientPreferences === 'function') {
+        loadSavedClientPreferences();
+    }
     const urlParams = new URLSearchParams(window.location.search);
     const roomParam = urlParams.get('room');
-    const passParam = urlParams.get('pass');
+    const rawHash = (window.location.hash || '').replace(/^#/, '');
+    const hashParams = new URLSearchParams(rawHash);
+    const hashPass = hashParams.get('pass');
+    const queryPass = urlParams.get('pass');
+    const passParam = hashPass !== null ? hashPass : queryPass;
 
-    if (passParam !== null && window.history && window.history.replaceState) {
+    if ((hashPass !== null || queryPass !== null) && window.history && window.history.replaceState) {
         try {
             urlParams.delete('pass');
+            hashParams.delete('pass');
             const remainingQuery = urlParams.toString();
-            const cleanUrl = `${window.location.pathname}${remainingQuery ? '?' + remainingQuery : ''}${window.location.hash || ''}`;
+            const remainingHash = hashParams.toString();
+            const cleanUrl = `${window.location.pathname}${remainingQuery ? '?' + remainingQuery : ''}${remainingHash ? '#' + remainingHash : ''}`;
             window.history.replaceState(window.history.state || {}, '', cleanUrl);
         } catch (_) {}
     }
@@ -877,7 +544,8 @@ window.addEventListener('DOMContentLoaded', () => {
         const clean = sanitizeRoomId(roomParam);
         if (inputJoinRoomId) inputJoinRoomId.value = clean;
         if (clean.length >= 3) {
-            joinRoom(clean, passParam || '');
+            const restoredPass = passParam || (typeof getSessionRoomPassword === 'function' ? getSessionRoomPassword(clean) : '');
+            joinRoom(clean, restoredPass);
         } else {
             openRoomModal('join');
             showRoomError('Código de sala na URL inválido.');
@@ -886,7 +554,8 @@ window.addEventListener('DOMContentLoaded', () => {
         const clean = sanitizeRoomId(savedRoom);
         if (inputJoinRoomId) inputJoinRoomId.value = clean;
         if (clean.length >= 3) {
-            joinRoom(clean);
+            const restoredPass = typeof getSessionRoomPassword === 'function' ? getSessionRoomPassword(clean) : '';
+            joinRoom(clean, restoredPass);
         } else {
             try { localStorage.removeItem(STORAGE_KEY); } catch(e) {}
             openRoomModal('choice');
@@ -915,17 +584,7 @@ function cleanupRoomState() {
                 peerObj.pc.close();
             }
             if (peerObj.tileEl) {
-                if (typeof peerObj.tileEl._cleanupTapUnmute === 'function') {
-                    peerObj.tileEl._cleanupTapUnmute();
-                }
-                const videoEl = typeof peerObj.tileEl.querySelector === 'function'
-                    ? peerObj.tileEl.querySelector('video')
-                    : null;
-                if (videoEl) videoEl.srcObject = null;
-                if (typeof document !== 'undefined' && document.fullscreenElement === peerObj.tileEl && typeof document.exitFullscreen === 'function') {
-                    Promise.resolve(document.exitFullscreen()).catch(() => {});
-                }
-                peerObj.tileEl.remove();
+                disposeTileElement(peerObj.tileEl);
             }
         } catch (e) {
             console.warn('[Room] Error closing peer:', peerId, e);
@@ -1039,6 +698,12 @@ let hasShownConnectErrorToast = false;
 // Socket Lifecycle Events
 socket.on('connect', () => {
     myId = socket.id;
+    if (typeof cancelColdStartNotice === 'function') {
+        cancelColdStartNotice();
+    }
+    if (typeof setSignalingStatus === 'function') {
+        setSignalingStatus('connected');
+    }
     console.log('[Socket] Connected to server. Socket ID:', myId);
     if (typeof wasSocketDisconnected !== 'undefined' && wasSocketDisconnected) {
         wasSocketDisconnected = false;
@@ -1070,6 +735,9 @@ socket.on('connect', () => {
 
 socket.on('disconnect', (reason) => {
     console.warn('[Socket] Disconnected from server:', reason);
+    if (typeof setSignalingStatus === 'function') {
+        setSignalingStatus(reason === 'io client disconnect' ? 'offline' : 'reconnecting');
+    }
     if (reason !== 'io client disconnect') {
         if (typeof wasSocketDisconnected !== 'undefined') {
             wasSocketDisconnected = true;
@@ -1081,6 +749,12 @@ socket.on('disconnect', (reason) => {
 });
 
 socket.on('connect_error', (err) => {
+    if (typeof cancelColdStartNotice === 'function') {
+        cancelColdStartNotice();
+    }
+    if (typeof setSignalingStatus === 'function') {
+        setSignalingStatus('offline');
+    }
     console.warn('[Socket] Connection error:', err && err.message ? err.message : err);
     if (typeof hasShownConnectErrorToast === 'undefined' || !hasShownConnectErrorToast) {
         if (typeof hasShownConnectErrorToast !== 'undefined') {
@@ -1100,6 +774,9 @@ socket.on('join-error', ({ error, message }) => {
 
     openRoomModal('join');
     if (error === 'invalid_password') {
+        if (typeof clearSessionRoomPassword === 'function') {
+            clearSessionRoomPassword();
+        }
         if (inputJoinRoomId) inputJoinRoomId.value = failedRoomId;
         showRoomError(message || 'Senha incorreta para esta sala.');
         if (inputJoinRoomPassword) {
@@ -1107,6 +784,9 @@ socket.on('join-error', ({ error, message }) => {
             inputJoinRoomPassword.select();
         }
     } else if (error === 'invalid_room' || error === 'invalid_password_format') {
+        if (typeof clearSessionRoomPassword === 'function') {
+            clearSessionRoomPassword();
+        }
         if (!roomId || failedRoomId === roomId) {
             roomId = '';
             currentRoomPassword = '';
@@ -1138,6 +818,14 @@ socket.on('room-users', async ({ users, userNames, activeStreams, socketId, memb
 
         roomId = target.roomId;
         currentRoomPassword = target.password;
+
+        if (currentRoomPassword) {
+            if (typeof saveSessionRoomPassword === 'function') {
+                saveSessionRoomPassword(roomId, currentRoomPassword);
+            }
+        } else if (typeof clearSessionRoomPassword === 'function') {
+            clearSessionRoomPassword();
+        }
 
         try { localStorage.setItem(STORAGE_KEY, roomId); } catch(e) {}
         if (window.location.protocol.startsWith('http') && window.history.pushState) {
@@ -1514,6 +1202,9 @@ if (typeof document !== 'undefined') {
     document.addEventListener('visibilitychange', updateBackgroundTracksOptimization);
     document.addEventListener('fullscreenchange', updateBackgroundTracksOptimization);
 }
+if (typeof registerFullscreenChangeHandler === 'function') {
+    registerFullscreenChangeHandler(updateBackgroundTracksOptimization);
+}
 
 // PeerConnection Factory
 function getOrCreatePeerConnection(peerId) {
@@ -1683,179 +1374,12 @@ function updatePeerUserName(peerId, userName) {
     }
 }
 
-
 // Prioritize Universal H.264 Codec (Constrained Baseline 42e01f first for 100% Mobile & PC compatibility)
-function prioritizeH264(sdp) {
-    return prioritizePreferredVideoCodecs(sdp, ['h264']);
-}
 
 // Prioritize low-CPU real-time codecs (VP8 -> VP9) ahead of H.264 to avoid software OpenH264 CPU bottlenecks
 // in WebView2, while keeping H.264 (Constrained Baseline 42e01f first) as universal fallback.
-function prioritizePreferredVideoCodecs(sdp, priorityList = ['vp8', 'vp9', 'h264']) {
-    if (!sdp || typeof sdp !== 'string') return sdp;
-    const lines = sdp.split('\r\n');
-    const mVideoIndex = lines.findIndex(l => l.startsWith('m=video'));
-    if (mVideoIndex === -1) return sdp;
-
-    const payloadProfiles = new Map();
-    const codecByPayload = new Map();
-    for (const line of lines) {
-        if (line.startsWith('a=fmtp:')) {
-            const match = line.match(/^a=fmtp:(\d+)\s+.*profile-level-id=([0-9a-fA-F]+)/i);
-            if (match) {
-                payloadProfiles.set(match[1], match[2].toLowerCase());
-            }
-        } else if (line.startsWith('a=rtpmap:')) {
-            const match = line.match(/^a=rtpmap:(\d+)\s+([^/\s]+)\/90000/i);
-            if (match) {
-                codecByPayload.set(match[1], match[2].toLowerCase());
-            }
-        }
-    }
-
-    const mVideoParts = lines[mVideoIndex].split(' ');
-    const header = mVideoParts.slice(0, 3);
-    const currentPayloads = mVideoParts.slice(3);
-
-    const ordered = [];
-    const seen = new Set();
-
-    for (const codecName of priorityList) {
-        const matched = currentPayloads.filter(pt => codecByPayload.get(pt) === codecName);
-        if (codecName === 'h264' && matched.length > 1) {
-            matched.sort((a, b) => {
-                const isBaselineA = (payloadProfiles.get(a) || '').includes('42e0');
-                const isBaselineB = (payloadProfiles.get(b) || '').includes('42e0');
-                if (isBaselineA && !isBaselineB) return -1;
-                if (!isBaselineA && isBaselineB) return 1;
-                return 0;
-            });
-        }
-        for (const pt of matched) {
-            if (!seen.has(pt)) {
-                ordered.push(pt);
-                seen.add(pt);
-            }
-        }
-    }
-
-    for (const pt of currentPayloads) {
-        if (!seen.has(pt)) {
-            ordered.push(pt);
-            seen.add(pt);
-        }
-    }
-
-    if (ordered.length === 0) return sdp;
-    lines[mVideoIndex] = [...header, ...ordered].join(' ');
-    return lines.join('\r\n');
-}
 
 // SDP Optimization Helper (Unlocks Smooth 1080p60 Bitrate & Stereo Audio without Freezes)
-function optimizeSDP(sdp) {
-    if (!sdp || typeof sdp !== 'string') return sdp;
-    sdp = prioritizePreferredVideoCodecs(sdp);
-    const lines = sdp.split('\r\n');
-
-    // 1. Mapear payloads para Opus e Codecs de Vídeo via linhas a=rtpmap
-    const opusPayloads = new Set();
-    const videoPayloads = new Set();
-    const existingFmtpPayloads = new Set();
-
-    for (const line of lines) {
-        if (line.startsWith('a=rtpmap:')) {
-            const match = line.match(/^a=rtpmap:(\d+)\s+([^\/]+)/i);
-            if (match) {
-                const pt = match[1];
-                const codec = match[2].toLowerCase();
-                if (codec === 'opus') {
-                    opusPayloads.add(pt);
-                } else if (codec === 'h264' || codec === 'vp8' || codec === 'vp9') {
-                    videoPayloads.add(pt);
-                }
-            }
-        } else if (line.startsWith('a=fmtp:')) {
-            const match = line.match(/^a=fmtp:(\d+)/i);
-            if (match) {
-                existingFmtpPayloads.add(match[1]);
-            }
-        }
-    }
-
-    const opusParams = [
-        'stereo=1',
-        'sprop-stereo=1',
-        'maxaveragebitrate=128000',
-        'useinbandfec=1',
-        'usedtx=0'
-    ];
-    const newLines = [];
-    let inVideoSection = false;
-
-    for (let i = 0; i < lines.length; i++) {
-        let line = lines[i];
-
-        if (line.startsWith('m=video')) {
-            inVideoSection = true;
-            newLines.push(line);
-            newLines.push('b=AS:6000');
-            newLines.push('b=TIAS:6000000');
-            continue;
-        } else if (line.startsWith('m=')) {
-            inVideoSection = false;
-        }
-
-        // Evitar linhas duplicadas de banda na seção de vídeo
-        if (inVideoSection && (line.startsWith('b=AS:') || line.startsWith('b=TIAS:'))) {
-            continue;
-        }
-
-        // Atualizar linhas a=fmtp existentes
-        if (line.startsWith('a=fmtp:')) {
-            const match = line.match(/^a=fmtp:(\d+)/i);
-            if (match) {
-                const pt = match[1];
-                if (opusPayloads.has(pt)) {
-                    for (const param of opusParams) {
-                        const key = param.split('=')[0];
-                        const keyPattern = new RegExp(`(?:^|[\\s;])${key}=`);
-                        if (!keyPattern.test(line)) {
-                            const sep = /\s$/.test(line) || line.indexOf(' ') === -1 ? ' ' : ';';
-                            line += `${sep}${param}`;
-                        }
-                    }
-                } else if (videoPayloads.has(pt)) {
-                    if (!line.includes('x-google-max-bitrate')) {
-                        line += ';x-google-min-bitrate=400;x-google-start-bitrate=1500;x-google-max-bitrate=6000';
-                    }
-                }
-            }
-            newLines.push(line);
-            continue;
-        }
-
-        newLines.push(line);
-
-        // Se o rtpmap não tinha a=fmtp associado originalmente, injetar logo após a=rtpmap
-        if (line.startsWith('a=rtpmap:')) {
-            const match = line.match(/^a=rtpmap:(\d+)/i);
-            if (match) {
-                const pt = match[1];
-                if (!existingFmtpPayloads.has(pt)) {
-                    if (opusPayloads.has(pt)) {
-                        newLines.push(`a=fmtp:${pt} ${opusParams.join(';')}`);
-                        existingFmtpPayloads.add(pt);
-                    } else if (videoPayloads.has(pt)) {
-                        newLines.push(`a=fmtp:${pt} x-google-min-bitrate=400;x-google-start-bitrate=1500;x-google-max-bitrate=6000`);
-                        existingFmtpPayloads.add(pt);
-                    }
-                }
-            }
-        }
-    }
-
-    return newLines.join('\r\n');
-}
 
 function clearPeerTimers(peerObj) {
     if (!peerObj) return;
@@ -1882,17 +1406,7 @@ function removePeerConnection(peerId) {
         }
         if (peerObj.pc) peerObj.pc.close();
         if (peerObj.tileEl) {
-            if (typeof peerObj.tileEl._cleanupTapUnmute === 'function') {
-                peerObj.tileEl._cleanupTapUnmute();
-            }
-            const videoEl = typeof peerObj.tileEl.querySelector === 'function'
-                ? peerObj.tileEl.querySelector('video')
-                : null;
-            if (videoEl) videoEl.srcObject = null;
-            if (typeof document !== 'undefined' && document.fullscreenElement === peerObj.tileEl && typeof document.exitFullscreen === 'function') {
-                Promise.resolve(document.exitFullscreen()).catch(() => {});
-            }
-            peerObj.tileEl.remove();
+            disposeTileElement(peerObj.tileEl);
         }
         peers.delete(peerId);
         updateGridState();
@@ -1910,17 +1424,7 @@ function removeStreamTile(peerId) {
             peerObj._keyframeCheckInterval = null;
         }
         if (peerObj.tileEl) {
-            if (typeof peerObj.tileEl._cleanupTapUnmute === 'function') {
-                peerObj.tileEl._cleanupTapUnmute();
-            }
-            const videoEl = typeof peerObj.tileEl.querySelector === 'function'
-                ? peerObj.tileEl.querySelector('video')
-                : null;
-            if (videoEl) videoEl.srcObject = null;
-            if (typeof document !== 'undefined' && document.fullscreenElement === peerObj.tileEl && typeof document.exitFullscreen === 'function') {
-                Promise.resolve(document.exitFullscreen()).catch(() => {});
-            }
-            peerObj.tileEl.remove();
+            disposeTileElement(peerObj.tileEl);
             peerObj.tileEl = null;
         }
         if (peerObj.stream) {
@@ -1973,45 +1477,43 @@ function addLocalTracksToPC(pc) {
 
 const VIDEO_RES_KEY = 'streamgrid_video_resolution';
 const VIDEO_FPS_KEY = 'streamgrid_video_fps';
+const AUDIO_SOURCE_KEY = 'streamgrid_audio_source';
+const CONTENT_HINT_KEY = 'streamgrid_content_hint';
 let selectedVideoResolution = '1080p';
 let selectedVideoFps = 60;
-try {
-    const savedRes = localStorage.getItem(VIDEO_RES_KEY);
-    if (savedRes === '720p' || savedRes === '1080p') selectedVideoResolution = savedRes;
-    const savedFps = Number(localStorage.getItem(VIDEO_FPS_KEY));
-    if (savedFps === 30 || savedFps === 60) selectedVideoFps = savedFps;
-} catch (_) {}
+let selectedAudioSource = null;
 
-function getVideoConstraints(resolution = '1080p', fps = 60) {
-    const is720p = resolution === '720p';
-    const targetFps = Number(fps) === 30 ? 30 : 60;
-    const targetWidth = is720p ? 1280 : 1920;
-    const targetHeight = is720p ? 720 : 1080;
-
-    return {
-        width: { ideal: targetWidth, max: targetWidth },
-        height: { ideal: targetHeight, max: targetHeight },
-        frameRate: { ideal: targetFps, max: targetFps }
-    };
-}
-
-function getMaxBitrateForPeerCount(count = (typeof peers !== 'undefined' ? peers.size : 1), resolution = selectedVideoResolution, fps = selectedVideoFps) {
-    const is720p = resolution === '720p';
-    const is30fps = Number(fps) === 30;
-
-    let baseBitrate;
-    if (is720p) {
-        baseBitrate = is30fps ? 1800000 : 2800000;
-    } else {
-        baseBitrate = is30fps ? 4000000 : 6000000;
+function loadSavedClientPreferences() {
+    if (typeof localStorage !== 'undefined') {
+        try {
+            if (typeof VIDEO_RES_KEY !== 'undefined') {
+                const savedRes = localStorage.getItem(VIDEO_RES_KEY);
+                if (savedRes === '720p' || savedRes === '1080p') selectedVideoResolution = savedRes;
+            }
+            if (typeof VIDEO_FPS_KEY !== 'undefined') {
+                const savedFps = Number(localStorage.getItem(VIDEO_FPS_KEY));
+                if (savedFps === 30 || savedFps === 60) selectedVideoFps = savedFps;
+            }
+            if (typeof AUDIO_SOURCE_KEY !== 'undefined') {
+                const savedAudio = localStorage.getItem(AUDIO_SOURCE_KEY);
+                if (savedAudio === 'exclude_discord' || savedAudio === 'app' || savedAudio === 'system' || savedAudio === 'none') {
+                    selectedAudioSource = savedAudio;
+                }
+            }
+            if (typeof CONTENT_HINT_KEY !== 'undefined' && typeof contentHintMode !== 'undefined') {
+                const savedHint = localStorage.getItem(CONTENT_HINT_KEY);
+                if (savedHint === 'motion' || savedHint === 'detail') {
+                    contentHintMode = savedHint;
+                }
+            }
+        } catch (_) {}
     }
-
-    const peerCount = typeof count === 'number' ? count : 1;
-    if (peerCount <= 1) return baseBitrate;
-    if (peerCount === 2) return Math.min(2500000, Math.round(baseBitrate * 0.45));
-    if (peerCount === 3) return Math.min(1800000, Math.round(baseBitrate * 0.30));
-    return Math.min(1200000, Math.round(baseBitrate / peerCount));
+    if (typeof applyQualityModeUI === 'function') {
+        applyQualityModeUI();
+    }
 }
+
+loadSavedClientPreferences();
 
 function configureSenderParams(sender, kind) {
     if (!sender || typeof sender.getParameters !== 'function') return;
@@ -2060,109 +1562,6 @@ let isQualityMonitorRunning = false;
  * Extracts active candidate-pair, real FPS/resolution/bitrate deltas, codec/encoder,
  * and quality limitation metrics from a WebRTC RTCStatsReport without requiring stats.get().
  */
-function collectPeerTelemetry(stats, prevState) {
-    const reportsById = new Map();
-    let nominatedPair = null;
-    let fallbackPair = null;
-    let outboundVideo = null;
-    let inboundVideo = null;
-
-    if (stats && typeof stats.forEach === 'function') {
-        stats.forEach(report => {
-            if (!report) return;
-            if (report.id) reportsById.set(report.id, report);
-
-            if (report.type === 'candidate-pair' && report.state === 'succeeded') {
-                if (report.nominated) {
-                    nominatedPair = report;
-                } else if (!fallbackPair) {
-                    fallbackPair = report;
-                }
-            } else if (report.type === 'outbound-rtp' && report.kind === 'video') {
-                if (!outboundVideo || (report.bytesSent || 0) > (outboundVideo.bytesSent || 0)) {
-                    outboundVideo = report;
-                }
-            } else if (report.type === 'inbound-rtp' && report.kind === 'video') {
-                if (!inboundVideo || (report.bytesReceived || 0) > (inboundVideo.bytesReceived || 0)) {
-                    inboundVideo = report;
-                }
-            }
-        });
-    }
-
-    const activePair = nominatedPair || fallbackPair;
-    const availableOutgoingBitrate = activePair && activePair.availableOutgoingBitrate != null
-        ? activePair.availableOutgoingBitrate
-        : null;
-    const currentRoundTripTime = activePair && activePair.currentRoundTripTime != null
-        ? activePair.currentRoundTripTime
-        : null;
-
-    let iceRoute = null;
-    if (activePair) {
-        const localCand = activePair.localCandidateId ? reportsById.get(activePair.localCandidateId) : null;
-        const remoteCand = activePair.remoteCandidateId ? reportsById.get(activePair.remoteCandidateId) : null;
-        const localType = localCand && localCand.candidateType ? localCand.candidateType : 'desconhecido';
-        const remoteType = remoteCand && remoteCand.candidateType ? remoteCand.candidateType : 'desconhecido';
-        iceRoute = `${localType} → ${remoteType}`;
-    }
-
-    const nowTs = (outboundVideo && outboundVideo.timestamp)
-        || (inboundVideo && inboundVideo.timestamp)
-        || Date.now();
-    const dtSec = prevState && prevState.timestamp && nowTs > prevState.timestamp
-        ? (nowTs - prevState.timestamp) / 1000
-        : 0;
-
-    let outboundKbps = null;
-    if (outboundVideo && prevState && typeof prevState.outboundBytes === 'number' && dtSec > 0.1 && (outboundVideo.bytesSent || 0) >= prevState.outboundBytes) {
-        outboundKbps = Math.round(((outboundVideo.bytesSent - prevState.outboundBytes) * 8) / dtSec / 1000);
-    }
-
-    let inboundKbps = null;
-    if (inboundVideo && prevState && typeof prevState.inboundBytes === 'number' && dtSec > 0.1 && (inboundVideo.bytesReceived || 0) >= prevState.inboundBytes) {
-        inboundKbps = Math.round(((inboundVideo.bytesReceived - prevState.inboundBytes) * 8) / dtSec / 1000);
-    }
-
-    const resolveCodec = (rtpReport) => {
-        if (!rtpReport || !rtpReport.codecId) return null;
-        const codec = reportsById.get(rtpReport.codecId);
-        if (!codec || !codec.mimeType) return null;
-        return codec.mimeType.replace(/^video\//i, '').toUpperCase();
-    };
-
-    const nextState = {
-        timestamp: nowTs,
-        outboundBytes: outboundVideo && outboundVideo.bytesSent != null ? outboundVideo.bytesSent : null,
-        inboundBytes: inboundVideo && inboundVideo.bytesReceived != null ? inboundVideo.bytesReceived : null
-    };
-
-    return {
-        availableOutgoingBitrate,
-        currentRoundTripTime,
-        iceRoute,
-        outbound: outboundVideo ? {
-            fps: Math.round(outboundVideo.framesPerSecond || 0),
-            width: outboundVideo.frameWidth || 0,
-            height: outboundVideo.frameHeight || 0,
-            kbps: outboundKbps,
-            qualityLimitationReason: outboundVideo.qualityLimitationReason || 'none',
-            encoder: outboundVideo.encoderImplementation || null,
-            codec: resolveCodec(outboundVideo)
-        } : null,
-        inbound: inboundVideo ? {
-            fps: Math.round(inboundVideo.framesPerSecond || 0),
-            width: inboundVideo.frameWidth || 0,
-            height: inboundVideo.frameHeight || 0,
-            kbps: inboundKbps,
-            packetsLost: inboundVideo.packetsLost || 0,
-            packetsReceived: inboundVideo.packetsReceived || 0,
-            decoder: inboundVideo.decoderImplementation || null,
-            codec: resolveCodec(inboundVideo)
-        } : null,
-        nextState
-    };
-}
 
 /**
  * Evaluates a single peer's RTCStatsReport to adapt outbound encoding parameters
@@ -2188,7 +1587,11 @@ async function evaluatePeerQoS(peerId, peerObj) {
         if (videoSender) {
             const params = videoSender.getParameters();
             if (params.encodings && params.encodings[0]) {
-                const peerCap = getMaxBitrateForPeerCount();
+                const peerCap = getMaxBitrateForPeerCount(
+                typeof peers !== 'undefined' ? peers.size : 1,
+                typeof selectedVideoResolution !== 'undefined' ? selectedVideoResolution : '1080p',
+                typeof selectedVideoFps !== 'undefined' ? selectedVideoFps : 60
+            );
                 const current = params.encodings[0].maxBitrate || peerCap;
                 let targetBitrate;
 
@@ -2331,17 +1734,37 @@ function stopQualityMonitor() {
 }
 
 // ========== Quality Mode Toggle (Fluido vs Nítido) ==========
+function applyQualityModeUI() {
+    const isMotion = contentHintMode !== 'detail';
+    if (typeof qualityModeLabel !== 'undefined' && qualityModeLabel) {
+        qualityModeLabel.textContent = isMotion ? 'Fluido' : 'Nítido';
+    }
+    if (typeof btnQualityToggle !== 'undefined' && btnQualityToggle) {
+        btnQualityToggle.title = isMotion
+            ? 'Modo Fluido: prioriza 60fps (ideal para jogos de ação)'
+            : 'Modo Nítido: prioriza nitidez de texto/UI (ideal para Tibia, documentos)';
+    }
+}
+
 btnQualityToggle.addEventListener('click', toggleQualityMode);
 
 function toggleQualityMode() {
     contentHintMode = contentHintMode === 'motion' ? 'detail' : 'motion';
     const isMotion = contentHintMode === 'motion';
+    try {
+        if (typeof localStorage !== 'undefined' && typeof CONTENT_HINT_KEY !== 'undefined') {
+            localStorage.setItem(CONTENT_HINT_KEY, contentHintMode);
+        }
+    } catch (_) {}
 
-    // Update button label
-    qualityModeLabel.textContent = isMotion ? 'Fluido' : 'Nítido';
-    btnQualityToggle.title = isMotion
-        ? 'Modo Fluido: prioriza 60fps (ideal para jogos de ação)'
-        : 'Modo Nítido: prioriza nitidez de texto/UI (ideal para Tibia, documentos)';
+    if (typeof applyQualityModeUI === 'function') {
+        applyQualityModeUI();
+    } else {
+        qualityModeLabel.textContent = isMotion ? 'Fluido' : 'Nítido';
+        btnQualityToggle.title = isMotion
+            ? 'Modo Fluido: prioriza 60fps (ideal para jogos de ação)'
+            : 'Modo Nítido: prioriza nitidez de texto/UI (ideal para Tibia, documentos)';
+    }
 
     // Apply contentHint to local video track
     if (localStream) {
@@ -2398,6 +1821,16 @@ if (btnRefreshAudioApps) {
 [audioSourceExcludeDiscord, audioSourceApp, audioSourceSystem, audioSourceNone].forEach(radio => {
     if (radio) {
         radio.addEventListener('change', () => {
+            if (radio.checked && radio.value) {
+                if (typeof selectedAudioSource !== 'undefined') {
+                    selectedAudioSource = radio.value;
+                }
+                try {
+                    if (typeof localStorage !== 'undefined' && typeof AUDIO_SOURCE_KEY !== 'undefined') {
+                        localStorage.setItem(AUDIO_SOURCE_KEY, radio.value);
+                    }
+                } catch (_) {}
+            }
             if (appSelectorContainer) {
                 appSelectorContainer.style.display = (audioSourceApp && audioSourceApp.checked) ? 'flex' : 'none';
             }
@@ -2410,7 +1843,7 @@ if (btnRefreshAudioApps) {
                 if (card.classList && typeof card.classList.toggle === 'function') {
                     card.classList.toggle('is-selected', Boolean(r.checked));
                 }
-                if (card.style && card.style.border) {
+                if (card.style) {
                     card.style.border = '';
                 }
             });
@@ -2433,19 +1866,24 @@ function openShareConfigModal() {
     // Se estiver no navegador web (sem app desktop), adapta o modal amigavelmente
     const desktopOnlyCard1 = audioSourceExcludeDiscord?.closest('.audio-option-card');
     const desktopOnlyCard2 = audioSourceApp?.closest('.audio-option-card');
+    const preferredAudioSource = (typeof selectedAudioSource !== 'undefined' &&
+        (selectedAudioSource === 'exclude_discord' || selectedAudioSource === 'app' || selectedAudioSource === 'system' || selectedAudioSource === 'none'))
+        ? selectedAudioSource
+        : null;
 
     if (!isDesktop) {
         if (desktopOnlyCard1) desktopOnlyCard1.style.display = 'none';
         if (desktopOnlyCard2) desktopOnlyCard2.style.display = 'none';
         if (audioSourceExcludeDiscord) audioSourceExcludeDiscord.checked = false;
         if (audioSourceApp) audioSourceApp.checked = false;
-        if (typeof audioSourceNone !== 'undefined' && audioSourceNone) audioSourceNone.checked = false;
+        const webSource = preferredAudioSource === 'none' && typeof audioSourceNone !== 'undefined' && audioSourceNone
+            ? 'none'
+            : 'system';
+        if (typeof audioSourceNone !== 'undefined' && audioSourceNone) {
+            audioSourceNone.checked = webSource === 'none';
+        }
         if (audioSourceSystem) {
-            audioSourceSystem.checked = true;
-            const systemCard = audioSourceSystem.closest('.audio-option-card');
-            if (systemCard && systemCard.style) {
-                systemCard.style.border = '1px solid var(--primary)';
-            }
+            audioSourceSystem.checked = webSource === 'system';
         }
         if (appSelectorContainer) {
             appSelectorContainer.style.display = 'none';
@@ -2453,6 +1891,18 @@ function openShareConfigModal() {
     } else {
         if (desktopOnlyCard1) desktopOnlyCard1.style.display = 'flex';
         if (desktopOnlyCard2) desktopOnlyCard2.style.display = 'flex';
+        const desktopRadioMap = {
+            exclude_discord: typeof audioSourceExcludeDiscord !== 'undefined' ? audioSourceExcludeDiscord : null,
+            app: typeof audioSourceApp !== 'undefined' ? audioSourceApp : null,
+            system: typeof audioSourceSystem !== 'undefined' ? audioSourceSystem : null,
+            none: typeof audioSourceNone !== 'undefined' ? audioSourceNone : null
+        };
+        const targetRadio = preferredAudioSource ? desktopRadioMap[preferredAudioSource] : null;
+        if (targetRadio) {
+            Object.values(desktopRadioMap).forEach((r) => {
+                if (r) r.checked = r === targetRadio;
+            });
+        }
         if (appSelectorContainer) {
             const checkedAudioRadio = document.querySelector('input[name="audioSourceType"]:checked');
             const isAppMode = checkedAudioRadio
@@ -2667,6 +2117,24 @@ async function updateStatsDisplay() {
         if (elIceRoute) {
             elIceRoute.textContent = iceRoutes.length > 0 ? iceRoutes.join(', ') : '--';
         }
+
+        const elServerUrl = document.getElementById('statsServerUrl');
+        const btnResetServer = document.getElementById('btnResetServerUrl');
+        let hasSavedServerOverride = false;
+        try {
+            if (typeof localStorage !== 'undefined' && typeof SERVER_URL_STORAGE_KEY !== 'undefined') {
+                hasSavedServerOverride = Boolean(localStorage.getItem(SERVER_URL_STORAGE_KEY));
+            }
+        } catch (_) {}
+        if (elServerUrl) {
+            const activeServer = typeof SERVER_URL !== 'undefined' ? SERVER_URL : '';
+            elServerUrl.textContent = activeServer
+                ? (hasSavedServerOverride ? `${activeServer} (override local)` : activeServer)
+                : '--';
+        }
+        if (btnResetServer) {
+            btnResetServer.hidden = !hasSavedServerOverride;
+        }
     } finally {
         if (statsUpdateGeneration === runId) {
             isStatsUpdateRunning = false;
@@ -2729,6 +2197,32 @@ if (btnTogglePip) {
     btnTogglePip.addEventListener('click', togglePictureInPicture);
 }
 
+function resetSavedSignalingServerUrl() {
+    let hadOverride = false;
+    try {
+        if (typeof localStorage !== 'undefined' && typeof SERVER_URL_STORAGE_KEY !== 'undefined') {
+            hadOverride = Boolean(localStorage.getItem(SERVER_URL_STORAGE_KEY));
+            localStorage.removeItem(SERVER_URL_STORAGE_KEY);
+        }
+    } catch (_) {}
+
+    if (hadOverride) {
+        if (typeof showToast === 'function') {
+            showToast('Servidor salvo removido. Recarregando para a instância padrão...', 'info', 2500);
+        }
+        if (typeof window !== 'undefined' && window.location && typeof window.location.reload === 'function') {
+            window.location.reload();
+        }
+    } else if (typeof showToast === 'function') {
+        showToast('Já está usando o servidor padrão.', 'info', 2500);
+    }
+}
+
+const btnResetServerUrl = document.getElementById('btnResetServerUrl');
+if (btnResetServerUrl) {
+    btnResetServerUrl.addEventListener('click', resetSavedSignalingServerUrl);
+}
+
 if (btnToggleStats) {
     btnToggleStats.addEventListener('click', openStatsModal);
 }
@@ -2752,6 +2246,14 @@ if (btnConfirmStartShare) {
     btnConfirmStartShare.addEventListener('click', async () => {
         closeShareConfigModal();
         const mode = document.querySelector('input[name="audioSourceType"]:checked')?.value || 'exclude_discord';
+        if (typeof selectedAudioSource !== 'undefined') {
+            selectedAudioSource = mode;
+        }
+        try {
+            if (typeof AUDIO_SOURCE_KEY !== 'undefined') {
+                localStorage.setItem(AUDIO_SOURCE_KEY, mode);
+            }
+        } catch (_) {}
         const targetPid = selectAudioApp ? selectAudioApp.value : null;
 
         const resChoice = document.querySelector('input[name="videoResolution"]:checked')?.value;
@@ -3035,7 +2537,6 @@ async function startScreenShare(audioMode = 'exclude_discord', targetPid = null,
     }
 }
 
-
 // Stop Screen Share
 btnStopShare.addEventListener('click', stopScreenShare);
 
@@ -3250,135 +2751,8 @@ function createStreamTile(id, stream, labelText, isMuted) {
 }
 
 // Universal Fullscreen Handler for Mobile & Desktop
-function toggleTileFullscreen(tile, video) {
-    if (!tile) return;
-
-    // 1. If currently in pseudo-fullscreen, exit it
-    if (tile.classList.contains('pseudo-fullscreen')) {
-        tile.classList.remove('pseudo-fullscreen');
-        const exitBtn = tile.querySelector('.btn-exit-pseudo-fs');
-        if (exitBtn) exitBtn.remove();
-        updateBackgroundTracksOptimization();
-        return;
-    }
-
-    // 2. If native document fullscreen is active, exit it
-    if (document.fullscreenElement || document.webkitFullscreenElement) {
-        if (document.exitFullscreen) {
-            Promise.resolve(document.exitFullscreen()).catch(() => {});
-        } else if (document.webkitExitFullscreen) {
-            try {
-                Promise.resolve(document.webkitExitFullscreen()).catch(() => {});
-            } catch (_) {}
-        }
-        return;
-    }
-
-    // 3. iOS Safari native video player fullscreen
-    if (video && typeof video.webkitEnterFullscreen === 'function') {
-        try {
-            video.webkitEnterFullscreen();
-            return;
-        } catch (e) {
-            console.warn('[FS] iOS webkitEnterFullscreen error, using pseudo:', e);
-        }
-    }
-
-    // 4. Standard Element Fullscreen (Android Chrome, PC)
-    const req = tile.requestFullscreen || tile.webkitRequestFullscreen || tile.mozRequestFullScreen || tile.msRequestFullscreen;
-    if (req) {
-        try {
-            Promise.resolve(req.call(tile)).catch(err => {
-                console.warn('[FS] Native requestFullscreen rejected, falling back to pseudo:', err);
-                enterPseudoFullscreen(tile);
-            });
-        } catch (err) {
-            console.warn('[FS] Native requestFullscreen threw synchronously, falling back to pseudo:', err);
-            enterPseudoFullscreen(tile);
-        }
-    } else {
-        // 5. Fallback: Pseudo-fullscreen
-        enterPseudoFullscreen(tile);
-    }
-}
-
-function enterPseudoFullscreen(tile) {
-    tile.classList.add('pseudo-fullscreen');
-    updateBackgroundTracksOptimization();
-    if (!tile.querySelector('.btn-exit-pseudo-fs')) {
-        const exitBtn = document.createElement('button');
-        exitBtn.type = 'button';
-        exitBtn.className = 'btn-exit-pseudo-fs';
-        exitBtn.innerHTML = '<i class="fa-solid fa-xmark"></i>';
-        exitBtn.title = 'Sair da Tela Cheia';
-        if (typeof exitBtn.setAttribute === 'function') {
-            exitBtn.setAttribute('aria-label', 'Sair da Tela Cheia');
-        }
-        exitBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            tile.classList.remove('pseudo-fullscreen');
-            exitBtn.remove();
-            updateBackgroundTracksOptimization();
-        });
-        tile.appendChild(exitBtn);
-    }
-}
 
 // Show Tap-to-Unmute for mobile browsers that block autoplay with sound
-function showTapToUnmuteBadge(tile, video) {
-    if (!tile || tile.querySelector('.tap-unmute-badge')) return;
-    const badge = document.createElement('div');
-    badge.className = 'tap-unmute-badge';
-    badge.innerHTML = '<i class="fa-solid fa-volume-xmark"></i> Toque para ativar o som';
-    badge.style.cssText = `
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        background: rgba(15, 18, 26, 0.9);
-        color: #fff;
-        padding: 10px 18px;
-        border-radius: 24px;
-        font-size: 0.85rem;
-        font-weight: 600;
-        border: 1px solid var(--border);
-        box-shadow: 0 4px 18px rgba(0,0,0,0.5);
-        cursor: pointer;
-        z-index: 15;
-    `;
-    const cleanup = () => {
-        badge.removeEventListener('click', unmute);
-        tile.removeEventListener('click', unmute);
-        badge.remove();
-        if (tile._cleanupTapUnmute === cleanup) {
-            delete tile._cleanupTapUnmute;
-        }
-    };
-    const unmute = (e) => {
-        if (e && typeof e.stopPropagation === 'function') {
-            e.stopPropagation();
-        }
-        video.muted = false;
-        video.removeAttribute('muted');
-        if (video.volume === 0) {
-            video.volume = 1;
-        }
-        if (typeof video.play === 'function') {
-            Promise.resolve(video.play()).catch(() => {});
-        }
-        cleanup();
-        const slider = tile.querySelector('.tile-controls-overlay input[type="range"]');
-        if (slider) {
-            slider.value = String(video.volume || 1);
-        }
-        const muteBtn = tile.querySelector('.tile-controls-overlay .btn-icon');
-        if (muteBtn) muteBtn.innerHTML = '<i class="fa-solid fa-volume-high"></i>';
-    };
-    tile._cleanupTapUnmute = cleanup;
-    badge.addEventListener('click', unmute);
-    tile.addEventListener('click', unmute);
-    tile.appendChild(badge);
-}
 
 // Update Grid Layout State
 function updateGridState() {
@@ -3408,7 +2782,7 @@ if (btnCopyLink) {
         }
         let inviteUrl = `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(roomId)}`;
         if (currentRoomPassword) {
-            inviteUrl += `&pass=${encodeURIComponent(currentRoomPassword)}`;
+            inviteUrl += `#pass=${encodeURIComponent(currentRoomPassword)}`;
         }
         navigator.clipboard.writeText(inviteUrl).then(() => {
             if (copyLinkResetTimer) {
@@ -3426,8 +2800,6 @@ if (btnCopyLink) {
         });
     });
 }
-
-
 
 window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
@@ -3448,6 +2820,4 @@ window.addEventListener('keydown', (e) => {
         }
     }
 });
-
-
 

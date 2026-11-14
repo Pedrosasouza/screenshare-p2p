@@ -78,8 +78,8 @@ async function runTests() {
     // Teste 2: public/app.js renderiza crachá com textContent seguro (Anti-XSS)
     process.stdout.write('  [Teste] T2: public/app.js renderiza user-name com textContent seguro ... ');
     const appJsPath = path.resolve(__dirname, '../public/app.js');
-    const appJs = fs.readFileSync(appJsPath, 'utf8');
-
+    const { loadClientBundleSource } = require('./helpers/client-source');
+    const appJs = loadClientBundleSource();
     const usesInnerHtmlTemplate = appJs.includes('${labelText}');
     const usesTextContentForName = appJs.includes('.user-name') && (appJs.includes('textContent = labelText') || appJs.includes('.textContent = '));
 
