@@ -28,18 +28,37 @@ class PCMRingBufferProcessor extends AudioWorkletProcessor {
     }
 
     pushInterleaved(interleavedFloat32) {
-        const frameCount = interleavedFloat32.length / 2;
+        if (!interleavedFloat32 || interleavedFloat32.length < 2) return;
+        const totalFrames = Math.floor(interleavedFloat32.length / 2);
+        if (totalFrames <= 0) return;
+
+        let startFrame = 0;
 
         // If buffer is falling behind too much (> 100ms), drop older frames to maintain real-time low latency
-        if (this.availableFrames + frameCount > this.maxBufferFrames) {
-            const overflow = (this.availableFrames + frameCount) - this.targetBufferFrames;
-            this.readIndex = (this.readIndex + overflow) % this.capacity;
-            this.availableFrames -= overflow;
+        if (this.availableFrames + totalFrames > this.maxBufferFrames) {
+            const desiredDrop = (this.availableFrames + totalFrames) - this.targetBufferFrames;
+            const dropExisting = Math.min(this.availableFrames, Math.max(0, desiredDrop));
+            this.readIndex = (this.readIndex + dropExisting) % this.capacity;
+            this.availableFrames -= dropExisting;
+
+            const remainingDrop = desiredDrop - dropExisting;
+            if (remainingDrop > 0) {
+                startFrame = Math.min(totalFrames, remainingDrop);
+            }
         }
 
-        for (let i = 0; i < frameCount; i++) {
-            const l = interleavedFloat32[i * 2];
-            const r = interleavedFloat32[i * 2 + 1];
+        let framesToWrite = totalFrames - startFrame;
+        if (this.availableFrames + framesToWrite > this.capacity) {
+            const excess = (this.availableFrames + framesToWrite) - this.capacity;
+            startFrame = Math.min(totalFrames, startFrame + excess);
+            framesToWrite = totalFrames - startFrame;
+        }
+
+        for (let i = startFrame; i < totalFrames; i++) {
+            const rawL = interleavedFloat32[i * 2];
+            const rawR = interleavedFloat32[i * 2 + 1];
+            const l = Math.abs(rawL) < Infinity ? rawL : 0;
+            const r = Math.abs(rawR) < Infinity ? rawR : 0;
 
             this.bufferL[this.writeIndex] = l;
             this.bufferR[this.writeIndex] = r;
@@ -47,7 +66,7 @@ class PCMRingBufferProcessor extends AudioWorkletProcessor {
             this.writeIndex = (this.writeIndex + 1) % this.capacity;
         }
 
-        this.availableFrames += frameCount;
+        this.availableFrames += framesToWrite;
     }
 
     flush() {
@@ -58,10 +77,12 @@ class PCMRingBufferProcessor extends AudioWorkletProcessor {
     }
 
     process(inputs, outputs, parameters) {
+        if (!outputs || outputs.length === 0) return true;
         const output = outputs[0];
         if (!output || output.length === 0) return true;
 
         const outL = output[0];
+        if (!outL || outL.length === 0) return true;
         const outR = output[1] || output[0];
         const quantum = outL.length; // Standard Web Audio quantum is 128 samples
 
@@ -84,9 +105,27 @@ class PCMRingBufferProcessor extends AudioWorkletProcessor {
             }
             this.availableFrames -= quantum;
         } else {
-            // Buffer underrun: fill with silence until more data arrives
-            outL.fill(0);
-            if (outR !== outL) outR.fill(0);
+            if (this.availableFrames > 0) {
+                // Partial underrun: drain remaining frames with smooth linear fade-out to zero
+                const remaining = this.availableFrames;
+                for (let i = 0; i < remaining; i++) {
+                    const gain = 1 - ((i + 1) / remaining);
+                    outL[i] = this.bufferL[this.readIndex] * gain;
+                    if (outR !== outL) {
+                        outR[i] = this.bufferR[this.readIndex] * gain;
+                    }
+                    this.readIndex = (this.readIndex + 1) % this.capacity;
+                }
+                for (let i = remaining; i < quantum; i++) {
+                    outL[i] = 0;
+                    if (outR !== outL) outR[i] = 0;
+                }
+                this.availableFrames = 0;
+            } else {
+                // Buffer underrun: fill with silence until more data arrives
+                outL.fill(0);
+                if (outR !== outL) outR.fill(0);
+            }
             this.hasStartedPlayback = false; // re-enter pre-buffering
         }
 
