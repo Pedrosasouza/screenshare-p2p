@@ -82,7 +82,7 @@ async function runTests() {
 
     let failures = 0;
     const serverModule = require('../server.js');
-    const { server, rooms } = serverModule;
+    const { server, rooms, hashPassword } = serverModule;
     const port = getNextPort();
     const url = `http://localhost:${port}`;
 
@@ -166,6 +166,151 @@ async function runTests() {
         } catch (err) {
             failures++;
             console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+        }
+
+        // Teste 4: Eviction não pode ser explorada usando socket.id de outra pessoa como clientId
+        process.stdout.write('  [Teste] T4: Spoofing de socket.id no clientId não expulsa outro membro ... ');
+        {
+            let victim = null;
+            let attacker = null;
+            try {
+                const spoofRoom = 'sala-evict-spoof';
+                victim = await connectSocket(url);
+                attacker = await connectSocket(url);
+
+                const joinVictim = await tryJoin(victim, spoofRoom, 'segredo-spoof', null, 'Victim');
+                assert.strictEqual(joinVictim.status, 'joined');
+
+                let victimDisconnected = false;
+                victim.once('disconnect', () => {
+                    victimDisconnected = true;
+                });
+
+                // Attacker tenta usar victim.id como se fosse seu clientId persistente
+                const joinAttacker = await tryJoin(attacker, spoofRoom, 'segredo-spoof', victim.id, 'Attacker');
+                await delay(100);
+
+                assert.strictEqual(victimDisconnected, false, 'Victim não deve ser desconectado por spoofing de socket.id');
+                assert.strictEqual(victim.connected, true, 'Victim deve permanecer conectado');
+                assert(
+                    joinAttacker.status === 'error' || (await checkRoom(victim, spoofRoom)).memberCount >= 1,
+                    'Sala não deve aceitar eviction forjada por socket.id'
+                );
+
+                console.log('\x1b[32mPASSOU\x1b[0m');
+            } catch (err) {
+                failures++;
+                console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+            } finally {
+                if (victim) victim.disconnect();
+                if (attacker) attacker.disconnect();
+            }
+        }
+
+        // Teste 5: Tentativas concorrentes de senha errada não podem burlar limite de loginAttempts
+        process.stdout.write('  [Teste] T5: Rajada concorrente de senhas erradas respeita bloqueio anti-brute-force ... ');
+        {
+            let owner = null;
+            let attacker = null;
+            try {
+                const raceBfRoom = 'sala-bf-race';
+                owner = await connectSocket(url);
+                attacker = await connectSocket(url);
+
+                assert.strictEqual((await tryJoin(owner, raceBfRoom, 'senha-correta-bf')).status, 'joined');
+
+                // Dispara 5 tentativas erradas simultaneamente antes do primeiro scrypt concluir
+                const burstResults = await new Promise((resolve, reject) => {
+                    const collected = [];
+                    const timer = setTimeout(() => {
+                        attacker.off('join-error', onErr);
+                        reject(new Error(`Timeout aguardando 5 join-errors (recebidos=${collected.length})`));
+                    }, 5000);
+                    const onErr = (errData) => {
+                        collected.push(errData);
+                        if (collected.length === 5) {
+                            clearTimeout(timer);
+                            attacker.off('join-error', onErr);
+                            resolve(collected);
+                        }
+                    };
+                    attacker.on('join-error', onErr);
+                    for (let i = 1; i <= 5; i++) {
+                        attacker.emit('join-room', { roomId: raceBfRoom, password: `errada-${i}` });
+                    }
+                });
+                assert.strictEqual(burstResults.length, 5, 'Todas as 5 devem receber join-error');
+
+                // A 6ª tentativa deve obrigatoriamente encontrar rate_limited (sem reset/perda de contagem na race)
+                const sixth = await tryJoin(attacker, raceBfRoom, 'errada-6');
+                assert.strictEqual(sixth.status, 'error');
+                assert.strictEqual(
+                    sixth.data.error,
+                    'rate_limited',
+                    `6ª tentativa pós-rajada deveria retornar rate_limited, mas retornou "${sixth.data.error}"`
+                );
+
+                console.log('\x1b[32mPASSOU\x1b[0m');
+            } catch (err) {
+                failures++;
+                console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+            } finally {
+                if (owner) owner.disconnect();
+                if (attacker) attacker.disconnect();
+            }
+        }
+
+        // Teste 6: Split-brain — se a instância da sala mudar durante verifyPassword, revalida contra a sala atual
+        process.stdout.write('  [Teste] T6: Substituição de sala durante verifyPassword não admite membro em sala obsoleta ... ');
+        {
+            const splitRoom = 'sala-split-brain';
+            let oldOwner = null;
+            let newOwner = null;
+            let challenger = null;
+            try {
+                oldOwner = await connectSocket(url);
+                newOwner = await connectSocket(url);
+                challenger = await connectSocket(url);
+
+                assert.strictEqual((await tryJoin(oldOwner, splitRoom, 'senha-antiga')).status, 'joined');
+
+                const newCreds = await hashPassword('senha-totalmente-nova');
+                const joinPromise = tryJoin(challenger, splitRoom, 'senha-antiga', 'challenger-c1', 'Challenger');
+
+                // Enquanto verifyPassword('senha-antiga') roda em background, substitui a sala por uma nova com outra senha
+                await delay(2);
+                const replacementMembers = new Map([[newOwner.id, 'new-owner-c1']]);
+                const replacementUserNames = new Map([[newOwner.id, 'NewOwner']]);
+                rooms.set(splitRoom, {
+                    passwordHash: newCreds.hash,
+                    passwordSalt: newCreds.salt,
+                    members: replacementMembers,
+                    userNames: replacementUserNames,
+                    activeStreams: new Set()
+                });
+
+                const res = await joinPromise;
+                assert.strictEqual(
+                    res.status,
+                    'error',
+                    `Challenger com senha antiga não deve ser admitido após substituição da sala (status=${res.status})`
+                );
+                assert.strictEqual(
+                    rooms.get(splitRoom).members.has(challenger.id),
+                    false,
+                    'Challenger não pode constar nos membros da sala substituída'
+                );
+
+                console.log('\x1b[32mPASSOU\x1b[0m');
+            } catch (err) {
+                failures++;
+                console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+            } finally {
+                if (oldOwner) oldOwner.disconnect();
+                if (newOwner) newOwner.disconnect();
+                if (challenger) challenger.disconnect();
+                rooms.delete(splitRoom);
+            }
         }
 
         // Teste 3: Re-envio de join-room na mesma sala pelo mesmo socket não gera user-joined duplicado

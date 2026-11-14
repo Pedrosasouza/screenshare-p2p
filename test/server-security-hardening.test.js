@@ -45,7 +45,7 @@ function connectSocket(url) {
     });
 }
 
-function tryJoin(socket, roomId, password = '') {
+function tryJoin(socket, roomId, password = '', userName = null) {
     return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
             cleanup();
@@ -69,7 +69,7 @@ function tryJoin(socket, roomId, password = '') {
 
         socket.once('join-error', onJoinError);
         socket.once('room-users', onRoomUsers);
-        socket.emit('join-room', { roomId, password });
+        socket.emit('join-room', { roomId, password, userName });
     });
 }
 
@@ -165,6 +165,25 @@ async function runTests() {
             assert.strictEqual(relayed.signal.type, 'offer');
             assert.strictEqual(relayed.signal.sdp, 'v=0\r\nvalid-offer');
 
+            // Candidato ICE no formato WebRTC encapsulado { candidate: { candidate, sdpMid, sdpMLineIndex } } deve ser aceito
+            const iceRelayedPromise = new Promise((resolve, reject) => {
+                const timer = setTimeout(() => reject(new Error('Timeout esperando relay de candidato ICE para peerB')), 3000);
+                peerB.once('signal', (payload) => {
+                    clearTimeout(timer);
+                    resolve(payload);
+                });
+            });
+            peerA.emit('signal', {
+                targetId: peerB.id,
+                signal: { candidate: 12345 } // inválido -> deve ser descartado antes
+            });
+            peerA.emit('signal', {
+                targetId: peerB.id,
+                signal: { candidate: { candidate: 'candidate:1 1 UDP 2122252543 127.0.0.1 54321 typ host', sdpMid: '0', sdpMLineIndex: 0 } }
+            });
+            const iceRelayed = await iceRelayedPromise;
+            assert.strictEqual(iceRelayed.signal.candidate.sdpMid, '0');
+
             peerA.disconnect();
             peerB.disconnect();
             console.log('\x1b[32mPASSOU\x1b[0m');
@@ -200,7 +219,7 @@ async function runTests() {
             assert.strictEqual(loginAttempts.size, MAX_LOGIN_ATTEMPTS_ENTRIES);
 
             // Ao inserir nova chave no limite, purga primeiro as expiradas mantendo ativas
-            setLoginAttempt('new-after-expired', { count: 1, lockedUntil: 0, lastAttempt: now }, now);
+            setLoginAttempt('new-after-expired', { count: 5, lockedUntil: now + 30000, lastAttempt: now }, now);
             assert.strictEqual(loginAttempts.has('expired:0'), false, 'Entradas expiradas devem ser purgadas primeiro');
             assert.strictEqual(loginAttempts.has('active:0'), true, 'Entradas ativas devem ser preservadas quando há expiradas');
             assert.strictEqual(loginAttempts.has('new-after-expired'), true);
@@ -225,6 +244,101 @@ async function runTests() {
             console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
         } finally {
             loginAttempts.clear();
+        }
+
+        // T4: Senha composta apenas de espaços é rejeitada e userName tem caracteres de controle sanitizados
+        process.stdout.write('  [Teste] T4: Senha só com espaços é rejeitada e caracteres de controle em userName são removidos ... ');
+        {
+            let wsSocket = null;
+            let peerSocket = null;
+            try {
+                wsSocket = await connectSocket(url);
+                peerSocket = await connectSocket(url);
+
+                const wsRes = await tryJoin(wsSocket, 'sala-espacos', '   ');
+                assert.strictEqual(wsRes.status, 'error', 'Senha apenas com espaços não deve criar sala sem senha');
+                assert.strictEqual(wsRes.data.error, 'invalid_password_format');
+
+                const validRes = await tryJoin(wsSocket, 'sala-ctrl-chars', '', 'Ali\r\nce\x00\x1b[31m');
+                assert.strictEqual(validRes.status, 'joined');
+                const peerRes = await tryJoin(peerSocket, 'sala-ctrl-chars', '', 'Bob');
+                assert.strictEqual(peerRes.status, 'joined');
+                const aliceName = peerRes.data.userNames && peerRes.data.userNames[wsSocket.id];
+                assert(typeof aliceName === 'string' && aliceName.length > 0, 'Alice deve constar em room-users.userNames');
+                assert(!/[\x00-\x1f\x7f]/.test(aliceName), `userName não pode manter caracteres de controle: ${JSON.stringify(aliceName)}`);
+
+                console.log('\x1b[32mPASSOU\x1b[0m');
+            } catch (err) {
+                failures++;
+                console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+            } finally {
+                if (wsSocket) wsSocket.disconnect();
+                if (peerSocket) peerSocket.disconnect();
+            }
+        }
+
+        // T5: Entradas bloqueadas (lockedUntil > now) sobrevivem a flood de entradas não-bloqueadas
+        process.stdout.write('  [Teste] T5: Entradas ativamente bloqueadas não são despejadas por flood de entradas sem bloqueio ... ');
+        try {
+            loginAttempts.clear();
+            const now = Date.now();
+            const half = Math.floor(MAX_LOGIN_ATTEMPTS_ENTRIES / 2);
+
+            for (let i = 0; i < half; i++) {
+                loginAttempts.set(`locked:${i}`, {
+                    count: 5,
+                    lockedUntil: now + 60000,
+                    lastAttempt: now
+                });
+            }
+            for (let i = 0; i < MAX_LOGIN_ATTEMPTS_ENTRIES - half; i++) {
+                loginAttempts.set(`unlocked:${i}`, {
+                    count: 1,
+                    lockedUntil: 0,
+                    lastAttempt: now
+                });
+            }
+            setLoginAttempt('flood-trigger', { count: 1, lockedUntil: 0, lastAttempt: now }, now);
+
+            assert.strictEqual(loginAttempts.has('locked:0'), true, 'Entrada ativamente bloqueada deve ser preservada frente a entradas sem bloqueio');
+            assert.strictEqual(loginAttempts.has('unlocked:0'), false, 'Entrada sem bloqueio deve ser despejada antes de qualquer entrada bloqueada');
+            console.log('\x1b[32mPASSOU\x1b[0m');
+        } catch (err) {
+            failures++;
+            console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+        } finally {
+            loginAttempts.clear();
+        }
+
+        // T6: Asset .js/.css ausente retorna 404 (sem fallback HTML) e join-room tem rate limit dedicado pré-scrypt
+        process.stdout.write('  [Teste] T6: Asset ausente retorna 404 e join-room aplica rate limit dedicado pré-scrypt ... ');
+        {
+            let floodSocket = null;
+            try {
+                const missingJs = await httpGet(`${url}/arquivo-inexistente.js`);
+                assert.strictEqual(missingJs.statusCode, 404, `Esperado HTTP 404 para .js ausente, recebido ${missingJs.statusCode}`);
+
+                floodSocket = await connectSocket(url);
+                let rateLimitedCount = 0;
+                const results = await Promise.all(
+                    Array.from({ length: 15 }, (_, idx) =>
+                        tryJoin(floodSocket, `sala-flood-${idx}`, `senha-${idx}`)
+                    )
+                );
+                for (const r of results) {
+                    if (r.status === 'error' && r.data?.error === 'rate_limited') {
+                        rateLimitedCount++;
+                    }
+                }
+                assert(rateLimitedCount >= 1, `Esperado rate limit dedicado em rajada de 15 join-room no mesmo socket (recebido ${rateLimitedCount})`);
+
+                console.log('\x1b[32mPASSOU\x1b[0m');
+            } catch (err) {
+                failures++;
+                console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+            } finally {
+                if (floodSocket) floodSocket.disconnect();
+            }
         }
     } finally {
         await new Promise((resolve) => server.close(resolve));

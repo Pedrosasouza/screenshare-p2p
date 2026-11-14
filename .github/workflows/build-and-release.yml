@@ -20,14 +20,14 @@ on:
         type: boolean
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 jobs:
   test-and-build:
     name: Build & Package (Windows)
     runs-on: windows-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout repository
@@ -48,6 +48,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+          components: clippy, rustfmt
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
@@ -56,6 +57,14 @@ jobs:
 
       - name: Run WebRTC, Signaling & Bridge Tests
         run: npm test
+
+      - name: Run Real Browser E2E Tests
+        run: npm run test:e2e
+
+      - name: Check Rust Formatting & Clippy Lints (src-tauri)
+        run: |
+          cargo fmt --manifest-path src-tauri/Cargo.toml --check
+          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       - name: Run Rust Audio & Window Tests (src-tauri)
         run: cargo test --manifest-path src-tauri/Cargo.toml
@@ -67,6 +76,8 @@ jobs:
       - name: Package Windows Bundle & Compute Checksums
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+
           # 1. Garantir diretório de distribuição
           New-Item -ItemType Directory -Force -Path dist/StreamGrid | Out-Null
 
@@ -85,10 +96,15 @@ jobs:
           # 4. Compactar o pacote portátil para distribuição
           Compress-Archive -Path dist/StreamGrid -DestinationPath dist/StreamGrid-Windows.zip -Force
 
-          # 5. Gerar hash SHA-256 para integridade e auditoria
-          $hash = (Get-FileHash -Path dist/StreamGrid-Windows.zip -Algorithm SHA256).Hash
-          "$hash  StreamGrid-Windows.zip" | Out-File -FilePath dist/StreamGrid-Windows.zip.sha256 -Encoding ascii
-          Write-Host "SHA-256: $hash"
+          # 5. Gerar hash SHA-256 para todos os artefatos distribuíveis (.zip, .exe, .msi)
+          $checksumLines = @()
+          Get-ChildItem -Path dist -File | Where-Object { $_.Extension -in '.zip', '.exe', '.msi' } | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash
+            $checksumLines += "$hash  $($_.Name)"
+            "$hash  $($_.Name)" | Out-File -FilePath "$($_.FullName).sha256" -Encoding ascii
+          }
+          $checksumLines | Out-File -FilePath dist/SHA256SUMS.txt -Encoding ascii
+          Write-Host ($checksumLines -join "`n")
 
       - name: Upload Build Artifacts (CI Run)
         uses: actions/upload-artifact@v4
@@ -98,25 +114,68 @@ jobs:
             dist/StreamGrid-Windows.zip
             dist/StreamGrid-Windows.zip.sha256
             dist/*.exe
+            dist/*.exe.sha256
             dist/*.msi
+            dist/*.msi.sha256
+            dist/SHA256SUMS.txt
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Generate Artifact Attestation (Provenance via Sigstore)
-        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == 'true'
-        uses: actions/attest-build-provenance@v1
+  release:
+    name: Attest & Publish Release
+    needs: test-and-build
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
-          subject-path: 'dist/StreamGrid-Windows.zip'
+          fetch-depth: 0
+
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: StreamGrid-Windows
+          path: dist
+
+      - name: Collect Release Subjects for Attestation
+        id: subjects
+        shell: bash
+        run: |
+          shopt -s nullglob
+          FILES=(dist/*.zip dist/*.exe dist/*.msi)
+          if [ ${#FILES[@]} -eq 0 ]; then
+            echo "Nenhum artefato encontrado em dist/" >&2
+            exit 1
+          fi
+          {
+            echo "list<<EOF"
+            printf '%s\n' "${FILES[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Generate Artifact Attestation (Provenance via Sigstore)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.subjects.outputs.list }}
 
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('manual-{0}', github.run_number) }}
           files: |
             dist/StreamGrid-Windows.zip
             dist/StreamGrid-Windows.zip.sha256
             dist/*.exe
+            dist/*.exe.sha256
             dist/*.msi
+            dist/*.msi.sha256
+            dist/SHA256SUMS.txt
           generate_release_notes: true
           draft: false
           prerelease: false

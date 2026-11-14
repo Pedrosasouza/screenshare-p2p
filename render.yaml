@@ -4,7 +4,7 @@ services:
     runtime: node
     plan: free
     numInstances: 1
-    buildCommand: npm install
+    buildCommand: npm ci --omit=dev
     startCommand: npm start
     healthCheckPath: /health
     envVars:
@@ -12,6 +12,8 @@ services:
         value: production
       - key: TRUST_PROXY
         value: "true"
+      - key: ALLOWED_ORIGINS
+        value: https://screenshare-p2p.onrender.com,http://tauri.localhost,https://tauri.localhost,tauri://localhost
       - key: CF_TURN_TOKEN_ID
         sync: false
       - key: CF_TURN_API_TOKEN

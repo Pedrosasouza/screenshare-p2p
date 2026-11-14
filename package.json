@@ -3,6 +3,9 @@
   "version": "1.1.0",
   "description": "Ultra low latency 1080p P2P screen sharing with audio for couples",
   "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",

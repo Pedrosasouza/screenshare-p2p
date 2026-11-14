@@ -299,6 +299,95 @@ async function runTests() {
         failures++;
     }
 
+    // T6: ttlSeconds restante em hit de cache, stale-while-error antes do vencimento rígido e OPTIONS /ice-servers
+    process.stdout.write('  [Teste] T6: Cache retorna ttlSeconds restante, preserva cache válido se refresh falhar e responde OPTIONS ... ');
+    try {
+        const { createIceServersResolver, server, iceRateLimitMap } = require('../server.js');
+        let nowMs = 1_700_000_000_000;
+        let shouldFailFetch = false;
+        let calls = 0;
+
+        const resolver = createIceServersResolver({
+            env: {
+                CF_TURN_TOKEN_ID: 'cf-id-ttl',
+                CF_TURN_API_TOKEN: 'cf-tok-ttl',
+                CF_TURN_TTL_SECONDS: '3600'
+            },
+            nowFn: () => nowMs,
+            fetchImpl: async () => {
+                calls++;
+                if (shouldFailFetch) {
+                    throw new Error('cloudflare temporary outage');
+                }
+                return {
+                    ok: true,
+                    status: 201,
+                    async json() {
+                        return {
+                            iceServers: [
+                                { urls: ['stun:stun.cloudflare.com:3478'] },
+                                { urls: ['turns:turn.cloudflare.com:443?transport=tcp'], username: 'u-live', credential: 'p-live' }
+                            ]
+                        };
+                    }
+                };
+            }
+        });
+
+        const initial = await resolver();
+        assert.strictEqual(initial.ttlSeconds, 3600);
+        assert.strictEqual(calls, 1);
+
+        // 1000s depois ainda está no cache e deve retornar ~2600s restantes
+        nowMs += 1000 * 1000;
+        const cachedHit = await resolver();
+        assert.strictEqual(calls, 1);
+        assert.strictEqual(cachedHit.ttlSeconds, 2600, `Esperado ttlSeconds=2600 no hit de cache, recebido ${cachedHit.ttlSeconds}`);
+
+        // Avança para a janela de refresh antecipado (3350s: restam 250s para o vencimento real de 3600s) e falha na Cloudflare
+        nowMs += 2350 * 1000;
+        shouldFailFetch = true;
+        const staleWhileValid = await resolver();
+        assert.strictEqual(calls, 2);
+        assert.strictEqual(staleWhileValid.provider, 'cloudflare', 'Enquanto credencial anterior não expirou de fato, deve manter provider=cloudflare');
+        assert.strictEqual(staleWhileValid.iceServers[1].username, 'u-live');
+        assert(staleWhileValid.ttlSeconds <= 250 && staleWhileValid.ttlSeconds >= 240, `ttlSeconds restante esperado ~250, recebido ${staleWhileValid.ttlSeconds}`);
+
+        // Após vencimento real (> 3600s) com Cloudflare ainda fora, cai para fallback
+        nowMs += 300 * 1000;
+        const expiredFallback = await resolver();
+        assert.strictEqual(expiredFallback.provider, 'fallback');
+
+        // OPTIONS /ice-servers deve responder 204
+        if (iceRateLimitMap && typeof iceRateLimitMap.clear === 'function') {
+            iceRateLimitMap.clear();
+        }
+        await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+        const port = server.address().port;
+        try {
+            const optRes = await new Promise((resolve, reject) => {
+                const req = http.request(
+                    `http://127.0.0.1:${port}/ice-servers`,
+                    { method: 'OPTIONS', headers: { Origin: `http://127.0.0.1:${port}` } },
+                    (res) => {
+                        res.resume();
+                        res.on('end', () => resolve({ statusCode: res.statusCode, headers: res.headers }));
+                    }
+                );
+                req.on('error', reject);
+                req.end();
+            });
+            assert.strictEqual(optRes.statusCode, 204, `Esperado HTTP 204 para OPTIONS /ice-servers, recebido ${optRes.statusCode}`);
+        } finally {
+            await new Promise((resolve) => server.close(resolve));
+        }
+
+        console.log('\x1b[32mPASSOU\x1b[0m');
+    } catch (err) {
+        console.log(`\x1b[31mFALHOU (${err.message})\x1b[0m`);
+        failures++;
+    }
+
     console.log('\n===============================================================');
     if (failures === 0) {
         console.log('  ✅ Todos os 5 testes de /ice-servers passaram com sucesso!');

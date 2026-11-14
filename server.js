@@ -108,6 +108,7 @@ function parseTurnUrls(rawUrls) {
 function createIceServersResolver({ env = process.env, fetchImpl = global.fetch, nowFn = Date.now } = {}) {
     let cachedPayload = null;
     let cacheExpiresAt = 0;
+    let hardExpiresAt = 0;
     let inFlightPromise = null;
 
     return async function resolveIceServers() {
@@ -117,7 +118,8 @@ function createIceServersResolver({ env = process.env, fetchImpl = global.fetch,
         if (cfTokenId && cfApiToken) {
             const now = nowFn();
             if (cachedPayload && now < cacheExpiresAt) {
-                return cachedPayload;
+                const remainingTtl = Math.max(1, Math.floor((hardExpiresAt - now) / 1000));
+                return { ...cachedPayload, ttlSeconds: remainingTtl };
             }
             if (inFlightPromise) {
                 return inFlightPromise;
@@ -161,10 +163,21 @@ function createIceServersResolver({ env = process.env, fetchImpl = global.fetch,
                         iceServers
                     };
                     const refreshMarginSec = Math.min(300, Math.max(60, Math.floor(ttlSeconds * 0.15)));
+                    const fetchedNow = nowFn();
                     cachedPayload = payload;
-                    cacheExpiresAt = nowFn() + Math.max(30, ttlSeconds - refreshMarginSec) * 1000;
+                    hardExpiresAt = fetchedNow + ttlSeconds * 1000;
+                    cacheExpiresAt = fetchedNow + Math.max(30, ttlSeconds - refreshMarginSec) * 1000;
                     return payload;
                 } catch (err) {
+                    const failNow = nowFn();
+                    if (cachedPayload && failNow < hardExpiresAt) {
+                        const remainingTtl = Math.max(1, Math.floor((hardExpiresAt - failNow) / 1000));
+                        console.warn('[ICE] Refresh Cloudflare falhou; mantendo cache ainda válido:', err && err.message ? err.message : err);
+                        return { ...cachedPayload, ttlSeconds: remainingTtl };
+                    }
+                    cachedPayload = null;
+                    cacheExpiresAt = 0;
+                    hardExpiresAt = 0;
                     console.warn('[ICE] Falha ao consultar Cloudflare TURN, usando fallback:', err && err.message ? err.message : err);
                     return {
                         provider: 'fallback',
@@ -283,20 +296,44 @@ app.get('/health', (req, res) => {
 });
 
 // Dynamic ICE / TURN endpoint (returns ephemeral credentials without exposing backend secrets)
-app.get('/ice-servers', async (req, res) => {
-    res.setHeader('Cache-Control', 'no-store');
+app.options('/ice-servers', (req, res) => {
     if (!setIceEndpointCorsHeaders(req, res)) {
-        return res.status(403).json({ error: 'origin_not_allowed' });
+        return res.status(403).end();
     }
-    const clientIp = getHttpClientIp(req);
-    if (!checkHttpIceRateLimit(clientIp)) {
-        return res.status(429).json({
-            error: 'rate_limited',
-            message: 'Muitas solicitações de servidores ICE. Tente novamente em alguns minutos.'
-        });
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    return res.status(204).end();
+});
+
+app.get('/ice-servers', async (req, res, next) => {
+    try {
+        res.setHeader('Cache-Control', 'no-store');
+        if (!setIceEndpointCorsHeaders(req, res)) {
+            return res.status(403).json({ error: 'origin_not_allowed' });
+        }
+        const clientIp = getHttpClientIp(req);
+        if (!checkHttpIceRateLimit(clientIp)) {
+            return res.status(429).json({
+                error: 'rate_limited',
+                message: 'Muitas solicitações de servidores ICE. Tente novamente em alguns minutos.'
+            });
+        }
+        const payload = await defaultIceServersResolver();
+        return res.json(payload);
+    } catch (err) {
+        return next(err);
     }
-    const payload = await defaultIceServersResolver();
-    return res.json(payload);
+});
+
+// Silence automatic browser /favicon.ico requests when no .ico file is present
+app.get('/favicon.ico', (_req, res) => res.status(204).end());
+
+// Return explicit 404 for missing static assets instead of serving index.html
+app.use((req, res, next) => {
+    if (/\.[a-z0-9]{1,8}$/i.test(req.path)) {
+        return res.status(404).end();
+    }
+    return next();
 });
 
 // Fallback route to ensure index.html is always served
@@ -304,14 +341,36 @@ app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
+app.use((err, req, res, _next) => {
+    console.error('[HTTP Error]', err && err.message ? err.message : err);
+    if (!res.headersSent) {
+        res.status(500).json({ error: 'internal_error' });
+    }
+});
+
 // Store active rooms and members
 const rooms = new Map();
+const MAX_ROOMS = 2000;
+const MAX_MEMBERS_PER_ROOM = 32;
 
 // Anti-Brute Force Protection for Password-Protected Rooms
 // Key: `${clientKey}:${roomId}` -> { count: number, lockedUntil: number, lastAttempt: number }
 const loginAttempts = new Map();
+const pendingAttemptLocks = new Map();
 const MAX_LOGIN_ATTEMPTS_ENTRIES = 10000;
 const LOGIN_ATTEMPT_TTL_MS = 600000;
+
+function withAttemptLock(key, fn) {
+    const prev = pendingAttemptLocks.get(key) || Promise.resolve();
+    const run = prev.catch(() => {}).then(fn);
+    const tail = run.finally(() => {
+        if (pendingAttemptLocks.get(key) === tail) {
+            pendingAttemptLocks.delete(key);
+        }
+    });
+    pendingAttemptLocks.set(key, tail);
+    return run;
+}
 
 function getAttemptKey(clientKey, roomId) {
     return `${clientKey}:${roomId}`;
@@ -326,11 +385,22 @@ function isAttemptExpired(data, now = Date.now()) {
 
 function setLoginAttempt(key, data, now = Date.now(), maxEntries = MAX_LOGIN_ATTEMPTS_ENTRIES) {
     if (!loginAttempts.has(key) && loginAttempts.size >= maxEntries) {
+        // 1. Purge expired entries first
         for (const [existingKey, existingData] of loginAttempts.entries()) {
             if (isAttemptExpired(existingData, now)) {
                 loginAttempts.delete(existingKey);
             }
         }
+        // 2. Purge unlocked entries next so active brute-force locks are never displaced by unlocked floods
+        if (loginAttempts.size >= maxEntries) {
+            for (const [existingKey, existingData] of loginAttempts.entries()) {
+                if (!existingData || typeof existingData.lockedUntil !== 'number' || existingData.lockedUntil <= now) {
+                    loginAttempts.delete(existingKey);
+                    if (loginAttempts.size < maxEntries) break;
+                }
+            }
+        }
+        // 3. Fallback FIFO eviction only if every remaining entry is actively locked
         while (loginAttempts.size >= maxEntries) {
             const oldestKey = loginAttempts.keys().next().value;
             if (oldestKey === undefined) break;
@@ -347,10 +417,23 @@ function isPlainObject(obj) {
     return obj !== null && typeof obj === 'object' && !Array.isArray(obj);
 }
 
+function sanitizeControlChars(str) {
+    return String(str).replace(/[\x00-\x1f\x7f]/g, '');
+}
+
 function isValidSignal(signal) {
     if (!isPlainObject(signal)) return false;
-    const isSdp = typeof signal.type === 'string' && (signal.type === 'offer' || signal.type === 'answer') && typeof signal.sdp === 'string';
-    const isIce = Boolean(signal.candidate || signal.sdpMid !== undefined || signal.sdpMLineIndex !== undefined);
+    const isSdp = typeof signal.type === 'string' &&
+        (signal.type === 'offer' || signal.type === 'answer') &&
+        typeof signal.sdp === 'string' &&
+        signal.sdp.length > 0 &&
+        signal.sdp.length <= 65536;
+    const icePayload = isPlainObject(signal.candidate) ? signal.candidate : signal;
+    const hasIceField = icePayload.candidate !== undefined || icePayload.sdpMid !== undefined || icePayload.sdpMLineIndex !== undefined;
+    const candidateOk = icePayload.candidate === undefined || (typeof icePayload.candidate === 'string' && icePayload.candidate.length <= 8192);
+    const sdpMidOk = icePayload.sdpMid === undefined || icePayload.sdpMid === null || (typeof icePayload.sdpMid === 'string' && icePayload.sdpMid.length <= 64);
+    const sdpMLineOk = icePayload.sdpMLineIndex === undefined || icePayload.sdpMLineIndex === null || (Number.isInteger(icePayload.sdpMLineIndex) && icePayload.sdpMLineIndex >= 0);
+    const isIce = hasIceField && candidateOk && sdpMidOk && sdpMLineOk && Boolean(icePayload.candidate || icePayload.sdpMid !== undefined || icePayload.sdpMLineIndex !== undefined);
     const isKeyframeReq = signal.type === 'request-keyframe';
     return isSdp || isIce || isKeyframeReq;
 }
@@ -367,7 +450,10 @@ function checkRateLimit(socket, eventName, windowMs = 1000) {
     }
     tracker.count += 1;
     // Permite maior vazão para rajadas de candidatos ICE no WebRTC Mesh (até 250/s)
-    const maxEvents = eventName === 'signal' ? 250 : 50;
+    // e restringe eventos custosos (join-room/check-room) contra flood de scrypt.
+    const maxEvents = eventName === 'signal'
+        ? 250
+        : (eventName === 'join-room' || eventName === 'check-room' ? 10 : 50);
     return tracker.count <= maxEvents;
 }
 
@@ -377,6 +463,12 @@ function safeHandler(socket, eventName, handler) {
         const payload = args[0];
 
         if (!checkRateLimit(socket, eventName)) {
+            if (eventName === 'join-room') {
+                socket.emit('join-error', {
+                    error: 'rate_limited',
+                    message: 'Muitas solicitações de entrada em sequência. Aguarde um momento.'
+                });
+            }
             if (typeof ack === 'function') {
                 try { ack({ error: 'rate_limited' }); } catch (_) {}
             }
@@ -432,6 +524,16 @@ setInterval(() => {
             loginAttempts.delete(key);
         }
     }
+    for (const [ip, tracker] of iceRateLimitMap.entries()) {
+        if (!tracker || now - tracker.windowStart >= ICE_RATE_LIMIT_WINDOW_MS) {
+            iceRateLimitMap.delete(ip);
+        }
+    }
+    for (const [roomId, room] of rooms.entries()) {
+        if (!room || !room.members || room.members.size === 0) {
+            rooms.delete(roomId);
+        }
+    }
 }, 600000).unref();
 
 io.on('connection', (socket) => {
@@ -459,47 +561,50 @@ io.on('connection', (socket) => {
             return;
         }
 
-        if (typeof data.password === 'string' && data.password.length > 100) {
+        if (typeof data.password === 'string' && (data.password.length > 100 || (data.password.length > 0 && data.password.trim().length === 0))) {
             socket.emit('join-error', {
                 error: 'invalid_password_format',
-                message: 'A senha excede o limite de 100 caracteres.'
+                message: data.password.length > 100
+                    ? 'A senha excede o limite de 100 caracteres.'
+                    : 'A senha não pode conter apenas espaços.'
             });
             return;
         }
 
         const cleanPassword = typeof data.password === 'string' ? data.password.trim() : '';
-        const clientId = typeof data.clientId === 'string' ? data.clientId.trim().slice(0, 100) : null;
-        const cleanUserName = typeof data.userName === 'string' ? data.userName.trim().slice(0, 32) : '';
+        const rawClientId = typeof data.clientId === 'string' ? sanitizeControlChars(data.clientId).trim().slice(0, 100) : null;
+        const cleanUserName = typeof data.userName === 'string' ? sanitizeControlChars(data.userName).trim().slice(0, 32) : '';
 
         let room = rooms.get(cleanRoomId);
         const clientKey = getClientIdentifier(socket);
         const attemptKey = getAttemptKey(clientKey, cleanRoomId);
-        const now = Date.now();
-        const attemptData = loginAttempts.get(attemptKey) || { count: 0, lockedUntil: 0, lastAttempt: now };
-
-        // Verifica se o IP/Cliente está temporariamente bloqueado por força bruta nesta sala
-        if (attemptData.lockedUntil > now) {
-            const waitSeconds = Math.ceil((attemptData.lockedUntil - now) / 1000);
-            console.warn(`[Security] Bloqueio anti-força bruta ativo para ${clientKey} na sala "${cleanRoomId}". Restam ${waitSeconds}s.`);
-            socket.emit('join-error', {
-                error: 'rate_limited',
-                message: `Muitas tentativas incorretas. Aguarde ${waitSeconds} segundos antes de tentar novamente.`
-            });
-            return;
-        }
 
         let isNewRoom = false;
         if (!room) {
+            if (rooms.size >= MAX_ROOMS) {
+                socket.emit('join-error', {
+                    error: 'server_busy',
+                    message: 'Limite máximo de salas ativas atingido. Tente novamente em instantes.'
+                });
+                return;
+            }
             const { hash, salt } = await hashPassword(cleanPassword);
             if (!socket.connected) {
                 return;
             }
             room = rooms.get(cleanRoomId);
             if (!room) {
+                if (rooms.size >= MAX_ROOMS) {
+                    socket.emit('join-error', {
+                        error: 'server_busy',
+                        message: 'Limite máximo de salas ativas atingido. Tente novamente em instantes.'
+                    });
+                    return;
+                }
                 room = {
                     passwordHash: hash,
                     passwordSalt: salt,
-                    members: new Map(), // socketId -> clientId
+                    members: new Map(), // socketId -> clientId | null
                     userNames: new Map(), // socketId -> userName
                     activeStreams: new Set()
                 };
@@ -510,40 +615,91 @@ io.on('connection', (socket) => {
         }
 
         if (!isNewRoom && room.passwordHash) {
-            // Password-protected room check via constant-time verification
-            const isValid = await verifyPassword(cleanPassword, room.passwordHash, room.passwordSalt);
-            if (!isValid) {
-                attemptData.count += 1;
-                attemptData.lastAttempt = now;
+            const verified = await withAttemptLock(attemptKey, async () => {
+                const now = Date.now();
+                const attemptData = loginAttempts.get(attemptKey) || { count: 0, lockedUntil: 0, lastAttempt: now };
 
-                // Penalidade progressiva após 5 tentativas incorretas
-                if (attemptData.count >= 5) {
-                    const penaltySeconds = attemptData.count >= 10 ? 120 : (attemptData.count >= 7 ? 60 : 30);
-                    attemptData.lockedUntil = now + (penaltySeconds * 1000);
-                    setLoginAttempt(attemptKey, attemptData, now);
-
-                    if (!socket.connected) return;
-                    console.warn(`[Security] Bloqueando ${clientKey} na sala "${cleanRoomId}" por ${penaltySeconds}s após ${attemptData.count} tentativas falhas.`);
-                    socket.emit('join-error', {
-                        error: 'rate_limited',
-                        message: `Muitas tentativas incorretas. Bloqueado por ${penaltySeconds} segundos.`
-                    });
-                    return;
+                // Verifica se o IP/Cliente está temporariamente bloqueado por força bruta nesta sala
+                if (attemptData.lockedUntil > now) {
+                    const waitSeconds = Math.ceil((attemptData.lockedUntil - now) / 1000);
+                    console.warn(`[Security] Bloqueio anti-força bruta ativo para ${clientKey} na sala "${cleanRoomId}". Restam ${waitSeconds}s.`);
+                    if (socket.connected) {
+                        socket.emit('join-error', {
+                            error: 'rate_limited',
+                            message: `Muitas tentativas incorretas. Aguarde ${waitSeconds} segundos antes de tentar novamente.`
+                        });
+                    }
+                    return false;
                 }
 
-                setLoginAttempt(attemptKey, attemptData, now);
-                if (!socket.connected) return;
-                const remaining = 5 - attemptData.count;
-                console.log(`[Auth] Rejected socket ${socket.id} for room "${cleanRoomId}": Invalid password (${remaining} tentativas restantes)`);
-                socket.emit('join-error', {
-                    error: 'invalid_password',
-                    message: `Senha incorreta. ${remaining} tentativa(s) restante(s) antes do bloqueio.`
-                });
+                const initialRoomRef = room;
+                const initialHash = room.passwordHash;
+                const initialSalt = room.passwordSalt;
+                const isValid = await verifyPassword(cleanPassword, initialHash, initialSalt);
+
+                const checkNow = Date.now();
+                const latestRoom = rooms.get(cleanRoomId);
+                if (!latestRoom) {
+                    if (socket.connected) {
+                        socket.emit('join-error', {
+                            error: 'room_closed',
+                            message: 'A sala foi encerrada durante a autenticação. Tente entrar novamente.'
+                        });
+                    }
+                    return false;
+                }
+
+                if (latestRoom !== initialRoomRef) {
+                    if (latestRoom.passwordHash !== initialHash || latestRoom.passwordSalt !== initialSalt) {
+                        if (socket.connected) {
+                            socket.emit('join-error', {
+                                error: 'invalid_password',
+                                message: 'A sala foi recriada durante a entrada. Tente novamente.'
+                            });
+                        }
+                        return false;
+                    }
+                    room = latestRoom;
+                }
+
+                if (!isValid) {
+                    attemptData.count += 1;
+                    attemptData.lastAttempt = checkNow;
+
+                    // Penalidade progressiva após 5 tentativas incorretas
+                    if (attemptData.count >= 5) {
+                        const penaltySeconds = attemptData.count >= 10 ? 120 : (attemptData.count >= 7 ? 60 : 30);
+                        attemptData.lockedUntil = checkNow + (penaltySeconds * 1000);
+                        setLoginAttempt(attemptKey, attemptData, checkNow);
+
+                        if (!socket.connected) return false;
+                        console.warn(`[Security] Bloqueando ${clientKey} na sala "${cleanRoomId}" por ${penaltySeconds}s após ${attemptData.count} tentativas falhas.`);
+                        socket.emit('join-error', {
+                            error: 'rate_limited',
+                            message: `Muitas tentativas incorretas. Bloqueado por ${penaltySeconds} segundos.`
+                        });
+                        return false;
+                    }
+
+                    setLoginAttempt(attemptKey, attemptData, checkNow);
+                    if (!socket.connected) return false;
+                    const remaining = 5 - attemptData.count;
+                    console.log(`[Auth] Rejected socket ${socket.id} for room "${cleanRoomId}": Invalid password (${remaining} tentativas restantes)`);
+                    socket.emit('join-error', {
+                        error: 'invalid_password',
+                        message: `Senha incorreta. ${remaining} tentativa(s) restante(s) antes do bloqueio.`
+                    });
+                    return false;
+                }
+
+                // Senha correta: limpa registro de falhas desta sala
+                loginAttempts.delete(attemptKey);
+                return true;
+            });
+
+            if (!verified) {
                 return;
             }
-
-            // Senha correta: limpa registro de falhas desta sala
-            loginAttempts.delete(attemptKey);
         }
 
         if (!socket.connected) {
@@ -553,6 +709,16 @@ io.on('connection', (socket) => {
             return;
         }
 
+        const currentRoom = rooms.get(cleanRoomId);
+        if (currentRoom) {
+            room = currentRoom;
+        }
+
+        // Ignore forged clientId matching an active socket.id on the server
+        const clientId = (rawClientId && !io.sockets.sockets.has(rawClientId) && !room.members.has(rawClientId))
+            ? rawClientId
+            : null;
+
         // Leave any previous room
         if (socket.roomId && socket.roomId !== cleanRoomId) {
             leaveCurrentRoom(socket);
@@ -561,7 +727,7 @@ io.on('connection', (socket) => {
         // Evict stale/ghost socket if this client refreshed (F5) or reconnected
         if (clientId) {
             for (const [existingSocketId, existingClientId] of room.members.entries()) {
-                if (existingClientId === clientId && existingSocketId !== socket.id) {
+                if (existingClientId && existingClientId === clientId && existingSocketId !== socket.id) {
                     console.log(`[Evict] Replacing stale socket ${existingSocketId} with new socket ${socket.id} for client ${clientId}`);
                     const oldSocket = io.sockets.sockets.get(existingSocketId);
                     if (oldSocket) {
@@ -582,11 +748,18 @@ io.on('connection', (socket) => {
         }
 
         const alreadyMember = socket.roomId === cleanRoomId && room.members.has(socket.id);
+        if (!alreadyMember && room.members.size >= MAX_MEMBERS_PER_ROOM) {
+            socket.emit('join-error', {
+                error: 'room_full',
+                message: 'A sala atingiu o limite máximo de participantes.'
+            });
+            return;
+        }
 
         socket.join(cleanRoomId);
         socket.roomId = cleanRoomId;
         const displayName = cleanUserName || `Participante ${socket.id.substr(0, 5)}`;
-        room.members.set(socket.id, clientId || socket.id);
+        room.members.set(socket.id, clientId);
         if (!room.userNames) room.userNames = new Map();
         room.userNames.set(socket.id, displayName);
 
@@ -754,6 +927,20 @@ if (require.main === module) {
         console.log(`  Rede:    http://${localIp}:${actualPort}`);
         console.log(`==================================================\n`);
     });
+
+    const gracefulShutdown = (signalName) => {
+        console.log(`\n[Shutdown] Recebido ${signalName}, encerrando servidor graciosamente...`);
+        const forceTimer = setTimeout(() => process.exit(1), 5000);
+        if (typeof forceTimer.unref === 'function') forceTimer.unref();
+        io.close(() => {
+            server.close(() => {
+                clearTimeout(forceTimer);
+                process.exit(0);
+            });
+        });
+    };
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 }
 
 module.exports = {
