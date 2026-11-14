@@ -1,6 +1,7 @@
 :root, [data-theme="dark"] {
     --bg-dark: #090a0f;
     --bg-surface: #12151c;
+    --bg-surface-hover: #1d222e;
     --bg-card: #181c26;
     --bg-card-hover: #202634;
     --border: rgba(255, 255, 255, 0.09);
@@ -37,6 +38,7 @@
 [data-theme="light"] {
     --bg-dark: #f8fafc;
     --bg-surface: #ffffff;
+    --bg-surface-hover: #f1f5f9;
     --bg-card: #f1f5f9;
     --bg-card-hover: #e2e8f0;
     --border: #e2e8f0;
@@ -180,8 +182,33 @@ body {
     color: var(--text-muted);
 }
 
+.room-code-pill {
+    max-width: 240px;
+    min-width: 0;
+}
+
 .room-code-pill strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     color: var(--text-main);
+}
+
+.btn:focus-visible,
+.btn-icon:focus-visible,
+.btn-close:focus-visible,
+.btn-text-action:focus-visible,
+.room-choice-card:focus-visible,
+.room-card-close:focus-visible,
+.toast-close:focus-visible,
+.btn-exit-pseudo-fs:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+}
+
+.audio-option-card:focus-within {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 2px var(--primary-subtle);
 }
 
 /* Buttons */
@@ -281,6 +308,8 @@ body {
     align-items: center;
     justify-content: center;
     padding: 20px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
 }
 
 .modal-overlay[hidden],
@@ -296,6 +325,10 @@ body {
     background: var(--bg-surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
+    margin: auto;
+    max-height: calc(100vh - 32px);
+    max-height: calc(100dvh - 32px);
+    overflow-y: auto;
     padding: 28px;
     box-shadow: var(--card-shadow);
 }
@@ -676,6 +709,7 @@ body {
 
 /* Stream Tile Header Badge */
 .tile-header-badge {
+    max-width: calc(100% - 110px);
     position: absolute;
     top: 10px;
     left: 10px;
@@ -692,6 +726,7 @@ body {
 }
 
 .tile-header-badge .live-dot {
+    flex-shrink: 0;
     width: 6px;
     height: 6px;
     border-radius: 50%;
@@ -700,6 +735,9 @@ body {
 }
 
 .tile-header-badge .user-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font-weight: 600;
     color: #fff;
 }
@@ -761,6 +799,18 @@ body {
 
 .stream-tile:hover .tile-controls-overlay {
     opacity: 1;
+}
+
+.tile-controls-overlay .btn-icon {
+    background: rgba(255, 255, 255, 0.1);
+    border-color: rgba(255, 255, 255, 0.16);
+    color: #f8fafc;
+}
+
+.tile-controls-overlay .btn-icon:hover {
+    background: rgba(255, 255, 255, 0.2);
+    border-color: rgba(255, 255, 255, 0.3);
+    color: #ffffff;
 }
 
 .tile-controls-overlay input[type="range"] {
@@ -857,8 +907,60 @@ body {
     background: var(--bg-surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
+    margin: auto;
+    max-height: calc(100vh - 32px);
+    max-height: calc(100dvh - 32px);
+    overflow-y: auto;
     padding: 24px;
     box-shadow: var(--card-shadow);
+}
+
+.form-input {
+    background: var(--bg-card);
+    color: var(--text-main);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    outline: none;
+    transition: var(--transition);
+}
+
+.form-input:focus,
+.form-input:focus-visible {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 2px var(--primary-subtle);
+}
+
+.form-input option {
+    background: var(--bg-card);
+    color: var(--text-main);
+}
+
+.audio-option-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    transition: var(--transition);
+}
+
+.audio-option-card:hover {
+    border-color: var(--border-hover);
+    background: var(--bg-surface-hover);
+}
+
+.audio-option-card.is-selected,
+.audio-option-card:has(input[type="radio"]:checked) {
+    border-color: var(--primary);
+    background: var(--bg-surface-hover);
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(4px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
 }
 
 .modal-header {
@@ -977,6 +1079,10 @@ body {
         font-size: 0.78rem;
     }
 
+    .room-code-pill {
+        max-width: 150px;
+    }
+
     /* Grid single column on mobile */
     .stream-grid {
         grid-template-columns: 1fr !important;
@@ -987,6 +1093,11 @@ body {
     .stream-tile {
         min-height: 200px;
         height: 100%;
+    }
+
+    .stream-grid[data-count="3"] .stream-tile:nth-child(3) {
+        grid-column: auto;
+        max-width: none;
     }
 
     /* Always show controls overlay clearly on touch screens */
@@ -1072,7 +1183,8 @@ body {
     }
 
     .room-info-bar .btn-secondary span,
-    #btnCopyLink span {
+    #btnCopyLink span,
+    .toolbar-right .btn-text {
         display: none; /* Show only icon on very small screens */
     }
 
@@ -1193,7 +1305,7 @@ body {
 
 @media (max-width: 480px) {
     .toast-container {
-        bottom: 12px;
+        bottom: 76px;
         left: 12px;
         right: 12px;
         max-width: none;

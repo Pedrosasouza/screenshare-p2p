@@ -2,6 +2,7 @@
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
+    <meta name="referrer" content="no-referrer">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>StreamGrid - Compartilhamento de Tela Multi-Transmissão</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -38,24 +39,24 @@
                     <strong id="displayRoomId">------</strong>
                 </div>
 
-                <button class="btn btn-secondary btn-sm" id="btnCopyLink" title="Copiar link da sala">
-                    <i class="fa-regular fa-copy"></i> Copiar Link
+                <button class="btn btn-secondary btn-sm" id="btnCopyLink" title="Copiar link da sala" type="button">
+                    <i class="fa-regular fa-copy"></i> <span class="btn-text">Copiar Link</span>
                 </button>
 
-                <button class="btn btn-secondary btn-sm" id="btnChangeRoom" title="Trocar de Sala">
-                    <i class="fa-solid fa-arrow-right-from-bracket"></i> Trocar Sala
+                <button class="btn btn-secondary btn-sm" id="btnChangeRoom" title="Trocar de Sala" type="button">
+                    <i class="fa-solid fa-arrow-right-from-bracket"></i> <span class="btn-text">Trocar Sala</span>
                 </button>
 
-                <button class="btn-icon" id="btnThemeToggle" title="Alternar Tema Claro / Escuro">
+                <button class="btn-icon" id="btnThemeToggle" title="Alternar Tema Claro / Escuro" aria-label="Alternar Tema Claro / Escuro" type="button">
                     <i class="fa-solid fa-moon"></i>
                 </button>
             </div>
         </header>
 
         <!-- Room Entry Modal (Two-Step Flow: Choice -> Create or Join) -->
-        <div class="modal-overlay" id="roomModal">
+        <div class="modal-overlay" id="roomModal" role="dialog" aria-modal="true">
             <div class="room-card">
-                <button class="room-card-close" id="btnCloseRoomModal" title="Fechar e voltar à sala (ESC)" type="button" style="display: none;">
+                <button class="room-card-close" id="btnCloseRoomModal" title="Fechar e voltar à sala (ESC)" aria-label="Fechar e voltar à sala (ESC)" type="button" style="display: none;">
                     <i class="fa-solid fa-xmark"></i>
                 </button>
 
@@ -136,7 +137,7 @@
                             <div class="input-wrapper">
                                 <i class="fa-solid fa-hashtag input-icon"></i>
                                 <input type="text" id="inputCreateRoomId" placeholder="Ex: grid-m8kp-7x9v" maxlength="32">
-                                <button class="btn-icon" id="btnRandomRoom" title="Gerar código aleatório" type="button">
+                                <button class="btn-icon" id="btnRandomRoom" title="Gerar código aleatório" aria-label="Gerar código aleatório" type="button">
                                     <i class="fa-solid fa-shuffle"></i>
                                 </button>
                             </div>
@@ -155,7 +156,7 @@
                             <div class="input-wrapper">
                                 <i class="fa-solid fa-lock input-icon"></i>
                                 <input type="password" id="inputCreateRoomPassword" placeholder="Deixe em branco se for pública" maxlength="32">
-                                <button class="btn-icon" id="btnToggleCreatePass" title="Mostrar/Ocultar Senha" type="button">
+                                <button class="btn-icon" id="btnToggleCreatePass" title="Mostrar/Ocultar Senha" aria-label="Mostrar/Ocultar Senha" type="button">
                                     <i class="fa-solid fa-eye"></i>
                                 </button>
                             </div>
@@ -212,7 +213,7 @@
                             <div class="input-wrapper">
                                 <i class="fa-solid fa-lock input-icon"></i>
                                 <input type="password" id="inputJoinRoomPassword" placeholder="Digite a senha (se houver)" maxlength="32">
-                                <button class="btn-icon" id="btnToggleJoinPass" title="Mostrar/Ocultar Senha" type="button">
+                                <button class="btn-icon" id="btnToggleJoinPass" title="Mostrar/Ocultar Senha" aria-label="Mostrar/Ocultar Senha" type="button">
                                     <i class="fa-solid fa-eye"></i>
                                 </button>
                             </div>
@@ -246,7 +247,7 @@
                         <h3>Nenhuma tela sendo compartilhada no momento</h3>
                         <p>Qualquer pessoa na sala pode compartilhar a tela ao mesmo tempo em 1080p com áudio do computador.</p>
                         
-                        <button class="btn btn-primary btn-lg" id="btnStartShareBig">
+                        <button class="btn btn-primary btn-lg" id="btnStartShareBig" type="button">
                             <i class="fa-solid fa-display"></i> Compartilhar Minha Tela
                         </button>
                     </div>
@@ -258,15 +259,15 @@
         <!-- Controls Toolbar (Floating Bottom Bar) -->
         <footer class="controls-toolbar">
             <div class="toolbar-left">
-                <button class="btn btn-primary" id="btnStartShare">
+                <button class="btn btn-primary" id="btnStartShare" type="button">
                     <i class="fa-solid fa-display"></i> Compartilhar Tela
                 </button>
 
-                <button class="btn btn-danger" id="btnStopShare" hidden>
+                <button class="btn btn-danger" id="btnStopShare" type="button" hidden>
                     <i class="fa-solid fa-circle-stop"></i> Parar Compartilhamento
                 </button>
 
-                <button class="btn btn-secondary btn-sm" id="btnQualityToggle" hidden title="Alternar modo de qualidade">
+                <button class="btn btn-secondary btn-sm" id="btnQualityToggle" type="button" hidden title="Alternar modo de qualidade">
                     <i class="fa-solid fa-gauge-high"></i> <span id="qualityModeLabel">Fluido</span>
                 </button>
             </div>
@@ -288,11 +289,11 @@
         </footer>
 
         <!-- Screen Share Configuration Modal (App Audio Isolation) -->
-        <div class="modal-overlay" id="shareConfigModal" style="display: none;" hidden>
+        <div class="modal-overlay" id="shareConfigModal" role="dialog" aria-modal="true" style="display: none;" hidden>
             <div class="modal-card modal-sm">
                 <div class="modal-header">
                     <h3><i class="fa-solid fa-sliders"></i> Iniciar Transmissão</h3>
-                    <button class="btn-close" id="btnCloseShareConfig" title="Fechar (ESC)"><i class="fa-solid fa-xmark"></i></button>
+                    <button class="btn-close" id="btnCloseShareConfig" title="Fechar (ESC)" aria-label="Fechar (ESC)" type="button"><i class="fa-solid fa-xmark"></i></button>
                 </div>
                 <div class="modal-body">
                     <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 16px;">
@@ -300,7 +301,7 @@
                     </p>
 
                     <div class="audio-source-options" style="display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px;">
-                        <label class="audio-option-card" style="display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--primary); background: var(--bg-surface-hover); cursor: pointer;">
+                        <label class="audio-option-card is-selected" style="display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: var(--radius-md); cursor: pointer;">
                             <div style="display: flex; align-items: center; justify-content: space-between;">
                                 <div style="display: flex; align-items: center; gap: 10px;">
                                     <input type="radio" name="audioSourceType" value="exclude_discord" id="audioSourceExcludeDiscord" checked>
@@ -318,7 +319,7 @@
                             </div>
                         </label>
 
-                        <label class="audio-option-card" style="display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--border); background: var(--bg-surface); cursor: pointer;">
+                        <label class="audio-option-card" style="display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: var(--radius-md); cursor: pointer;">
                             <div style="display: flex; align-items: center; gap: 10px;">
                                 <input type="radio" name="audioSourceType" value="app" id="audioSourceApp">
                                 <strong><i class="fa-solid fa-gamepad" style="color: var(--primary);"></i> Apenas Um Aplicativo Específico</strong>
@@ -330,13 +331,13 @@
                                 <select id="selectAudioApp" class="form-input" style="flex: 1; padding: 8px; font-size: 0.85rem;">
                                     <option value="">Carregando aplicativos abertos...</option>
                                 </select>
-                                <button type="button" class="btn btn-secondary btn-sm" id="btnRefreshAudioApps" title="Atualizar lista de janelas">
+                                <button type="button" class="btn btn-secondary btn-sm" id="btnRefreshAudioApps" title="Atualizar lista de janelas" aria-label="Atualizar lista de janelas">
                                     <i class="fa-solid fa-rotate-right"></i>
                                 </button>
                             </div>
                         </label>
 
-                        <label class="audio-option-card" style="display: flex; flex-direction: column; gap: 4px; padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--border); background: var(--bg-surface); cursor: pointer;">
+                        <label class="audio-option-card" style="display: flex; flex-direction: column; gap: 4px; padding: 12px; border-radius: var(--radius-md); cursor: pointer;">
                             <div style="display: flex; align-items: center; gap: 10px;">
                                 <input type="radio" name="audioSourceType" value="system" id="audioSourceSystem">
                                 <strong><i class="fa-solid fa-volume-high"></i> Áudio Geral do Sistema</strong>
@@ -346,7 +347,7 @@
                             </span>
                         </label>
 
-                        <label class="audio-option-card" style="display: flex; flex-direction: column; gap: 4px; padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--border); background: var(--bg-surface); cursor: pointer;">
+                        <label class="audio-option-card" style="display: flex; flex-direction: column; gap: 4px; padding: 12px; border-radius: var(--radius-md); cursor: pointer;">
                             <div style="display: flex; align-items: center; gap: 10px;">
                                 <input type="radio" name="audioSourceType" value="none" id="audioSourceNone">
                                 <strong><i class="fa-solid fa-volume-xmark"></i> Sem Áudio</strong>
@@ -385,7 +386,7 @@
                         </div>
                     </div>
 
-                    <button class="btn btn-primary btn-block" id="btnConfirmStartShare">
+                    <button class="btn btn-primary btn-block" id="btnConfirmStartShare" type="button">
                         <i class="fa-solid fa-display"></i> Continuar e Escolher Janela
                     </button>
                 </div>
@@ -393,11 +394,11 @@
         </div>
 
         <!-- WebRTC P2P Stats / Diagnostic Modal -->
-        <div class="modal-overlay" id="statsModal" style="display: none;" hidden>
+        <div class="modal-overlay" id="statsModal" role="dialog" aria-modal="true" style="display: none;" hidden>
             <div class="modal-card modal-sm">
                 <div class="modal-header">
                     <h3><i class="fa-solid fa-chart-simple"></i> Diagnóstico da Conexão P2P</h3>
-                    <button class="btn-close" id="btnCloseStatsModal" title="Fechar (ESC)"><i class="fa-solid fa-xmark"></i></button>
+                    <button class="btn-close" id="btnCloseStatsModal" title="Fechar (ESC)" aria-label="Fechar (ESC)" type="button"><i class="fa-solid fa-xmark"></i></button>
                 </div>
                 <div class="modal-body">
                     <div style="display: flex; flex-direction: column; gap: 12px; font-size: 0.88rem;">
