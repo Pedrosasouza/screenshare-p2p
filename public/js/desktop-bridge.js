@@ -19,6 +19,14 @@
         return null;
     }
 
+    function getTauriEvent() {
+        if (!win) return null;
+        if (win.__TAURI__ && win.__TAURI__.event && typeof win.__TAURI__.event.listen === 'function') {
+            return win.__TAURI__.event;
+        }
+        return null;
+    }
+
     function isDesktop() {
         if (!win) return false;
         return Boolean(win.__TAURI_INTERNALS__ || win.__TAURI__);
@@ -105,6 +113,22 @@
         return invokeCommand('stop_capture');
     }
 
+    async function onCaptureStopped(callback) {
+        if (!isDesktop() || typeof callback !== 'function') {
+            return () => {};
+        }
+        const eventApi = getTauriEvent();
+        if (!eventApi) {
+            return () => {};
+        }
+        return eventApi.listen('wasapi-capture-stopped', (event) => {
+            const payload = event && typeof event === 'object' && 'payload' in event
+                ? event.payload
+                : event;
+            callback(payload);
+        });
+    }
+
     return {
         isDesktop,
         toArrayBuffer,
@@ -113,5 +137,6 @@
         startAppAudioCapture,
         startExcludeDiscordCapture,
         stopAppAudioCapture,
+        onCaptureStopped,
     };
 });

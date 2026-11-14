@@ -6,6 +6,7 @@ let helperAudioContext = null;
 let activeAudioWorkletNode = null;
 let helperAudioDestination = null;
 let desktopCaptureGeneration = 0;
+let captureStoppedUnlisten = null;
 const audioWorkletLoadedContexts = new WeakSet();
 
 export function isDesktopApp() {
@@ -94,6 +95,15 @@ export async function fetchWindowList() {
         updateAudioAppSelect(availableWindows);
     } catch (err) {
         console.warn('[AudioHelper] Erro ao listar janelas compatíveis:', err);
+        availableWindows = [];
+        const select = document.getElementById('selectAudioApp');
+        if (select) {
+            select.innerHTML = '';
+            const opt = document.createElement('option');
+            opt.value = '';
+            opt.textContent = 'Erro ao carregar janelas de áudio';
+            select.appendChild(opt);
+        }
     }
 }
 
@@ -187,4 +197,22 @@ export function stopAppAudioCapture() {
     if (helperAudioContext && helperAudioContext.state !== 'closed') {
         helperAudioContext.suspend().catch(() => {});
     }
+}
+
+export async function registerDesktopCaptureListeners(onUnexpectedStop) {
+    if (!isDesktopApp() || !window.StreamGridDesktop || typeof window.StreamGridDesktop.onCaptureStopped !== 'function') {
+        return () => {};
+    }
+    if (typeof captureStoppedUnlisten === 'function') {
+        try { captureStoppedUnlisten(); } catch (_) {}
+        captureStoppedUnlisten = null;
+    }
+    const unlisten = await window.StreamGridDesktop.onCaptureStopped((payload) => {
+        stopAppAudioCapture();
+        if (typeof onUnexpectedStop === 'function') {
+            onUnexpectedStop(payload);
+        }
+    });
+    captureStoppedUnlisten = typeof unlisten === 'function' ? unlisten : null;
+    return captureStoppedUnlisten || (() => {});
 }

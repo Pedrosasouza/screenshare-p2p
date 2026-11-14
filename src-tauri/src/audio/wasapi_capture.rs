@@ -113,7 +113,7 @@ fn flush_sample_chunks(
                 *total_frames_sent += CHUNK_FRAMES as u64;
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
-                stop_signal.store(true, Ordering::Relaxed);
+                stop_signal.store(true, Ordering::Release);
                 return false;
             }
         }
@@ -123,18 +123,29 @@ fn flush_sample_chunks(
 
 /// Inicia captura WASAPI Application Loopback em thread dedicada com apartamento COM MTA.
 /// `include_tree`: true = INCLUDE (apenas o processo alvo); false = EXCLUDE (sistema exceto alvo).
-pub async fn start_wasapi_capture(
+pub async fn start_wasapi_capture<F>(
     pid: u32,
     include_tree: bool,
     audio_tx: mpsc::Sender<Vec<u8>>,
     stop_signal: Arc<AtomicBool>,
-) -> Result<(u32, u16), String> {
+    on_unexpected_stop: F,
+) -> Result<(u32, u16), String>
+where
+    F: FnOnce(String) + Send + 'static,
+{
     let (ready_tx, ready_rx) = oneshot::channel();
 
     std::thread::spawn(move || {
         let _ = initialize_mta();
 
-        let desired_format = WaveFormat::new(32, 32, &SampleType::Float, SAMPLE_RATE as usize, CHANNELS as usize, None);
+        let desired_format = WaveFormat::new(
+            32,
+            32,
+            &SampleType::Float,
+            SAMPLE_RATE as usize,
+            CHANNELS as usize,
+            None,
+        );
         let blockalign = desired_format.get_blockalign() as usize;
         let autoconvert = true;
 
@@ -142,7 +153,11 @@ pub async fn start_wasapi_capture(
         {
             Ok(c) => c,
             Err(e) => {
-                let mode_desc = if include_tree { "inclusão" } else { "exclusão" };
+                let mode_desc = if include_tree {
+                    "inclusão"
+                } else {
+                    "exclusão"
+                };
                 let _ = ready_tx.send(Err(format!(
                     "Falha ao criar loopback WASAPI (modo {}) para PID {}: {:?}",
                     mode_desc, pid, e
@@ -181,6 +196,11 @@ pub async fn start_wasapi_capture(
             }
         };
 
+        if stop_signal.load(Ordering::Acquire) {
+            let _ = ready_tx.send(Err("Captura de áudio cancelada antes do início.".into()));
+            return;
+        }
+
         if let Err(e) = audio_client.start_stream() {
             let _ = ready_tx.send(Err(format!("Falha ao iniciar stream WASAPI: {:?}", e)));
             return;
@@ -192,21 +212,22 @@ pub async fn start_wasapi_capture(
         let chunk_bytes = CHUNK_FRAMES * blockalign;
         let mut silence_sync = SilenceSyncTracker::new(Instant::now());
         let mut total_frames_sent: u64 = 0;
+        let mut unexpected_reason: Option<String> = None;
 
-        while !stop_signal.load(Ordering::Relaxed) {
+        while !stop_signal.load(Ordering::Acquire) {
             let mut read_error = false;
-            while !stop_signal.load(Ordering::Relaxed) {
+            while !stop_signal.load(Ordering::Acquire) {
                 match capture_client.get_next_packet_size() {
                     Ok(Some(new_frames)) if new_frames > 0 => {
-                        let additional = (new_frames as usize * blockalign)
-                            .saturating_sub(sample_queue.capacity() - sample_queue.len());
-                        sample_queue.reserve(additional);
+                        sample_queue.reserve(new_frames as usize * blockalign);
 
                         if capture_client
                             .read_from_device_to_deque(&mut sample_queue)
                             .is_err()
                         {
                             eprintln!("[WASAPI] Read device error");
+                            unexpected_reason =
+                                Some("Dispositivo ou processo de áudio indisponível".into());
                             read_error = true;
                             break;
                         }
@@ -214,17 +235,20 @@ pub async fn start_wasapi_capture(
                     Ok(_) => break,
                     Err(_) => {
                         eprintln!("[WASAPI] get_next_packet_size error");
+                        unexpected_reason =
+                            Some("Dispositivo de áudio desconectado ou invalidado".into());
                         read_error = true;
                         break;
                     }
                 }
             }
 
-            if read_error || stop_signal.load(Ordering::Relaxed) {
+            if read_error || stop_signal.load(Ordering::Acquire) {
                 break;
             }
 
-            let dropped_frames = trim_sample_queue_excess(&mut sample_queue, MAX_QUEUED_FRAMES, blockalign);
+            let dropped_frames =
+                trim_sample_queue_excess(&mut sample_queue, MAX_QUEUED_FRAMES, blockalign);
             total_frames_sent += dropped_frames as u64;
 
             if !flush_sample_chunks(
@@ -260,7 +284,12 @@ pub async fn start_wasapi_capture(
         }
 
         let _ = audio_client.stop_stream();
-        eprintln!("[WASAPI] Stream finalizado com sucesso para PID {}", pid);
+        eprintln!("[WASAPI] Stream finalizado para PID {}", pid);
+        if let Some(reason) = unexpected_reason {
+            if !stop_signal.load(Ordering::Acquire) {
+                on_unexpected_stop(reason);
+            }
+        }
     });
 
     match ready_rx.await {
@@ -298,11 +327,7 @@ mod tests {
         assert_eq!(missing, 480);
 
         // Deficit exactly at MAX_SILENCE_BURST_FRAMES (100ms = 4800 frames) still synthesizes without resync
-        let burst = tracker.compute_missing_or_resync(
-            t0 + Duration::from_millis(120),
-            960,
-            0,
-        );
+        let burst = tracker.compute_missing_or_resync(t0 + Duration::from_millis(120), 960, 0);
         assert_eq!(burst, MAX_SILENCE_BURST_FRAMES);
     }
 

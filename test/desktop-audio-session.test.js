@@ -290,6 +290,82 @@ async function runTests() {
     }
     console.log('\x1b[32mPASSOU\x1b[0m');
 
+    // T5: fetchWindowList exibe estado de erro e wasapi-capture-stopped notifica interrupção inesperada
+    process.stdout.write('  [Teste] T5: fetchWindowList sinaliza erro em #selectAudioApp e onCaptureStopped notifica queda ... ');
+    {
+        const appendedOptions = [];
+        const selectEl = {
+            innerHTML: '<option value="1">Antigo</option>',
+            appendChild(opt) { appendedOptions.push(opt); }
+        };
+        let captureStoppedCb = null;
+        const desktopBridgePath = path.resolve(__dirname, '../public/js/desktop-bridge.js');
+        const bridgeCode = fs.readFileSync(desktopBridgePath, 'utf8');
+        const desktopAudioSrc = fs.readFileSync(path.resolve(__dirname, '../public/js/modules/desktop-audio.js'), 'utf8');
+
+        assert(
+            typeof extractFn === 'function' && desktopAudioSrc.includes('registerDesktopCaptureListeners'),
+            'desktop-audio.js deve exportar registerDesktopCaptureListeners'
+        );
+
+        const win = {
+            __TAURI_INTERNALS__: {},
+            __TAURI__: {
+                core: {
+                    Channel: class {},
+                    invoke: async (cmd) => {
+                        if (cmd === 'list_windows') throw new Error('COM timeout');
+                        return null;
+                    }
+                },
+                event: {
+                    listen: async (eventName, cb) => {
+                        if (eventName === 'wasapi-capture-stopped') captureStoppedCb = cb;
+                        return () => { captureStoppedCb = null; };
+                    }
+                }
+            }
+        };
+        vm.runInNewContext(bridgeCode, { window: win, globalThis: win });
+        assert.strictEqual(typeof win.StreamGridDesktop.onCaptureStopped, 'function', 'desktop-bridge deve expor onCaptureStopped');
+
+        const cleanedModuleCode = desktopAudioSrc
+            .replace(/^export\s+/gm, '')
+            .replace(/import\s+[\s\S]*?;\n/g, '');
+        const modSandbox = {
+            WeakSet,
+            ArrayBuffer,
+            Float32Array,
+            Promise,
+            Error,
+            console: { log: () => {}, warn: () => {}, error: () => {} },
+            document: {
+                getElementById: (id) => (id === 'selectAudioApp' ? selectEl : null),
+                createElement: () => ({ value: '', textContent: '' })
+            },
+            window: win
+        };
+        vm.createContext(modSandbox);
+        vm.runInContext(cleanedModuleCode, modSandbox);
+
+        await modSandbox.fetchWindowList();
+        assert(appendedOptions.length === 1, 'Erro em fetchWindowList deve renderizar 1 option explicativa');
+        assert.strictEqual(appendedOptions[0].value, '');
+        assert(
+            /erro/i.test(appendedOptions[0].textContent),
+            `Texto de erro esperado em #selectAudioApp, recebido "${appendedOptions[0].textContent}"`
+        );
+
+        let notifiedPayload = null;
+        await modSandbox.registerDesktopCaptureListeners((payload) => {
+            notifiedPayload = payload;
+        });
+        assert.strictEqual(typeof captureStoppedCb, 'function', 'Deve registrar listener em wasapi-capture-stopped');
+        captureStoppedCb({ payload: { pid: 4321, reason: 'device_invalidated' } });
+        assert(notifiedPayload && notifiedPayload.pid === 4321, 'Callback de queda inesperada deve receber payload do evento');
+    }
+    console.log('\x1b[32mPASSOU\x1b[0m');
+
     console.log('\n===============================================================');
     console.log('  ✅ Resultado: Todos os testes da sessão desktop passaram.');
     console.log('===============================================================\n');

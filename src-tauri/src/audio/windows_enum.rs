@@ -32,9 +32,7 @@ pub struct DiscordStatus {
 /// Determina se um executável deve ser omitido da lista de captura (StreamGrid / WebView2 / shell).
 pub fn should_exclude_process_exe(exe_name: &str) -> bool {
     let lower = exe_name.trim().to_lowercase();
-    lower.contains("streamgrid")
-        || lower.contains("msedgewebview2")
-        || lower.contains("neutralino")
+    lower.contains("streamgrid") || lower.contains("msedgewebview2") || lower.contains("neutralino")
 }
 
 /// Seleciona o processo raiz do Discord cujo processo pai não é outro processo do Discord.
@@ -51,6 +49,21 @@ pub fn select_discord_root_pid(discord_procs: &[(u32, u32)]) -> Option<u32> {
     }
 
     Some(discord_procs[0].0)
+}
+
+/// Decodifica um buffer UTF-16 terminando no primeiro caractere NUL (`\0`), ignorando lixo residual.
+pub fn decode_utf16_nul_terminated(slice: &[u16]) -> String {
+    let nul_pos = slice.iter().position(|&c| c == 0).unwrap_or(slice.len());
+    String::from_utf16_lossy(&slice[..nul_pos])
+}
+
+/// Limita o tamanho retornado por `GetWindowTextLengthW` (rejeita valores `<= 0` e limita a 4096 chars).
+pub fn bounded_window_text_len(raw_len: i32) -> Option<usize> {
+    if raw_len <= 0 {
+        None
+    } else {
+        Some((raw_len as usize).min(4096))
+    }
 }
 
 fn query_process_exe_name(pid: u32) -> String {
@@ -91,9 +104,7 @@ pub fn find_discord_root_pid() -> Option<u32> {
 
         if Process32FirstW(snapshot, &mut entry).is_ok() {
             loop {
-                let name = String::from_utf16_lossy(&entry.szExeFile)
-                    .trim_matches(char::from(0))
-                    .to_lowercase();
+                let name = decode_utf16_nul_terminated(&entry.szExeFile).to_lowercase();
 
                 if name == "discord.exe" || name == "discordcanary.exe" || name == "discordptb.exe"
                 {
@@ -132,58 +143,61 @@ pub fn list_application_windows() -> Vec<WindowInfo> {
     let my_pid = unsafe { GetCurrentProcessId() };
 
     unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        let state = &mut *(lparam.0 as *mut EnumState);
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let state = &mut *(lparam.0 as *mut EnumState);
 
-        if !IsWindowVisible(hwnd).as_bool() {
-            return BOOL(1);
-        }
+            if !IsWindowVisible(hwnd).as_bool() {
+                return BOOL(1);
+            }
 
-        let len = GetWindowTextLengthW(hwnd);
-        if len == 0 {
-            return BOOL(1);
-        }
+            let Some(max_chars) = bounded_window_text_len(GetWindowTextLengthW(hwnd)) else {
+                return BOOL(1);
+            };
 
-        let mut title_buf = vec![0u16; (len + 1) as usize];
-        let read = GetWindowTextW(hwnd, &mut title_buf);
-        if read == 0 {
-            return BOOL(1);
-        }
-        let title = String::from_utf16_lossy(&title_buf[..read as usize])
-            .trim()
-            .to_string();
-        if title.is_empty() {
-            return BOOL(1);
-        }
+            let mut title_buf = vec![0u16; max_chars + 1];
+            let read = GetWindowTextW(hwnd, &mut title_buf);
+            if read <= 0 {
+                return BOOL(1);
+            }
+            let valid_read = (read as usize).min(title_buf.len());
+            let title = String::from_utf16_lossy(&title_buf[..valid_read])
+                .trim()
+                .to_string();
+            if title.is_empty() {
+                return BOOL(1);
+            }
 
-        if title == "Program Manager"
-            || title == "Windows Shell Experience Host"
-            || title == "Settings"
-        {
-            return BOOL(1);
-        }
+            if title == "Program Manager"
+                || title == "Windows Shell Experience Host"
+                || title == "Settings"
+            {
+                return BOOL(1);
+            }
 
-        let mut pid: u32 = 0;
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid == 0 || pid == state.my_pid {
-            return BOOL(1);
-        }
+            let mut pid: u32 = 0;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid == 0 || pid == state.my_pid {
+                return BOOL(1);
+            }
 
-        if state.windows.iter().any(|w| w.pid == pid) {
-            return BOOL(1);
-        }
+            if state.windows.iter().any(|w| w.pid == pid) {
+                return BOOL(1);
+            }
 
-        let exe_name = query_process_exe_name(pid);
-        if should_exclude_process_exe(&exe_name) {
-            return BOOL(1);
-        }
+            let exe_name = query_process_exe_name(pid);
+            if should_exclude_process_exe(&exe_name) {
+                return BOOL(1);
+            }
 
-        state.windows.push(WindowInfo {
-            pid,
-            title,
-            exe: exe_name,
-        });
+            state.windows.push(WindowInfo {
+                pid,
+                title,
+                exe: exe_name,
+            });
 
-        BOOL(1)
+            BOOL(1)
+        }))
+        .unwrap_or(BOOL(1))
     }
 
     let mut state = EnumState {
@@ -197,36 +211,34 @@ pub fn list_application_windows() -> Vec<WindowInfo> {
 
     if let Ok(enumerator) = DeviceEnumerator::new() {
         if let Ok(collection) = enumerator.get_device_collection(&Direction::Render) {
-            for device in &collection {
-                if let Ok(dev) = device {
-                    if let Ok(manager) = dev.get_iaudiosessionmanager() {
-                        if let Ok(sessions) = manager.get_audiosessionenumerator() {
-                            let count = sessions.get_count().unwrap_or(0);
-                            for i in 0..count {
-                                if let Ok(control) = sessions.get_session(i) {
-                                    if let Ok(session_pid) = control.get_process_id() {
-                                        if session_pid == 0 || session_pid == my_pid {
+            for dev in (&collection).into_iter().flatten() {
+                if let Ok(manager) = dev.get_iaudiosessionmanager() {
+                    if let Ok(sessions) = manager.get_audiosessionenumerator() {
+                        let count = sessions.get_count().unwrap_or(0);
+                        for i in 0..count {
+                            if let Ok(control) = sessions.get_session(i) {
+                                if let Ok(session_pid) = control.get_process_id() {
+                                    if session_pid == 0 || session_pid == my_pid {
+                                        continue;
+                                    }
+
+                                    if !state.windows.iter().any(|w| w.pid == session_pid) {
+                                        let exe_name = query_process_exe_name(session_pid);
+                                        if should_exclude_process_exe(&exe_name) {
                                             continue;
                                         }
 
-                                        if !state.windows.iter().any(|w| w.pid == session_pid) {
-                                            let exe_name = query_process_exe_name(session_pid);
-                                            if should_exclude_process_exe(&exe_name) {
-                                                continue;
-                                            }
+                                        let title = if !exe_name.is_empty() {
+                                            format!("App de Áudio: {}", exe_name)
+                                        } else {
+                                            format!("Processo de Áudio (PID {})", session_pid)
+                                        };
 
-                                            let title = if !exe_name.is_empty() {
-                                                format!("App de Áudio: {}", exe_name)
-                                            } else {
-                                                format!("Processo de Áudio (PID {})", session_pid)
-                                            };
-
-                                            state.windows.push(WindowInfo {
-                                                pid: session_pid,
-                                                title,
-                                                exe: exe_name,
-                                            });
-                                        }
+                                        state.windows.push(WindowInfo {
+                                            pid: session_pid,
+                                            title,
+                                            exe: exe_name,
+                                        });
                                     }
                                 }
                             }
@@ -242,7 +254,10 @@ pub fn list_application_windows() -> Vec<WindowInfo> {
 
 #[cfg(test)]
 mod tests {
-    use super::{select_discord_root_pid, should_exclude_process_exe};
+    use super::{
+        bounded_window_text_len, decode_utf16_nul_terminated, select_discord_root_pid,
+        should_exclude_process_exe,
+    };
 
     #[test]
     fn selects_root_discord_process_whose_parent_is_not_discord() {
@@ -264,5 +279,25 @@ mod tests {
         assert!(should_exclude_process_exe("neutralino-win_x64.exe"));
         assert!(!should_exclude_process_exe("spotify.exe"));
         assert!(!should_exclude_process_exe("Discord.exe"));
+    }
+
+    #[test]
+    fn decode_utf16_nul_terminated_ignores_trailing_garbage_after_first_nul() {
+        let mut buf: Vec<u16> = "Discord.exe".encode_utf16().collect();
+        buf.push(0);
+        buf.extend("old_process_name.exe\0\0".encode_utf16());
+        assert_eq!(decode_utf16_nul_terminated(&buf), "Discord.exe");
+
+        assert_eq!(decode_utf16_nul_terminated(&[]), "");
+        let no_nul: Vec<u16> = "spotify.exe".encode_utf16().collect();
+        assert_eq!(decode_utf16_nul_terminated(&no_nul), "spotify.exe");
+    }
+
+    #[test]
+    fn bounded_window_text_len_guards_negative_zero_and_oversized_lengths() {
+        assert_eq!(bounded_window_text_len(-1), None);
+        assert_eq!(bounded_window_text_len(0), None);
+        assert_eq!(bounded_window_text_len(42), Some(42));
+        assert_eq!(bounded_window_text_len(i32::MAX), Some(4096));
     }
 }

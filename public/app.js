@@ -8,7 +8,8 @@ import {
     startDesktopCaptureWith,
     startAppAudioCapture,
     startExcludeDiscordCapture,
-    stopAppAudioCapture
+    stopAppAudioCapture,
+    registerDesktopCaptureListeners
 } from './js/modules/desktop-audio.js';
 import { sanitizeRoomId, generateRandomRoomId } from './js/modules/room-utils.js';
 import {
@@ -53,6 +54,12 @@ import {
 if (isDesktopApp()) {
     checkDiscordStatus();
     fetchWindowList();
+    registerDesktopCaptureListeners((payload) => {
+        if (typeof showToast === 'function') {
+            const detail = payload && payload.reason ? ` (${payload.reason})` : '';
+            showToast(`Captura de áudio do aplicativo interrompida${detail}.`, 'warning', 5000);
+        }
+    }).catch(() => {});
     window.addEventListener('beforeunload', () => {
         if (window.StreamGridDesktop) {
             window.StreamGridDesktop.stopAppAudioCapture().catch(() => {});
