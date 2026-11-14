@@ -18,7 +18,55 @@ function notifyFullscreenChange() {
 
 
 
-export function disposeTileElement(tileEl, documentObj = (typeof document !== 'undefined' ? document : null)) {
+/**
+ * @param {HTMLVideoElement | null} videoEl
+ * @param {{
+ *   documentObj?: import('./types.js').AnyDocument | null,
+ *   showToast?: import('./types.js').ShowToastFn
+ * }} [options]
+ */
+export async function toggleVideoPictureInPicture(
+    videoEl,
+    {
+        documentObj = /** @type {import('./types.js').AnyDocument | null} */ (typeof document !== 'undefined' ? document : null),
+        showToast = /** @type {import('./types.js').ShowToastFn} */ (() => {})
+    } = {}
+) {
+    if (!documentObj || !documentObj.pictureInPictureEnabled) {
+        showToast('Janela Flutuante (Picture-in-Picture) não é suportada neste navegador.', 'warning');
+        return false;
+    }
+
+    if (!videoEl) {
+        showToast('Nenhuma transmissão ativa para abrir em janela flutuante.', 'info');
+        return false;
+    }
+
+    try {
+        if (documentObj.pictureInPictureElement === videoEl) {
+            await documentObj.exitPictureInPicture();
+            return true;
+        }
+
+        if (typeof videoEl.requestPictureInPicture !== 'function') {
+            showToast('Este vídeo não suporta janela flutuante (PiP).', 'warning');
+            return false;
+        }
+
+        await videoEl.requestPictureInPicture();
+        return true;
+    } catch (err) {
+        console.error('[PiP] Falha ao alternar Picture-in-Picture:', err);
+        showToast('Não foi possível ativar a janela flutuante: ' + (err && err.message ? err.message : 'Erro desconhecido'), 'error');
+        return false;
+    }
+}
+
+/**
+ * @param {any} tileEl
+ * @param {import('./types.js').AnyDocument | null} [documentObj]
+ */
+export function disposeTileElement(tileEl, documentObj = /** @type {import('./types.js').AnyDocument | null} */ (typeof document !== 'undefined' ? document : null)) {
     if (!tileEl) return;
     if (typeof tileEl._cleanupTapUnmute === 'function') {
         tileEl._cleanupTapUnmute();
@@ -44,7 +92,12 @@ export function disposeTileElement(tileEl, documentObj = (typeof document !== 'u
     }
 }
 
-export function toggleTileFullscreen(tile, video, documentObj = (typeof document !== 'undefined' ? document : null)) {
+/**
+ * @param {any} tile
+ * @param {any} video
+ * @param {import('./types.js').AnyDocument | null} [documentObj]
+ */
+export function toggleTileFullscreen(tile, video, documentObj = /** @type {import('./types.js').AnyDocument | null} */ (typeof document !== 'undefined' ? document : null)) {
     if (!tile) return;
 
     // 1. If currently in pseudo-fullscreen, exit it
@@ -121,24 +174,8 @@ export function enterPseudoFullscreen(tile, documentObj = (typeof document !== '
 export function showTapToUnmuteBadge(tile, video, documentObj = (typeof document !== 'undefined' ? document : null)) {
     if (!tile || tile.querySelector('.tap-unmute-badge') || !documentObj || typeof documentObj.createElement !== 'function') return;
     const badge = documentObj.createElement('div');
-    badge.className = 'tap-unmute-badge';
+    badge.className = 'tap-unmute-badge tile-unmute-badge';
     badge.innerHTML = '<i class="fa-solid fa-volume-xmark"></i> Toque para ativar o som';
-    badge.style.cssText = `
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        background: rgba(15, 18, 26, 0.9);
-        color: #fff;
-        padding: 10px 18px;
-        border-radius: 24px;
-        font-size: 0.85rem;
-        font-weight: 600;
-        border: 1px solid var(--border);
-        box-shadow: 0 4px 18px rgba(0,0,0,0.5);
-        cursor: pointer;
-        z-index: 15;
-    `;
     const cleanup = () => {
         badge.removeEventListener('click', unmute);
         tile.removeEventListener('click', unmute);

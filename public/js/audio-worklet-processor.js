@@ -85,7 +85,7 @@ class PCMRingBufferProcessor extends AudioWorkletProcessor {
         this.fadeInIndex = 0;
     }
 
-    process(inputs, outputs, parameters) {
+    process(inputs, outputs, _parameters) {
         if (this.stopped) return false;
         if (!outputs || outputs.length === 0) return true;
         const output = outputs[0];

@@ -4,12 +4,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, Notify};
 use wasapi::{initialize_mta, AudioClient, Direction, SampleType, StreamMode, WaveFormat};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+use windows::Win32::System::Threading::{
+    OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+};
 
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: u16 = 2;
 pub const CHUNK_FRAMES: usize = 480; // 10ms @ 48kHz
 const MAX_SILENCE_BURST_FRAMES: usize = 4_800; // Max 100ms burst to prevent runaway
 const MAX_QUEUED_FRAMES: usize = (SAMPLE_RATE as usize) / 2; // 500ms cap = 24_000 frames
+const PROCESS_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Sinalizador assíncrono de encerramento da thread OS de captura WASAPI.
 #[derive(Clone, Default)]
@@ -46,6 +51,69 @@ struct ExitSignalGuard(CaptureExitSignal);
 impl Drop for ExitSignalGuard {
     fn drop(&mut self) {
         self.0.mark_finished();
+    }
+}
+
+fn should_poll_process(last_checked: Instant, now: Instant, interval: Duration) -> bool {
+    now.saturating_duration_since(last_checked) >= interval
+}
+
+fn target_exited_reason(pid: u32, include_tree: bool) -> String {
+    if include_tree {
+        format!("O processo-alvo (PID {}) foi encerrado", pid)
+    } else {
+        format!("O processo excluído (PID {}) foi encerrado", pid)
+    }
+}
+
+struct TargetProcessWatcher {
+    handle: HANDLE,
+    last_checked: Instant,
+}
+
+impl TargetProcessWatcher {
+    fn open(pid: u32, now: Instant) -> Option<Self> {
+        // SAFETY: OpenProcess returns an owned HANDLE on success, closed once in Drop.
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                false,
+                pid,
+            )
+        }
+        .ok()?;
+        if handle.is_invalid() {
+            return None;
+        }
+        Some(Self {
+            handle,
+            last_checked: now,
+        })
+    }
+
+    fn has_exited(&self) -> bool {
+        // SAFETY: self.handle is a valid process HANDLE owned by self until Drop.
+        let wait_result = unsafe { WaitForSingleObject(self.handle, 0) };
+        wait_result == WAIT_OBJECT_0
+    }
+
+    fn poll_exited(&mut self, now: Instant) -> bool {
+        if !should_poll_process(self.last_checked, now, PROCESS_CHECK_INTERVAL) {
+            return false;
+        }
+        self.last_checked = now;
+        self.has_exited()
+    }
+}
+
+impl Drop for TargetProcessWatcher {
+    fn drop(&mut self) {
+        if !self.handle.is_invalid() {
+            // SAFETY: self.handle is exclusively owned and closed once on Drop.
+            unsafe {
+                let _ = CloseHandle(self.handle);
+            }
+        }
     }
 }
 
@@ -254,6 +322,7 @@ where
         let mut silence_sync = SilenceSyncTracker::new(Instant::now());
         let mut total_frames_sent: u64 = 0;
         let mut unexpected_reason: Option<String> = None;
+        let mut process_watcher = TargetProcessWatcher::open(pid, Instant::now());
 
         while !stop_signal.load(Ordering::Acquire) {
             let mut read_error = false;
@@ -288,6 +357,16 @@ where
                 break;
             }
 
+            let now = Instant::now();
+            if let Some(watcher) = process_watcher.as_mut() {
+                if watcher.poll_exited(now) {
+                    if !stop_signal.load(Ordering::Acquire) {
+                        unexpected_reason = Some(target_exited_reason(pid, include_tree));
+                    }
+                    break;
+                }
+            }
+
             let dropped_frames =
                 trim_sample_queue_excess(&mut sample_queue, MAX_QUEUED_FRAMES, blockalign);
             total_frames_sent += dropped_frames as u64;
@@ -304,7 +383,7 @@ where
 
             let current_queued_frames = (sample_queue.len() / blockalign) as u64;
             let missing_frames = silence_sync.compute_missing_or_resync(
-                Instant::now(),
+                now,
                 total_frames_sent,
                 current_queued_frames,
             );
@@ -342,10 +421,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_missing_silence_frames, flush_sample_chunks, trim_sample_queue_excess,
-        SilenceSyncTracker, CHUNK_FRAMES, MAX_SILENCE_BURST_FRAMES,
+        compute_missing_silence_frames, flush_sample_chunks, should_poll_process,
+        target_exited_reason, trim_sample_queue_excess, SilenceSyncTracker, TargetProcessWatcher,
+        CHUNK_FRAMES, MAX_SILENCE_BURST_FRAMES, PROCESS_CHECK_INTERVAL,
     };
     use std::collections::VecDeque;
+    use std::process::Command;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
     use tokio::sync::mpsc;
@@ -467,5 +548,52 @@ mod tests {
 
         // blockalign = 0 is a safe no-op
         assert_eq!(trim_sample_queue_excess(&mut unaligned, 2, 0), 0);
+    }
+
+    #[test]
+    fn target_process_watcher_reports_active_self_and_exited_child() {
+        let now = Instant::now();
+        let self_watcher = TargetProcessWatcher::open(std::process::id(), now)
+            .expect("should open handle to current process");
+        assert!(!self_watcher.has_exited());
+
+        let mut child = Command::new("cmd")
+            .args(["/C", "exit 0"])
+            .spawn()
+            .expect("should spawn short-lived child process");
+        let child_pid = child.id();
+        let mut child_watcher =
+            TargetProcessWatcher::open(child_pid, now).expect("should open handle to child");
+
+        let status = child.wait().expect("should wait for child process");
+        assert!(status.success());
+        assert!(child_watcher.has_exited());
+
+        assert!(!child_watcher.poll_exited(now + Duration::from_millis(100)));
+        assert!(child_watcher.poll_exited(now + PROCESS_CHECK_INTERVAL));
+    }
+
+    #[test]
+    fn should_poll_process_and_reason_formatting() {
+        let t0 = Instant::now();
+        assert!(!should_poll_process(
+            t0,
+            t0 + Duration::from_millis(249),
+            PROCESS_CHECK_INTERVAL
+        ));
+        assert!(should_poll_process(
+            t0,
+            t0 + Duration::from_millis(250),
+            PROCESS_CHECK_INTERVAL
+        ));
+
+        assert_eq!(
+            target_exited_reason(4242, true),
+            "O processo-alvo (PID 4242) foi encerrado"
+        );
+        assert_eq!(
+            target_exited_reason(4242, false),
+            "O processo excluído (PID 4242) foi encerrado"
+        );
     }
 }

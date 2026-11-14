@@ -62,5 +62,66 @@ describe('Política de privacidade e proveniência CI', () => {
         assert.ok(workflow.includes('actions/attest-build-provenance'), 'workflow deve incluir attest-build-provenance');
         assert.ok(workflow.includes('id-token: write'), 'workflow deve ter id-token: write');
         assert.ok(workflow.includes('attestations: write'), 'workflow deve ter attestations: write');
+        assert.ok(workflow.includes('npm run lint'), 'workflow deve executar npm run lint');
+        assert.ok(workflow.includes('npm run typecheck'), 'workflow deve executar npm run typecheck');
+    });
+
+    it('T5: formato ESM/CJS explícito elimina warnings MODULE_TYPELESS_PACKAGE_JSON e scripts lint/typecheck existem', async () => {
+        const { spawnSync } = require('node:child_process');
+        const rootDir = path.resolve(__dirname, '..');
+
+        const rootPkg = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'));
+        assert.strictEqual(rootPkg.type, 'commonjs');
+        assert.strictEqual(typeof rootPkg.scripts.lint, 'string');
+        assert.strictEqual(typeof rootPkg.scripts.typecheck, 'string');
+
+        const publicPkg = JSON.parse(fs.readFileSync(path.join(rootDir, 'public/package.json'), 'utf8'));
+        const jsPkg = JSON.parse(fs.readFileSync(path.join(rootDir, 'public/js/package.json'), 'utf8'));
+        const modulesPkg = JSON.parse(fs.readFileSync(path.join(rootDir, 'public/js/modules/package.json'), 'utf8'));
+        assert.strictEqual(publicPkg.type, 'module');
+        assert.strictEqual(jsPkg.type, 'commonjs');
+        assert.strictEqual(modulesPkg.type, 'module');
+
+        const modulesDir = path.join(rootDir, 'public/js/modules');
+        const moduleFiles = fs.readdirSync(modulesDir)
+            .filter((name) => name.endsWith('.js'))
+            .map((name) => path.join(modulesDir, name));
+        const targets = [path.join(rootDir, 'public/app.js'), ...moduleFiles];
+
+        const script = [
+            "const { pathToFileURL } = require('node:url');",
+            '(async () => {',
+            '  for (const filePath of JSON.parse(process.argv[1])) {',
+            '    await import(pathToFileURL(filePath).href);',
+            '  }',
+            '})().catch((err) => { console.error(err); process.exit(1); });'
+        ].join('\n');
+
+        const result = spawnSync(process.execPath, ['-e', script, JSON.stringify(targets)], {
+            cwd: rootDir,
+            encoding: 'utf8'
+        });
+        assert.strictEqual(result.status, 0, `Import de módulos ES falhou: ${result.stderr}`);
+        assert.strictEqual(
+            result.stderr.includes('MODULE_TYPELESS_PACKAGE_JSON'),
+            false,
+            `Stderr não deve conter MODULE_TYPELESS_PACKAGE_JSON: ${result.stderr}`
+        );
+    });
+
+    it('T6: README.md e PRIVACY.md refletem recursos v1.1.0, STUN/TURN atualizados e sessionStorage', () => {
+        const readme = fs.readFileSync(path.resolve(__dirname, '../README.md'), 'utf8');
+        const privacy = fs.readFileSync(path.resolve(__dirname, '../PRIVACY.md'), 'utf8');
+
+        assert.ok(readme.includes('v1.1.0'), 'README.md deve atualizar badge para v1.1.0');
+        assert.ok(readme.includes('Spotlight'), 'README.md deve documentar Modo Spotlight');
+        assert.ok(readme.includes('Picture-in-Picture'), 'README.md deve documentar PiP');
+        assert.ok(readme.includes("style-src 'self'"), 'README.md deve documentar CSP style-src self');
+        assert.ok(readme.includes('npm run lint'), 'README.md deve documentar npm run lint');
+        assert.ok(readme.includes('npm run typecheck'), 'README.md deve documentar npm run typecheck');
+
+        assert.ok(privacy.includes('stun.cloudflare.com:3478'), 'PRIVACY.md deve alinhar STUN com src/server/ice.js');
+        assert.ok(privacy.includes('check-room'), 'PRIVACY.md deve mencionar rate limit em check-room');
+        assert.ok(privacy.includes('streamgrid_room_pass'), 'PRIVACY.md deve documentar uso de sessionStorage');
     });
 });

@@ -116,6 +116,7 @@ function createScreenShareEnv(mods, overrides = {}) {
             applyQualityModeUI: () => {}
         }),
         startExcludeDiscordCapture: overrides.startExcludeDiscordCapture || (async () => null),
+        startExcludeAppCapture: overrides.startExcludeAppCapture || null,
         startAppAudioCapture: overrides.startAppAudioCapture || (async () => null),
         stopAppAudioCapture: () => events.push({ type: 'stopAppAudioCapture' }),
         showToast: (msg, toastType) => events.push({ type: 'toast', msg, toastType }),
@@ -198,13 +199,14 @@ test('T2: Errors after getDisplayMedia roll back tracks, WASAPI capture, cable t
     assert.ok(envB.events.some((e) => e.type === 'stopAppAudioCapture'));
     assert.equal(envB.state.localStream, null);
 
-    // 2c: system mode with extra cableStream tracks + tile error
+    // 2c: system mode with VB-Cable opt-in + extra cableStream tracks + tile error
     const videoTrackC = createMockTrack('video', 'v-c');
     const cableTrack1 = createMockTrack('audio', 'cab-1');
     const cableTrackExtra = createMockTrack('audio', 'cab-2');
     const envC = createScreenShareEnv(mods, {
         createStreamTile: () => { throw new Error('Tile fail on cable'); }
     });
+    envC.state.useVbCableAudio = true;
     envC.navigatorObj.mediaDevices.enumerateDevices = async () => [
         { kind: 'audioinput', deviceId: 'cable-id-1', label: 'CABLE Output (VB-Audio Virtual Cable)' }
     ];
@@ -260,13 +262,14 @@ test('T3: Rejected/undefined replaceTrack never triggers unhandledRejection acro
     }
 });
 
-test('T4: system mode avoids spurious mic permission prompt and warns when VB-Cable capture fails', async () => {
+test('T4: system mode ignores VB-Cable by default and supports opt-in with mic permission guard', async () => {
     const mods = await loadModules();
 
-    // 4a: permission prompt + empty labels -> does NOT call getUserMedia({ audio: true })
+    // 4a: opt-in enabled + permission prompt + empty labels -> does NOT call getUserMedia({ audio: true })
     let micPromptCalled = false;
     let displayMediaAudioOpt = null;
     const envA = createScreenShareEnv(mods);
+    envA.state.useVbCableAudio = true;
     envA.navigatorObj.permissions = { query: async () => ({ state: 'prompt' }) };
     envA.navigatorObj.mediaDevices.enumerateDevices = async () => [{ kind: 'audioinput', deviceId: 'dev-1', label: '' }];
     envA.navigatorObj.mediaDevices.getUserMedia = async (constraints) => {
@@ -281,9 +284,11 @@ test('T4: system mode avoids spurious mic permission prompt and warns when VB-Ca
     await envA.controller.startScreenShare('system');
     assert.equal(micPromptCalled, false);
     assert.ok(displayMediaAudioOpt && typeof displayMediaAudioOpt === 'object');
+    assert.ok(envA.events.some((e) => e.type === 'toast' && e.toastType === 'warning'));
 
-    // 4b: VB-Cable fails -> emits actionable warning toast
+    // 4b: opt-in enabled + VB-Cable fails -> emits actionable warning toast
     const envB = createScreenShareEnv(mods);
+    envB.state.useVbCableAudio = true;
     envB.navigatorObj.permissions = { query: async () => ({ state: 'granted' }) };
     envB.navigatorObj.mediaDevices.enumerateDevices = async () => [
         { kind: 'audioinput', deviceId: 'cable-1', label: 'CABLE Output (VB-Audio Virtual Cable)' }
@@ -295,6 +300,32 @@ test('T4: system mode avoids spurious mic permission prompt and warns when VB-Ca
 
     await envB.controller.startScreenShare('system');
     assert.ok(envB.events.some((e) => e.type === 'toast' && e.toastType === 'warning'));
+
+    // 4c: default system mode (no opt-in) ignores VB-Cable even when present, skips enumerateDevices/getUserMedia, and uses native getDisplayMedia audio
+    let enumerateCalled = false;
+    let userMediaCalled = false;
+    let nativeDisplayOpts = null;
+    const nativeVideo = createMockTrack('video', 'v-native');
+    const nativeAudio = createMockTrack('audio', 'a-native');
+    const envC = createScreenShareEnv(mods);
+    envC.navigatorObj.mediaDevices.enumerateDevices = async () => {
+        enumerateCalled = true;
+        return [{ kind: 'audioinput', deviceId: 'cable-1', label: 'CABLE Output (VB-Audio Virtual Cable)' }];
+    };
+    envC.navigatorObj.mediaDevices.getUserMedia = async () => {
+        userMediaCalled = true;
+        return new MockMediaStream([createMockTrack('audio', 'a-cable')]);
+    };
+    envC.navigatorObj.mediaDevices.getDisplayMedia = async (opts) => {
+        nativeDisplayOpts = opts;
+        return new MockMediaStream([nativeVideo, nativeAudio]);
+    };
+
+    await envC.controller.startScreenShare('system');
+    assert.equal(enumerateCalled, false, 'Sem opt-in, não deve enumerar dispositivos');
+    assert.equal(userMediaCalled, false, 'Sem opt-in, não deve chamar getUserMedia para VB-Cable');
+    assert.ok(nativeDisplayOpts && typeof nativeDisplayOpts.audio === 'object');
+    assert.equal(envC.state.localStream.getAudioTracks()[0], nativeAudio);
 });
 
 test('T5: In-flight cancellation via stopScreenShare stops late tracks and avoids publishing stream', async () => {
@@ -336,7 +367,7 @@ test('T6: In-flight WASAPI capture cancelled by invalidateGeneration calls stopA
     let markEnteredWasapi;
     const enteredWasapi = new Promise((r) => { markEnteredWasapi = r; });
 
-    const videoTrack = createMockTrack('video', 'v-wasapi-cancel');
+    let displayMediaCalled = false;
     const wasapiTrack = createMockTrack('audio', 'a-wasapi-cancel', { _isDesktopWasapiTrack: true });
 
     const env = createScreenShareEnv(mods, {
@@ -345,18 +376,21 @@ test('T6: In-flight WASAPI capture cancelled by invalidateGeneration calls stopA
             return new Promise((resolve) => { resolveWasapi = resolve; });
         }
     });
-    env.navigatorObj.mediaDevices.getDisplayMedia = async () => new MockMediaStream([videoTrack]);
+    env.navigatorObj.mediaDevices.getDisplayMedia = async () => {
+        displayMediaCalled = true;
+        return new MockMediaStream([createMockTrack('video', 'v-wasapi-cancel')]);
+    };
 
     const sharePromise = env.controller.startScreenShare('exclude_discord');
     await enteredWasapi;
 
-    // Simula cleanupRoomState chamando invalidateGeneration antes de localStream ser criado
+    // Simula cleanupRoomState chamando invalidateGeneration antes de getDisplayMedia e localStream
     env.controller.invalidateGeneration();
     resolveWasapi(wasapiTrack);
     await sharePromise;
 
+    assert.equal(displayMediaCalled, false, 'getDisplayMedia não deve ser chamado se cancelado durante WASAPI');
     assert.equal(env.state.localStream, null);
-    assert.equal(videoTrack.stopped, true);
     assert.equal(wasapiTrack.stopped, true);
     assert.ok(env.events.some((e) => e.type === 'stopAppAudioCapture'), 'stopAppAudioCapture deve encerrar sessão WASAPI órfã');
 });
@@ -381,7 +415,6 @@ test('T7: startScreenShare awaits async replaceTrack in addLocalTracksToPC befor
         setParameters: async () => {}
     };
     const pc = createMockPeerConnection({ senders: [sender], transceivers: [{ direction: 'inactive', sender, receiver: { track: { kind: 'video' } } }] });
-    const peers = new Map([['peer-1', { pc }]]);
     const state = { roomId: 'r1', localStream: null, selectedVideoResolution: '1080p', selectedVideoFps: 60, contentHintMode: 'motion' };
     const doc = createMockDocument({ streamGrid: createMockElement('div', { id: 'streamGrid' }) });
     let mesh;
@@ -432,9 +465,8 @@ test('T7: startScreenShare awaits async replaceTrack in addLocalTracksToPC befor
     assert.ok(doneIdx !== -1 && offerIdx > doneIdx, 'sendOffer deve ocorrer somente após replaceTrack resolver');
 });
 
-test('T8: exclude_discord faz fallback para áudio do sistema quando exclusão do Discord falha', async () => {
+test('T8: exclude_discord faz fallback com único getDisplayMedia e limpa WASAPI se cancelado depois', async () => {
     const mods = await loadModules();
-    const videoOnlyTrack = createMockTrack('video', 'v-initial');
     const fallbackVideoTrack = createMockTrack('video', 'v-fallback');
     const fallbackAudioTrack = createMockTrack('audio', 'a-fallback-sys');
     const getDisplayCalls = [];
@@ -447,17 +479,13 @@ test('T8: exclude_discord faz fallback para áudio do sistema quando exclusão d
 
     env.navigatorObj.mediaDevices.getDisplayMedia = async (constraints) => {
         getDisplayCalls.push(constraints);
-        if (getDisplayCalls.length === 1) {
-            return new MockMediaStream([videoOnlyTrack]);
-        }
         return new MockMediaStream([fallbackVideoTrack, fallbackAudioTrack]);
     };
 
     await env.controller.startScreenShare('exclude_discord');
 
-    assert.equal(getDisplayCalls.length, 2, 'Deve tentar getDisplayMedia com áudio do sistema como fallback');
-    assert.equal(Boolean(getDisplayCalls[1].audio), true, 'Segunda chamada deve solicitar áudio do sistema');
-    assert.equal(videoOnlyTrack.stopped, true, 'Track de vídeo inicial sem áudio deve ser encerrada ao assumir stream fallback');
+    assert.equal(getDisplayCalls.length, 1, 'Deve chamar getDisplayMedia apenas 1 vez já com áudio no fallback');
+    assert.equal(Boolean(getDisplayCalls[0].audio), true, 'Chamada única deve solicitar áudio do sistema');
     assert.ok(env.state.localStream, 'localStream deve permanecer ativo após fallback');
     assert.equal(env.state.localStream.getVideoTracks()[0], fallbackVideoTrack);
     assert.equal(env.state.localStream.getAudioTracks()[0], fallbackAudioTrack);
@@ -465,4 +493,107 @@ test('T8: exclude_discord faz fallback para áudio do sistema quando exclusão d
         env.events.some((e) => e.type === 'toast' && e.toastType === 'warning'),
         'Deve avisar o usuário via toast ao fazer fallback do modo excluir Discord'
     );
+
+    // 8b: startExcludeDiscordCapture tem sucesso, mas usuário cancela getDisplayMedia (NotAllowedError)
+    const wasapiTrackCancel = createMockTrack('audio', 'a-wasapi-not-allowed', { _isDesktopWasapiTrack: true });
+    const envCancel = createScreenShareEnv(mods, {
+        startExcludeDiscordCapture: async () => wasapiTrackCancel
+    });
+    envCancel.navigatorObj.mediaDevices.getDisplayMedia = async () => {
+        const err = new Error('Permission denied');
+        err.name = 'NotAllowedError';
+        throw err;
+    };
+
+    await envCancel.controller.startScreenShare('exclude_discord');
+    assert.equal(envCancel.state.localStream, null);
+    assert.equal(wasapiTrackCancel.stopped, true);
+    assert.ok(envCancel.events.some((e) => e.type === 'stopAppAudioCapture'));
+    assert.equal(envCancel.events.some((e) => e.type === 'toast' && e.toastType === 'error'), false);
+
+    // 8c: startExcludeDiscordCapture tem sucesso, mas share é invalidado durante getDisplayMedia
+    const wasapiTrackInv = createMockTrack('audio', 'a-wasapi-inv', { _isDesktopWasapiTrack: true });
+    const lateVideoInv = createMockTrack('video', 'v-inv');
+    let resolveDisplayInv;
+    let markEnteredInv;
+    const enteredDisplayInv = new Promise((r) => { markEnteredInv = r; });
+
+    const envInv = createScreenShareEnv(mods, {
+        startExcludeDiscordCapture: async () => wasapiTrackInv
+    });
+    envInv.navigatorObj.mediaDevices.getDisplayMedia = () => {
+        markEnteredInv();
+        return new Promise((resolve) => { resolveDisplayInv = resolve; });
+    };
+
+    const pInv = envInv.controller.startScreenShare('exclude_discord');
+    await enteredDisplayInv;
+    envInv.controller.invalidateGeneration();
+    resolveDisplayInv(new MockMediaStream([lateVideoInv]));
+    await pInv;
+
+    assert.equal(envInv.state.localStream, null);
+    assert.equal(lateVideoInv.stopped, true);
+    assert.equal(wasapiTrackInv.stopped, true);
+    assert.ok(envInv.events.some((e) => e.type === 'stopAppAudioCapture'));
+});
+
+test('T9: startScreenShare com modo app + excludeApp=true usa startExcludeAppCapture com fallback único e rollback', async () => {
+    const mods = await loadModules();
+
+    // 9a: sucesso usando startExcludeAppCapture(pid) e getDisplayMedia único com audio=false
+    const excludedAppTrack = createMockTrack('audio', 'a-excl-app', { _isDesktopWasapiTrack: true });
+    const screenVideoTrack = createMockTrack('video', 'v-excl-app');
+    const capturedPids = [];
+    const displayCalls = [];
+
+    const envOk = createScreenShareEnv(mods, {
+        startExcludeAppCapture: async (pid) => {
+            capturedPids.push(pid);
+            return excludedAppTrack;
+        }
+    });
+    envOk.navigatorObj.mediaDevices.getDisplayMedia = async (constraints) => {
+        displayCalls.push(constraints);
+        return new MockMediaStream([screenVideoTrack]);
+    };
+
+    await envOk.controller.startScreenShare('app', 5555, '1080p', 60, { excludeApp: true });
+    assert.deepEqual(capturedPids, [5555]);
+    assert.equal(displayCalls.length, 1);
+    assert.equal(displayCalls[0].audio, false);
+    assert.equal(envOk.state.localStream.getAudioTracks()[0], excludedAppTrack);
+
+    // 9b: falha de startExcludeAppCapture cai no fallback único com áudio do sistema + toast warning
+    const fallbackCalls = [];
+    const envFallback = createScreenShareEnv(mods, {
+        startExcludeAppCapture: async () => {
+            throw new Error('App protegido');
+        }
+    });
+    envFallback.navigatorObj.mediaDevices.getDisplayMedia = async (constraints) => {
+        fallbackCalls.push(constraints);
+        return new MockMediaStream([createMockTrack('video', 'v-fb'), createMockTrack('audio', 'a-fb')]);
+    };
+
+    await envFallback.controller.startScreenShare('app', 5555, '1080p', 60, { excludeApp: true });
+    assert.equal(fallbackCalls.length, 1);
+    assert.ok(fallbackCalls[0].audio && typeof fallbackCalls[0].audio === 'object');
+    assert.ok(envFallback.events.some((e) => e.type === 'toast' && e.toastType === 'warning'));
+
+    // 9c: cancelamento (NotAllowedError) após startExcludeAppCapture ter sucesso faz rollback
+    const wasapiCancelTrack = createMockTrack('audio', 'a-excl-cancel', { _isDesktopWasapiTrack: true });
+    const envCancel = createScreenShareEnv(mods, {
+        startExcludeAppCapture: async () => wasapiCancelTrack
+    });
+    envCancel.navigatorObj.mediaDevices.getDisplayMedia = async () => {
+        const err = new Error('Cancelled');
+        err.name = 'NotAllowedError';
+        throw err;
+    };
+
+    await envCancel.controller.startScreenShare('app', 5555, '1080p', 60, { excludeApp: true });
+    assert.equal(envCancel.state.localStream, null);
+    assert.equal(wasapiCancelTrack.stopped, true);
+    assert.ok(envCancel.events.some((e) => e.type === 'stopAppAudioCapture'));
 });

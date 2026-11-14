@@ -4,11 +4,11 @@ import {
     checkDiscordStatus,
     fetchWindowList,
     startExcludeDiscordCapture,
+    startExcludeAppCapture,
     startAppAudioCapture,
     stopAppAudioCapture,
     registerDesktopCaptureListeners
 } from './js/modules/desktop-audio.js';
-import { sanitizeRoomId, generateRandomRoomId } from './js/modules/room-utils.js';
 import {
     COLD_START_NOTICE_DELAY_MS,
     resolveSignalingServerUrl,
@@ -33,7 +33,6 @@ import { registerFullscreenChangeHandler } from './js/modules/tile-dom.js';
 import {
     getOrCreateClientId,
     loadSavedUserName,
-    saveUserName,
     loadSavedClientPreferences
 } from './js/modules/preferences.js';
 import { createStreamGridController } from './js/modules/stream-grid.js';
@@ -43,6 +42,7 @@ import { createStatsModalController } from './js/modules/stats-modal.js';
 import { createScreenShareController } from './js/modules/screen-share.js';
 import { createWebRtcMesh } from './js/modules/webrtc-mesh.js';
 import { createRoomModalController } from './js/modules/room-modal.js';
+import { trapModalTabKey } from './js/modules/modal-a11y.js';
 
 function collectDomReferences(doc) {
     if (!doc || typeof doc.getElementById !== 'function') return {};
@@ -60,8 +60,10 @@ function collectDomReferences(doc) {
         'btnThemeToggle',
         'shareConfigModal', 'btnCloseShareConfig', 'btnConfirmStartShare', 'btnRefreshAudioApps',
         'selectAudioApp', 'audioSourceExcludeDiscord', 'audioSourceApp', 'audioSourceSystem',
-        'audioSourceNone', 'appSelectorContainer',
-        'btnTogglePip', 'btnToggleStats', 'statsModal', 'btnCloseStatsModal', 'btnResetServerUrl'
+        'audioSourceNone', 'appSelectorContainer', 'appExcludeOptionContainer', 'chkExcludeSelectedApp',
+        'vbCableOptionContainer', 'chkUseVbCable',
+        'btnTogglePip', 'btnToggleStats', 'statsModal', 'btnCloseStatsModal',
+        'btnResetServerUrl', 'inputCustomServerUrl', 'btnSaveServerUrl'
     ];
     const dom = {};
     for (const id of ids) {
@@ -70,13 +72,29 @@ function collectDomReferences(doc) {
     return dom;
 }
 
+/**
+ * @typedef {import('./js/modules/types.js').AnyWindow} AnyWindow
+ * @typedef {import('./js/modules/types.js').AnyDocument} AnyDocument
+ */
+
+/**
+ * @param {{
+ *   windowObj?: AnyWindow | null,
+ *   documentObj?: AnyDocument | null,
+ *   navigatorObj?: Navigator | null,
+ *   storage?: Storage | null,
+ *   sessionStorageObj?: Storage | null,
+ *   ioFactory?: ((url: string, opts?: any) => any) | null,
+ *   serverUrl?: string
+ * }} [options]
+ */
 export function initApp({
-    windowObj = (typeof window !== 'undefined' ? window : null),
-    documentObj = (typeof document !== 'undefined' ? document : null),
+    windowObj = (typeof window !== 'undefined' ? /** @type {AnyWindow} */ (window) : null),
+    documentObj = (typeof document !== 'undefined' ? /** @type {AnyDocument} */ (document) : null),
     navigatorObj = (typeof navigator !== 'undefined' ? navigator : null),
     storage = (typeof localStorage !== 'undefined' ? localStorage : null),
     sessionStorageObj = (typeof sessionStorage !== 'undefined' ? sessionStorage : null),
-    ioFactory = (typeof io === 'function' ? io : null),
+    ioFactory = (typeof (/** @type {any} */ (globalThis)).io === 'function' ? (/** @type {any} */ (globalThis)).io : null),
     serverUrl: explicitServerUrl
 } = {}) {
     configureDesktopAudioRuntime({ windowObj, documentObj });
@@ -103,7 +121,9 @@ export function initApp({
         contentHintMode: 'motion',
         selectedVideoResolution: '1080p',
         selectedVideoFps: 60,
-        selectedAudioSource: null
+        selectedAudioSource: null,
+        useVbCableAudio: false,
+        excludeSelectedApp: false
     };
 
     const socket = typeof ioFactory === 'function'
@@ -203,6 +223,7 @@ export function initApp({
         getGrid: () => grid,
         getQosMonitor: () => qosMonitor,
         startExcludeDiscordCapture: () => startExcludeDiscordCapture(windowObj),
+        startExcludeAppCapture: (pid) => startExcludeAppCapture(pid, windowObj),
         startAppAudioCapture: (pid) => startAppAudioCapture(pid, windowObj),
         stopAppAudioCapture: () => stopAppAudioCapture(windowObj),
         showToast: boundShowToast,
@@ -225,6 +246,7 @@ export function initApp({
             storage,
             onApplied: () => qosMonitor.applyQualityModeUI()
         }),
+        documentObj,
         storage,
         windowObj
     });
@@ -419,6 +441,20 @@ export function initApp({
         }
 
         onKeyDown = (e) => {
+            if (e.key === 'Tab') {
+                let activeModalEl = null;
+                if (shareConfigCtrl.isShareConfigModalOpen()) {
+                    activeModalEl = dom.shareConfigModal;
+                } else if (statsModalCtrl.isStatsModalOpen()) {
+                    activeModalEl = dom.statsModal;
+                } else if (roomModalCtrl.isRoomModalOpen()) {
+                    activeModalEl = dom.roomModal;
+                }
+                if (activeModalEl) {
+                    trapModalTabKey(activeModalEl, e, documentObj);
+                }
+                return;
+            }
             if (e.key === 'Escape') {
                 if (shareConfigCtrl.isShareConfigModalOpen()) {
                     shareConfigCtrl.closeShareConfigModal();
@@ -434,6 +470,10 @@ export function initApp({
                     } else if (state.roomId) {
                         roomModalCtrl.closeRoomModal();
                     }
+                    return;
+                }
+                if (grid && typeof grid.isSpotlightActive === 'function' && grid.isSpotlightActive()) {
+                    grid.clearSpotlight();
                 }
             }
         };
@@ -458,6 +498,7 @@ export function initApp({
     };
 }
 
-if (typeof window !== 'undefined' && typeof document !== 'undefined' && typeof io === 'function' && !window.__STREAMGRID_SKIP_AUTO_INIT__) {
+const globalWindow = typeof window !== 'undefined' ? /** @type {AnyWindow} */ (window) : null;
+if (globalWindow && typeof document !== 'undefined' && typeof (/** @type {any} */ (globalThis)).io === 'function' && !globalWindow.__STREAMGRID_SKIP_AUTO_INIT__) {
     initApp();
 }

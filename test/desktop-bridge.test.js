@@ -97,6 +97,20 @@ describe('Desktop Bridge (Tauri v2 IPC & Modo Web)', () => {
         assert.strictEqual(received.length, 1);
         assert.strictEqual(Object.prototype.toString.call(received[0]), '[object ArrayBuffer]');
         assert.strictEqual(received[0].byteLength, 16);
+        const defaultCall = calls.find((c) => c.cmd === 'start_capture' && c.args.pid === 9001);
+        assert.strictEqual(defaultCall.args.exclude, false);
+
+        const receivedExcludeOpt = [];
+        await bridge.startAppAudioCapture(9002, (buf) => receivedExcludeOpt.push(buf), { exclude: true });
+        assert.strictEqual(receivedExcludeOpt.length, 1);
+        const optExcludeCall = calls.find((c) => c.cmd === 'start_capture' && c.args.pid === 9002);
+        assert.strictEqual(optExcludeCall.args.exclude, true);
+
+        const receivedExcludeHelper = [];
+        await bridge.startExcludeAppCapture(9003, (buf) => receivedExcludeHelper.push(buf));
+        assert.strictEqual(receivedExcludeHelper.length, 1);
+        const helperExcludeCall = calls.find((c) => c.cmd === 'start_capture' && c.args.pid === 9003);
+        assert.strictEqual(helperExcludeCall.args.exclude, true);
 
         const receivedExclude = [];
         await bridge.startExcludeDiscordCapture((buf) => receivedExclude.push(buf));

@@ -90,17 +90,22 @@
         return invokeCommand('list_windows');
     }
 
-    async function startAppAudioCapture(pid, onPcmBuffer) {
+    async function startAppAudioCapture(pid, onPcmBuffer, options = {}) {
         const numericPid = Number(pid);
         if (!Number.isInteger(numericPid) || numericPid <= 0 || numericPid > 4294967295) {
             throw new Error('PID inválido para captura de áudio.');
         }
+        const exclude = Boolean(options && options.exclude);
         const onAudio = createAudioChannel(onPcmBuffer);
         return invokeCommand('start_capture', {
             pid: numericPid,
-            exclude: false,
+            exclude,
             onAudio,
         });
+    }
+
+    async function startExcludeAppCapture(pid, onPcmBuffer) {
+        return startAppAudioCapture(pid, onPcmBuffer, { exclude: true });
     }
 
     async function startExcludeDiscordCapture(onPcmBuffer) {
@@ -135,6 +140,7 @@
         getDiscordStatus,
         listWindows,
         startAppAudioCapture,
+        startExcludeAppCapture,
         startExcludeDiscordCapture,
         stopAppAudioCapture,
         onCaptureStopped,

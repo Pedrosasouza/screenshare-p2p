@@ -2,20 +2,70 @@ import {
     VIDEO_RES_KEY,
     VIDEO_FPS_KEY,
     AUDIO_SOURCE_KEY,
+    USE_VB_CABLE_KEY,
+    EXCLUDE_SELECTED_APP_KEY,
     saveClientPreference
 } from './preferences.js';
+import { activateModalFocus, restoreModalFocus } from './modal-a11y.js';
 
+/**
+ * @typedef {import('./types.js').AppState} AppState
+ * @typedef {import('./types.js').DomRefs} DomRefs
+ * @typedef {import('./types.js').AnyDocument} AnyDocument
+ */
+
+/**
+ * @param {{
+ *   state: AppState,
+ *   dom?: DomRefs,
+ *   isDesktopApp?: () => boolean,
+ *   checkDiscordStatus?: () => void,
+ *   fetchWindowList?: () => void,
+ *   updateEchoWarningVisibility?: () => void,
+ *   onStartScreenShare?: (...args: any[]) => Promise<void>,
+ *   documentObj?: AnyDocument | null,
+ *   storage?: Storage | null
+ * }} options
+ */
 export function createShareConfigModalController({
     state,
-    dom = {},
+    dom = /** @type {DomRefs} */ ({}),
     isDesktopApp = () => false,
     checkDiscordStatus = () => {},
     fetchWindowList = () => {},
     updateEchoWarningVisibility = () => {},
     onStartScreenShare = async () => {},
-    documentObj = (typeof document !== 'undefined' ? document : null),
+    documentObj = (typeof document !== 'undefined' ? /** @type {AnyDocument} */ (document) : null),
     storage = (typeof localStorage !== 'undefined' ? localStorage : null)
-} = {}) {
+} = /** @type {any} */ ({})) {
+    let previousFocusEl = null;
+    function syncAudioOptionContainers() {
+        const {
+            audioSourceApp,
+            audioSourceSystem,
+            appSelectorContainer,
+            appExcludeOptionContainer,
+            vbCableOptionContainer
+        } = dom;
+
+        const checkedAudioRadio = documentObj && typeof documentObj.querySelector === 'function'
+            ? /** @type {HTMLInputElement | null} */ (documentObj.querySelector('input[name="audioSourceType"]:checked'))
+            : null;
+        const selectedMode = checkedAudioRadio ? checkedAudioRadio.value : null;
+        const isAppMode = selectedMode ? selectedMode === 'app' : Boolean(audioSourceApp && audioSourceApp.checked);
+        const isSystemMode = selectedMode ? selectedMode === 'system' : Boolean(audioSourceSystem && audioSourceSystem.checked);
+
+        if (appSelectorContainer) {
+            appSelectorContainer.style.display = isAppMode ? 'flex' : 'none';
+        }
+        if (appExcludeOptionContainer) {
+            appExcludeOptionContainer.style.display = (isDesktopApp() && isAppMode) ? 'flex' : 'none';
+        }
+        if (vbCableOptionContainer) {
+            vbCableOptionContainer.style.display = isSystemMode ? 'block' : 'none';
+        }
+    }
+
     function openShareConfigModal() {
         updateEchoWarningVisibility();
 
@@ -25,7 +75,8 @@ export function createShareConfigModalController({
             audioSourceApp,
             audioSourceSystem,
             audioSourceNone,
-            appSelectorContainer
+            chkUseVbCable,
+            chkExcludeSelectedApp
         } = dom;
 
         const isDesktop = isDesktopApp();
@@ -46,7 +97,6 @@ export function createShareConfigModalController({
             const webSource = preferredAudioSource === 'none' && audioSourceNone ? 'none' : 'system';
             if (audioSourceNone) audioSourceNone.checked = webSource === 'none';
             if (audioSourceSystem) audioSourceSystem.checked = webSource === 'system';
-            if (appSelectorContainer) appSelectorContainer.style.display = 'none';
         } else {
             if (desktopOnlyCard1) desktopOnlyCard1.style.display = 'flex';
             if (desktopOnlyCard2) desktopOnlyCard2.style.display = 'flex';
@@ -62,18 +112,17 @@ export function createShareConfigModalController({
                     if (r) r.checked = r === targetRadio;
                 });
             }
-            if (appSelectorContainer) {
-                const checkedAudioRadio = documentObj && typeof documentObj.querySelector === 'function'
-                    ? documentObj.querySelector('input[name="audioSourceType"]:checked')
-                    : null;
-                const isAppMode = checkedAudioRadio
-                    ? checkedAudioRadio.value === 'app'
-                    : Boolean(audioSourceApp && audioSourceApp.checked);
-                appSelectorContainer.style.display = isAppMode ? 'flex' : 'none';
-            }
             checkDiscordStatus();
             fetchWindowList();
         }
+
+        if (chkUseVbCable) {
+            chkUseVbCable.checked = Boolean(state.useVbCableAudio);
+        }
+        if (chkExcludeSelectedApp) {
+            chkExcludeSelectedApp.checked = Boolean(state.excludeSelectedApp);
+        }
+        syncAudioOptionContainers();
 
         const audioRadios = (documentObj && typeof documentObj.querySelectorAll === 'function')
             ? documentObj.querySelectorAll('input[name="audioSourceType"]')
@@ -91,15 +140,19 @@ export function createShareConfigModalController({
         });
 
         if (documentObj && typeof documentObj.querySelector === 'function') {
-            const resRadio = documentObj.querySelector(`input[name="videoResolution"][value="${state.selectedVideoResolution}"]`);
+            const resRadio = /** @type {HTMLInputElement | null} */ (documentObj.querySelector(`input[name="videoResolution"][value="${state.selectedVideoResolution}"]`));
             if (resRadio) resRadio.checked = true;
-            const fpsRadio = documentObj.querySelector(`input[name="videoFps"][value="${state.selectedVideoFps}"]`);
+            const fpsRadio = /** @type {HTMLInputElement | null} */ (documentObj.querySelector(`input[name="videoFps"][value="${state.selectedVideoFps}"]`));
             if (fpsRadio) fpsRadio.checked = true;
         }
 
         if (shareConfigModal) {
+            const wasOpen = isShareConfigModalOpen();
             shareConfigModal.removeAttribute('hidden');
             shareConfigModal.style.display = 'flex';
+            if (!wasOpen) {
+                previousFocusEl = activateModalFocus(shareConfigModal, documentObj);
+            }
         }
     }
 
@@ -108,6 +161,8 @@ export function createShareConfigModalController({
         if (shareConfigModal) {
             shareConfigModal.setAttribute('hidden', '');
             shareConfigModal.style.display = 'none';
+            restoreModalFocus(previousFocusEl, documentObj);
+            previousFocusEl = null;
         }
     }
 
@@ -129,7 +184,8 @@ export function createShareConfigModalController({
             audioSourceApp,
             audioSourceSystem,
             audioSourceNone,
-            appSelectorContainer
+            chkUseVbCable,
+            chkExcludeSelectedApp
         } = dom;
 
         if (btnStartShare) btnStartShare.addEventListener('click', openShareConfigModal);
@@ -140,6 +196,20 @@ export function createShareConfigModalController({
             btnRefreshAudioApps.addEventListener('click', () => fetchWindowList());
         }
 
+        if (chkUseVbCable) {
+            chkUseVbCable.addEventListener('change', () => {
+                state.useVbCableAudio = Boolean(chkUseVbCable.checked);
+                saveClientPreference(USE_VB_CABLE_KEY, String(state.useVbCableAudio), storage);
+            });
+        }
+
+        if (chkExcludeSelectedApp) {
+            chkExcludeSelectedApp.addEventListener('change', () => {
+                state.excludeSelectedApp = Boolean(chkExcludeSelectedApp.checked);
+                saveClientPreference(EXCLUDE_SELECTED_APP_KEY, String(state.excludeSelectedApp), storage);
+            });
+        }
+
         [audioSourceExcludeDiscord, audioSourceApp, audioSourceSystem, audioSourceNone].forEach((radio) => {
             if (!radio) return;
             radio.addEventListener('change', () => {
@@ -147,9 +217,7 @@ export function createShareConfigModalController({
                     state.selectedAudioSource = radio.value;
                     saveClientPreference(AUDIO_SOURCE_KEY, radio.value, storage);
                 }
-                if (appSelectorContainer) {
-                    appSelectorContainer.style.display = (audioSourceApp && audioSourceApp.checked) ? 'flex' : 'none';
-                }
+                syncAudioOptionContainers();
                 const audioRadios = (documentObj && typeof documentObj.querySelectorAll === 'function')
                     ? documentObj.querySelectorAll('input[name="audioSourceType"]')
                     : [audioSourceExcludeDiscord, audioSourceApp, audioSourceSystem, audioSourceNone];
@@ -178,7 +246,7 @@ export function createShareConfigModalController({
             btnConfirmStartShare.addEventListener('click', async () => {
                 closeShareConfigModal();
                 const checkedMode = documentObj && typeof documentObj.querySelector === 'function'
-                    ? documentObj.querySelector('input[name="audioSourceType"]:checked')?.value
+                    ? /** @type {HTMLInputElement | null} */ (documentObj.querySelector('input[name="audioSourceType"]:checked'))?.value
                     : null;
                 const mode = checkedMode || 'exclude_discord';
                 state.selectedAudioSource = mode;
@@ -187,19 +255,36 @@ export function createShareConfigModalController({
                 const targetPid = selectAudioApp ? selectAudioApp.value : null;
 
                 if (documentObj && typeof documentObj.querySelector === 'function') {
-                    const resChoice = documentObj.querySelector('input[name="videoResolution"]:checked')?.value;
+                    const resChoice = /** @type {HTMLInputElement | null} */ (documentObj.querySelector('input[name="videoResolution"]:checked'))?.value;
                     if (resChoice === '720p' || resChoice === '1080p') {
                         state.selectedVideoResolution = resChoice;
                         saveClientPreference(VIDEO_RES_KEY, state.selectedVideoResolution, storage);
                     }
-                    const fpsChoice = Number(documentObj.querySelector('input[name="videoFps"]:checked')?.value);
+                    const fpsChoice = Number(/** @type {HTMLInputElement | null} */ (documentObj.querySelector('input[name="videoFps"]:checked'))?.value);
                     if (fpsChoice === 30 || fpsChoice === 60) {
                         state.selectedVideoFps = fpsChoice;
                         saveClientPreference(VIDEO_FPS_KEY, String(state.selectedVideoFps), storage);
                     }
                 }
 
-                await onStartScreenShare(mode, targetPid, state.selectedVideoResolution, state.selectedVideoFps);
+                if (chkUseVbCable) {
+                    state.useVbCableAudio = Boolean(chkUseVbCable.checked);
+                    saveClientPreference(USE_VB_CABLE_KEY, String(state.useVbCableAudio), storage);
+                }
+                if (chkExcludeSelectedApp) {
+                    state.excludeSelectedApp = Boolean(chkExcludeSelectedApp.checked);
+                    saveClientPreference(EXCLUDE_SELECTED_APP_KEY, String(state.excludeSelectedApp), storage);
+                }
+                const useVbCable = Boolean(chkUseVbCable ? chkUseVbCable.checked : state.useVbCableAudio);
+                const excludeApp = Boolean(chkExcludeSelectedApp ? chkExcludeSelectedApp.checked : state.excludeSelectedApp);
+
+                await onStartScreenShare(
+                    mode,
+                    targetPid,
+                    state.selectedVideoResolution,
+                    state.selectedVideoFps,
+                    { useVbCable, excludeApp }
+                );
             });
         }
     }

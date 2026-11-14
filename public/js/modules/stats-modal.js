@@ -1,20 +1,37 @@
 import { collectPeerTelemetry } from './qos.js';
 import { getActiveIceProvider, getIceProviderDisplayLabel } from './ice-config.js';
-import { SERVER_URL_STORAGE_KEY } from './signaling-url.js';
+import { SERVER_URL_STORAGE_KEY, saveCustomSignalingServerUrl } from './signaling-url.js';
+import { toggleVideoPictureInPicture } from './tile-dom.js';
+import { activateModalFocus, restoreModalFocus } from './modal-a11y.js';
 
+/**
+ * @param {{
+ *   state?: import('./types.js').AppState,
+ *   dom?: import('./types.js').DomRefs,
+ *   getPeers?: () => Map<string, any>,
+ *   getServerUrl?: () => string,
+ *   showToast?: import('./types.js').ShowToastFn,
+ *   documentObj?: import('./types.js').AnyDocument | null,
+ *   windowObj?: import('./types.js').AnyWindow | null,
+ *   storage?: Storage | null
+ * }} [options]
+ */
 export function createStatsModalController({
-    state,
-    dom = {},
+    state = /** @type {import('./types.js').AppState} */ ({}),
+    dom = /** @type {import('./types.js').DomRefs} */ ({}),
     getPeers = () => new Map(),
     getServerUrl = () => '',
-    showToast = () => {},
-    documentObj = (typeof document !== 'undefined' ? document : null),
-    windowObj = (typeof window !== 'undefined' ? window : null),
+    showToast = /** @type {import('./types.js').ShowToastFn} */ (() => {}),
+    documentObj = /** @type {import('./types.js').AnyDocument | null} */ (typeof document !== 'undefined' ? document : null),
+    windowObj = /** @type {import('./types.js').AnyWindow | null} */ (typeof window !== 'undefined' ? window : null),
     storage = (typeof localStorage !== 'undefined' ? localStorage : null)
 } = {}) {
     let statsUpdateInterval = null;
     let isStatsUpdateRunning = false;
     let statsUpdateGeneration = 0;
+    let previousFocusEl = null;
+
+    const getEl = (id) => (documentObj && typeof documentObj.getElementById === 'function' ? documentObj.getElementById(id) : null);
 
     async function updateStatsDisplay() {
         if (isStatsUpdateRunning) return;
@@ -22,7 +39,6 @@ export function createStatsModalController({
         isStatsUpdateRunning = true;
 
         try {
-            const getEl = (id) => (documentObj && typeof documentObj.getElementById === 'function' ? documentObj.getElementById(id) : null);
             const elConnectionState = getEl('statsConnectionState');
             const elRtt = getEl('statsRtt');
             const elPacketLoss = getEl('statsPacketLoss');
@@ -200,11 +216,25 @@ export function createStatsModalController({
     function openStatsModal() {
         const { statsModal } = dom;
         if (statsModal) {
+            const wasOpen = isStatsModalOpen();
             statsModal.removeAttribute('hidden');
             statsModal.style.display = 'flex';
+            const inputCustom = dom.inputCustomServerUrl || getEl('inputCustomServerUrl');
+            if (inputCustom) {
+                let savedOverride = '';
+                try {
+                    if (storage && typeof storage.getItem === 'function') {
+                        savedOverride = storage.getItem(SERVER_URL_STORAGE_KEY) || '';
+                    }
+                } catch (_) {}
+                inputCustom.value = savedOverride || getServerUrl() || '';
+            }
             updateStatsDisplay();
             if (statsUpdateInterval) clearInterval(statsUpdateInterval);
             statsUpdateInterval = setInterval(updateStatsDisplay, 1000);
+            if (!wasOpen) {
+                previousFocusEl = activateModalFocus(statsModal, documentObj);
+            }
         }
     }
 
@@ -216,6 +246,8 @@ export function createStatsModalController({
             stop();
             statsUpdateGeneration += 1;
             isStatsUpdateRunning = false;
+            restoreModalFocus(previousFocusEl, documentObj);
+            previousFocusEl = null;
         }
     }
 
@@ -232,32 +264,27 @@ export function createStatsModalController({
     }
 
     async function togglePictureInPicture() {
-        if (!documentObj || !documentObj.pictureInPictureEnabled) {
-            showToast('Janela Flutuante (Picture-in-Picture) não é suportada neste navegador.', 'warning');
-            return;
+        const activePipEl = documentObj ? documentObj.pictureInPictureElement : null;
+        const streamGrid = dom.streamGrid;
+        const remoteVideo = streamGrid ? streamGrid.querySelector('.stream-tile:not(#localStreamTile) video') : null;
+        const localVideo = streamGrid ? streamGrid.querySelector('#localStreamTile video') : null;
+        const targetVideo = activePipEl || remoteVideo || localVideo || (streamGrid ? streamGrid.querySelector('video') : null);
+        return toggleVideoPictureInPicture(targetVideo, { documentObj, showToast });
+    }
+
+    function saveCustomServerUrl() {
+        const inputCustom = dom.inputCustomServerUrl || getEl('inputCustomServerUrl');
+        const rawUrl = inputCustom ? inputCustom.value : '';
+        const result = saveCustomSignalingServerUrl(rawUrl, { windowObj, storage });
+        if (!result.ok) {
+            showToast(result.error, 'error', 4000);
+            return result;
         }
-
-        try {
-            if (documentObj.pictureInPictureElement) {
-                await documentObj.exitPictureInPicture();
-                return;
-            }
-
-            const streamGrid = dom.streamGrid;
-            const remoteVideo = streamGrid ? streamGrid.querySelector('.stream-tile:not(#localStreamTile) video') : null;
-            const localVideo = streamGrid ? streamGrid.querySelector('#localStreamTile video') : null;
-            const targetVideo = remoteVideo || localVideo || (streamGrid ? streamGrid.querySelector('video') : null);
-
-            if (!targetVideo) {
-                showToast('Nenhuma transmissão ativa para abrir em janela flutuante.', 'info');
-                return;
-            }
-
-            await targetVideo.requestPictureInPicture();
-        } catch (err) {
-            console.error('[PiP] Falha ao alternar Picture-in-Picture:', err);
-            showToast('Não foi possível ativar a janela flutuante: ' + (err.message || 'Erro desconhecido'), 'error');
+        showToast(`Servidor atualizado para ${result.url}. Recarregando...`, 'info', 2500);
+        if (windowObj && windowObj.location && typeof windowObj.location.reload === 'function') {
+            windowObj.location.reload();
         }
+        return result;
     }
 
     function resetSavedSignalingServerUrl() {
@@ -281,7 +308,18 @@ export function createStatsModalController({
 
     function bindEvents() {
         const { btnTogglePip, btnResetServerUrl, btnToggleStats, btnCloseStatsModal, statsModal } = dom;
+        const inputCustomServerUrl = dom.inputCustomServerUrl || getEl('inputCustomServerUrl');
+        const btnSaveServerUrl = dom.btnSaveServerUrl || getEl('btnSaveServerUrl');
         if (btnTogglePip) btnTogglePip.addEventListener('click', togglePictureInPicture);
+        if (btnSaveServerUrl) btnSaveServerUrl.addEventListener('click', saveCustomServerUrl);
+        if (inputCustomServerUrl) {
+            inputCustomServerUrl.addEventListener('keydown', (e) => {
+                if (e && e.key === 'Enter') {
+                    if (typeof e.preventDefault === 'function') e.preventDefault();
+                    saveCustomServerUrl();
+                }
+            });
+        }
         if (btnResetServerUrl) btnResetServerUrl.addEventListener('click', resetSavedSignalingServerUrl);
         if (btnToggleStats) btnToggleStats.addEventListener('click', openStatsModal);
         if (btnCloseStatsModal) btnCloseStatsModal.addEventListener('click', closeStatsModal);
@@ -301,6 +339,7 @@ export function createStatsModalController({
         isStatsModalOpen,
         stop,
         togglePictureInPicture,
+        saveCustomServerUrl,
         resetSavedSignalingServerUrl,
         bindEvents
     };

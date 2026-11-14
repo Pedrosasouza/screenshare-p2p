@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="referrer" content="no-referrer">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>StreamGrid - Compartilhamento de Tela Multi-Transmissão</title>
     <link rel="stylesheet" href="vendor/inter/inter.css">
     <link rel="stylesheet" href="style.css">
@@ -57,14 +57,14 @@
         </header>
 
         <!-- Room Entry Modal (Two-Step Flow: Choice -> Create or Join) -->
-        <div class="modal-overlay" id="roomModal" role="dialog" aria-modal="true">
+        <div class="modal-overlay" id="roomModal" role="dialog" aria-modal="true" aria-labelledby="roomModalTitle">
             <div class="room-card">
-                <button class="room-card-close" id="btnCloseRoomModal" title="Fechar e voltar à sala (ESC)" aria-label="Fechar e voltar à sala (ESC)" type="button" style="display: none;">
+                <button class="room-card-close" id="btnCloseRoomModal" title="Fechar e voltar à sala (ESC)" aria-label="Fechar e voltar à sala (ESC)" type="button">
                     <i class="fa-solid fa-xmark"></i>
                 </button>
 
                 <!-- Global Error Banner across views -->
-                <div class="error-banner" id="roomErrorBanner" style="display: none;" hidden></div>
+                <div class="error-banner" id="roomErrorBanner" hidden></div>
 
                 <!-- SUBVIEW 1: Choice Screen (Criar vs Entrar) -->
                 <div class="room-subview" id="roomViewChoice">
@@ -72,7 +72,7 @@
                         <div class="icon-badge">
                             <i class="fa-solid fa-layer-group"></i>
                         </div>
-                        <h2>Salas de Transmissão</h2>
+                        <h2 id="roomModalTitle">Salas de Transmissão</h2>
                         <p>Como você deseja começar? Crie sua própria sala exclusiva ou entre na sala de um amigo.</p>
                     </div>
 
@@ -104,7 +104,7 @@
                         </button>
                     </div>
 
-                    <div class="room-choice-footer" id="roomChoiceCancelContainer" style="display: none;">
+                    <div class="room-choice-footer" id="roomChoiceCancelContainer">
                         <button class="btn btn-secondary btn-block" id="btnCancelRoomModal" type="button">
                             <i class="fa-solid fa-arrow-left"></i> Cancelar e Voltar à Sala Atual
                         </button>
@@ -112,7 +112,7 @@
                 </div>
 
                 <!-- SUBVIEW 2: Create New Room -->
-                <div class="room-subview" id="roomViewCreate" style="display: none;" hidden>
+                <div class="room-subview" id="roomViewCreate" hidden>
                     <div class="card-header">
                         <div class="icon-badge">
                             <i class="fa-solid fa-wand-magic-sparkles"></i>
@@ -177,7 +177,7 @@
                 </div>
 
                 <!-- SUBVIEW 3: Join Existing Room -->
-                <div class="room-subview" id="roomViewJoin" style="display: none;" hidden>
+                <div class="room-subview" id="roomViewJoin" hidden>
                     <div class="card-header">
                         <div class="icon-badge">
                             <i class="fa-solid fa-right-to-bracket"></i>
@@ -239,23 +239,21 @@
         <!-- Main Stream Workspace (Video Grid) -->
         <main class="stream-main">
             <!-- Dynamic Video Stream Grid -->
-            <div class="stream-grid" id="streamGrid">
-                
-                <!-- Empty State (Shown when no active streams exist) -->
-                <div class="empty-grid-placeholder" id="emptyGridPlaceholder">
-                    <div class="placeholder-card">
-                        <div class="pulse-icon">
-                            <i class="fa-solid fa-display"></i>
-                        </div>
-                        <h3>Nenhuma tela sendo compartilhada no momento</h3>
-                        <p>Qualquer pessoa na sala pode compartilhar a tela ao mesmo tempo em 1080p com áudio do computador.</p>
-                        
-                        <button class="btn btn-primary btn-lg" id="btnStartShareBig" type="button">
-                            <i class="fa-solid fa-display"></i> Compartilhar Minha Tela
-                        </button>
-                    </div>
-                </div>
+            <div class="stream-grid" id="streamGrid"></div>
 
+            <!-- Empty State (Shown when no active streams exist) -->
+            <div class="empty-grid-placeholder" id="emptyGridPlaceholder">
+                <div class="placeholder-card">
+                    <div class="pulse-icon">
+                        <i class="fa-solid fa-display"></i>
+                    </div>
+                    <h3>Nenhuma tela sendo compartilhada no momento</h3>
+                    <p>Qualquer pessoa na sala pode compartilhar a tela ao mesmo tempo em 1080p com áudio do computador.</p>
+                    
+                    <button class="btn btn-primary btn-lg" id="btnStartShareBig" type="button">
+                        <i class="fa-solid fa-display"></i> Compartilhar Minha Tela
+                    </button>
+                </div>
             </div>
         </main>
 
@@ -292,46 +290,46 @@
         </footer>
 
         <!-- Screen Share Configuration Modal (App Audio Isolation) -->
-        <div class="modal-overlay" id="shareConfigModal" role="dialog" aria-modal="true" style="display: none;" hidden>
+        <div class="modal-overlay" id="shareConfigModal" role="dialog" aria-modal="true" aria-labelledby="shareConfigModalTitle" hidden>
             <div class="modal-card modal-sm">
                 <div class="modal-header">
-                    <h3><i class="fa-solid fa-sliders"></i> Iniciar Transmissão</h3>
+                    <h3 id="shareConfigModalTitle"><i class="fa-solid fa-sliders"></i> Iniciar Transmissão</h3>
                     <button class="btn-close" id="btnCloseShareConfig" title="Fechar (ESC)" aria-label="Fechar (ESC)" type="button"><i class="fa-solid fa-xmark"></i></button>
                 </div>
                 <div class="modal-body">
-                    <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 16px;">
+                    <p class="modal-intro-text">
                         Selecione a fonte de áudio antes de escolher a janela ou tela de vídeo:
                     </p>
 
-                    <div class="audio-source-options" style="display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px;">
-                        <label class="audio-option-card is-selected" style="display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: var(--radius-md); cursor: pointer;">
-                            <div style="display: flex; align-items: center; justify-content: space-between;">
-                                <div style="display: flex; align-items: center; gap: 10px;">
+                    <div class="audio-source-options">
+                        <label class="audio-option-card is-selected">
+                            <div class="audio-option-header">
+                                <div class="audio-option-title">
                                     <input type="radio" name="audioSourceType" value="exclude_discord" id="audioSourceExcludeDiscord" checked>
-                                    <strong><i class="fa-brands fa-discord" style="color: #5865F2;"></i> Transmitir PC Sem Discord (Recomendado)</strong>
+                                    <strong><i class="fa-brands fa-discord icon-discord"></i> Transmitir PC Sem Discord (Recomendado)</strong>
                                 </div>
                             </div>
-                            <span style="font-size: 0.8rem; color: var(--text-muted); padding-left: 24px;">
+                            <span class="audio-option-desc">
                                 Captura todo o som do computador (jogos, YouTube, Spotify) e <strong>exclui a chamada do Discord</strong> automaticamente via WASAPI. Zero configuração!
                             </span>
-                            <div style="padding-left: 24px; font-size: 0.78rem;" id="discordStatusContainer">
-                                <span id="discordStatusBadge" style="color: var(--text-muted);"><i class="fa-solid fa-circle-notch fa-spin"></i> Verificando Discord...</span>
+                            <div class="discord-status-row" id="discordStatusContainer">
+                                <span id="discordStatusBadge" class="discord-status-badge"><i class="fa-solid fa-circle-notch fa-spin"></i> Verificando Discord...</span>
                             </div>
-                            <div id="dualStreamEchoWarning" style="display: none; margin-top: 8px; margin-left: 24px; padding: 8px 12px; background: rgba(255, 171, 0, 0.12); border: 1px solid rgba(255, 171, 0, 0.35); border-radius: var(--radius-sm); font-size: 0.78rem; color: #ffb74d;">
+                            <div id="dualStreamEchoWarning" class="echo-warning-banner">
                                 <i class="fa-solid fa-triangle-exclamation"></i> <strong>Aviso Anti-Eco:</strong> Outro participante já está transmitindo com áudio. Ao transmitir o PC inteiro simultaneamente, o áudio dele tocará no seu PC e pode voltar em eco. Recomendamos selecionar <em>"Apenas Um Aplicativo Específico"</em> ou mutar a tela recebida.
                             </div>
                         </label>
 
-                        <label class="audio-option-card" style="display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: var(--radius-md); cursor: pointer;">
-                            <div style="display: flex; align-items: center; gap: 10px;">
+                        <label class="audio-option-card">
+                            <div class="audio-option-title">
                                 <input type="radio" name="audioSourceType" value="app" id="audioSourceApp">
-                                <strong><i class="fa-solid fa-gamepad" style="color: var(--primary);"></i> Apenas Um Aplicativo Específico</strong>
+                                <strong><i class="fa-solid fa-gamepad icon-primary"></i> Apenas Um Aplicativo Específico</strong>
                             </div>
-                            <span style="font-size: 0.8rem; color: var(--text-muted); padding-left: 24px;">
+                            <span class="audio-option-desc">
                                 Captura isolada de um único jogo ou janela.
                             </span>
-                            <div id="appSelectorContainer" style="display: none; gap: 8px; margin-top: 6px; padding-left: 24px;">
-                                <select id="selectAudioApp" class="form-input" style="flex: 1; padding: 8px; font-size: 0.85rem;">
+                            <div id="appSelectorContainer" class="app-selector-row">
+                                <select id="selectAudioApp" class="form-input app-select-input">
                                     <option value="">Carregando aplicativos abertos...</option>
                                 </select>
                                 <button type="button" class="btn btn-secondary btn-sm" id="btnRefreshAudioApps" title="Atualizar lista de janelas" aria-label="Atualizar lista de janelas">
@@ -340,49 +338,63 @@
                             </div>
                         </label>
 
-                        <label class="audio-option-card" style="display: flex; flex-direction: column; gap: 4px; padding: 12px; border-radius: var(--radius-md); cursor: pointer;">
-                            <div style="display: flex; align-items: center; gap: 10px;">
+                        <div id="appExcludeOptionContainer" class="audio-sub-option">
+                            <label class="audio-sub-checkbox-label" for="chkExcludeSelectedApp">
+                                <input type="checkbox" id="chkExcludeSelectedApp">
+                                <span>Excluir este aplicativo (capturar todo o resto do sistema)</span>
+                            </label>
+                        </div>
+
+                        <label class="audio-option-card audio-option-card--compact">
+                            <div class="audio-option-title">
                                 <input type="radio" name="audioSourceType" value="system" id="audioSourceSystem">
                                 <strong><i class="fa-solid fa-volume-high"></i> Áudio Geral do Sistema</strong>
                             </div>
-                            <span style="font-size: 0.8rem; color: var(--text-muted); padding-left: 24px;">
+                            <span class="audio-option-desc">
                                 Captura o áudio nativo do dispositivo de som do Windows.
                             </span>
                         </label>
 
-                        <label class="audio-option-card" style="display: flex; flex-direction: column; gap: 4px; padding: 12px; border-radius: var(--radius-md); cursor: pointer;">
-                            <div style="display: flex; align-items: center; gap: 10px;">
+                        <div id="vbCableOptionContainer" class="audio-sub-option">
+                            <label class="audio-sub-checkbox-label" for="chkUseVbCable">
+                                <input type="checkbox" id="chkUseVbCable">
+                                <span>Usar VB-Cable (Virtual Audio Cable) como fonte do sistema</span>
+                            </label>
+                        </div>
+
+                        <label class="audio-option-card audio-option-card--compact">
+                            <div class="audio-option-title">
                                 <input type="radio" name="audioSourceType" value="none" id="audioSourceNone">
                                 <strong><i class="fa-solid fa-volume-xmark"></i> Sem Áudio</strong>
                             </div>
-                            <span style="font-size: 0.8rem; color: var(--text-muted); padding-left: 24px;">
+                            <span class="audio-option-desc">
                                 Transmitir apenas vídeo (mudo).
                             </span>
                         </label>
                     </div>
 
-                    <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 12px; margin-top: 16px;">
+                    <p class="video-quality-heading">
                         Qualidade e Taxa de Quadros (Vídeo):
                     </p>
-                    <div class="video-quality-options" style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px;">
-                        <div class="quality-card" style="display: flex; flex-direction: column; gap: 6px; padding: 10px; border-radius: var(--radius-md); border: 1px solid var(--border); background: var(--bg-surface);">
-                            <span style="font-size: 0.8rem; font-weight: 600; color: var(--text-muted);"><i class="fa-solid fa-expand"></i> Resolução</span>
-                            <div style="display: flex; gap: 10px; align-items: center; margin-top: 4px;">
-                                <label style="display: flex; align-items: center; gap: 6px; font-size: 0.85rem; cursor: pointer;">
+                    <div class="video-quality-options">
+                        <div class="quality-card">
+                            <span class="quality-card-title"><i class="fa-solid fa-expand"></i> Resolução</span>
+                            <div class="quality-card-choices">
+                                <label class="quality-choice-label">
                                     <input type="radio" name="videoResolution" value="1080p" checked> 1080p
                                 </label>
-                                <label style="display: flex; align-items: center; gap: 6px; font-size: 0.85rem; cursor: pointer;">
+                                <label class="quality-choice-label">
                                     <input type="radio" name="videoResolution" value="720p"> 720p
                                 </label>
                             </div>
                         </div>
-                        <div class="quality-card" style="display: flex; flex-direction: column; gap: 6px; padding: 10px; border-radius: var(--radius-md); border: 1px solid var(--border); background: var(--bg-surface);">
-                            <span style="font-size: 0.8rem; font-weight: 600; color: var(--text-muted);"><i class="fa-solid fa-gauge-high"></i> Taxa de Quadros</span>
-                            <div style="display: flex; gap: 10px; align-items: center; margin-top: 4px;">
-                                <label style="display: flex; align-items: center; gap: 6px; font-size: 0.85rem; cursor: pointer;">
+                        <div class="quality-card">
+                            <span class="quality-card-title"><i class="fa-solid fa-gauge-high"></i> Taxa de Quadros</span>
+                            <div class="quality-card-choices">
+                                <label class="quality-choice-label">
                                     <input type="radio" name="videoFps" value="60" checked> 60 FPS
                                 </label>
-                                <label style="display: flex; align-items: center; gap: 6px; font-size: 0.85rem; cursor: pointer;">
+                                <label class="quality-choice-label">
                                     <input type="radio" name="videoFps" value="30"> 30 FPS
                                 </label>
                             </div>
@@ -397,61 +409,78 @@
         </div>
 
         <!-- WebRTC P2P Stats / Diagnostic Modal -->
-        <div class="modal-overlay" id="statsModal" role="dialog" aria-modal="true" style="display: none;" hidden>
+        <div class="modal-overlay" id="statsModal" role="dialog" aria-modal="true" aria-labelledby="statsModalTitle" hidden>
             <div class="modal-card modal-sm">
                 <div class="modal-header">
-                    <h3><i class="fa-solid fa-chart-simple"></i> Diagnóstico da Conexão P2P</h3>
+                    <h3 id="statsModalTitle"><i class="fa-solid fa-chart-simple"></i> Diagnóstico da Conexão P2P</h3>
                     <button class="btn-close" id="btnCloseStatsModal" title="Fechar (ESC)" aria-label="Fechar (ESC)" type="button"><i class="fa-solid fa-xmark"></i></button>
                 </div>
                 <div class="modal-body">
-                    <div style="display: flex; flex-direction: column; gap: 12px; font-size: 0.88rem;">
-                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: var(--bg-surface); border-radius: var(--radius-sm); border: 1px solid var(--border);">
-                            <span style="color: var(--text-muted);"><i class="fa-solid fa-network-wired"></i> Estado P2P</span>
+                    <div class="stats-list">
+                        <div class="stats-row">
+                            <span class="stats-label"><i class="fa-solid fa-network-wired"></i> Estado P2P</span>
                             <strong id="statsConnectionState">Aguardando pares...</strong>
                         </div>
-                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: var(--bg-surface); border-radius: var(--radius-sm); border: 1px solid var(--border);">
-                            <span style="color: var(--text-muted);"><i class="fa-solid fa-stopwatch"></i> Latência (RTT)</span>
+                        <div class="stats-row">
+                            <span class="stats-label"><i class="fa-solid fa-stopwatch"></i> Latência (RTT)</span>
                             <strong id="statsRtt">-- ms</strong>
                         </div>
-                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: var(--bg-surface); border-radius: var(--radius-sm); border: 1px solid var(--border);">
-                            <span style="color: var(--text-muted);"><i class="fa-solid fa-triangle-exclamation"></i> Perda de Pacotes</span>
+                        <div class="stats-row">
+                            <span class="stats-label"><i class="fa-solid fa-triangle-exclamation"></i> Perda de Pacotes</span>
                             <strong id="statsPacketLoss">0%</strong>
                         </div>
-                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: var(--bg-surface); border-radius: var(--radius-sm); border: 1px solid var(--border);">
-                            <span style="color: var(--text-muted);"><i class="fa-solid fa-video"></i> Transmissão Local</span>
+                        <div class="stats-row">
+                            <span class="stats-label"><i class="fa-solid fa-video"></i> Transmissão Local</span>
                             <strong id="statsLocalStream">Inativa</strong>
                         </div>
-                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: var(--bg-surface); border-radius: var(--radius-sm); border: 1px solid var(--border);">
-                            <span style="color: var(--text-muted);"><i class="fa-solid fa-tv"></i> Modo de Otimização</span>
+                        <div class="stats-row">
+                            <span class="stats-label"><i class="fa-solid fa-tv"></i> Modo de Otimização</span>
                             <strong id="statsContentHint">Fluido (Jogos / 60 FPS)</strong>
                         </div>
-                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: var(--bg-surface); border-radius: var(--radius-sm); border: 1px solid var(--border);">
-                            <span style="color: var(--text-muted);"><i class="fa-solid fa-gauge-high"></i> Vídeo Real (FPS / Bitrate)</span>
+                        <div class="stats-row">
+                            <span class="stats-label"><i class="fa-solid fa-gauge-high"></i> Vídeo Real (FPS / Bitrate)</span>
                             <strong id="statsVideoTelemetry">--</strong>
                         </div>
-                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: var(--bg-surface); border-radius: var(--radius-sm); border: 1px solid var(--border);">
-                            <span style="color: var(--text-muted);"><i class="fa-solid fa-microchip"></i> Codec / Encoder</span>
+                        <div class="stats-row">
+                            <span class="stats-label"><i class="fa-solid fa-microchip"></i> Codec / Encoder</span>
                             <strong id="statsCodecEncoder">--</strong>
                         </div>
-                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: var(--bg-surface); border-radius: var(--radius-sm); border: 1px solid var(--border);">
-                            <span style="color: var(--text-muted);"><i class="fa-solid fa-shield-halved"></i> Limitação WebRTC</span>
+                        <div class="stats-row">
+                            <span class="stats-label"><i class="fa-solid fa-shield-halved"></i> Limitação WebRTC</span>
                             <strong id="statsQualityLimitation">Nenhuma (none)</strong>
                         </div>
-                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: var(--bg-surface); border-radius: var(--radius-sm); border: 1px solid var(--border);">
-                            <span style="color: var(--text-muted);"><i class="fa-solid fa-route"></i> Rota ICE Ativa</span>
+                        <div class="stats-row">
+                            <span class="stats-label"><i class="fa-solid fa-route"></i> Rota ICE Ativa</span>
                             <strong id="statsIceRoute">--</strong>
                         </div>
-                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: var(--bg-surface); border-radius: var(--radius-sm); border: 1px solid var(--border);">
-                            <span style="color: var(--text-muted);"><i class="fa-solid fa-network-wired"></i> Provedor ICE</span>
+                        <div class="stats-row">
+                            <span class="stats-label"><i class="fa-solid fa-network-wired"></i> Provedor ICE</span>
                             <strong id="statsIceProvider">--</strong>
                         </div>
-                        <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 12px; background: var(--bg-surface); border-radius: var(--radius-sm); border: 1px solid var(--border);">
-                            <span style="color: var(--text-muted); flex-shrink: 0;"><i class="fa-solid fa-server"></i> Servidor</span>
-                            <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
-                                <strong id="statsServerUrl" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.8rem;">--</strong>
+                        <div class="stats-row stats-row--server">
+                            <span class="stats-label stats-label--fixed"><i class="fa-solid fa-server"></i> Servidor</span>
+                            <div class="stats-server-value">
+                                <strong id="statsServerUrl" class="stats-server-url">--</strong>
                                 <button type="button" class="btn btn-secondary btn-sm" id="btnResetServerUrl" title="Limpar servidor salvo e restaurar padrão" aria-label="Restaurar servidor padrão" hidden>
                                     <i class="fa-solid fa-rotate-left"></i>
                                 </button>
+                            </div>
+                        </div>
+                        <div class="stats-row stats-row--custom-server" id="customServerFormContainer">
+                            <label class="stats-label stats-label--fixed" for="inputCustomServerUrl">
+                                <i class="fa-solid fa-sliders"></i> Customizar
+                            </label>
+                            <div class="stats-custom-server-controls">
+                                <input
+                                    type="url"
+                                    id="inputCustomServerUrl"
+                                    class="form-input stats-server-input"
+                                    aria-label="URL do servidor de sinalização customizado"
+                                    placeholder="https://seu-servidor.com ou http://localhost:3000"
+                                    autocomplete="off"
+                                    spellcheck="false"
+                                >
+                                <button type="button" class="btn btn-primary btn-sm" id="btnSaveServerUrl">Salvar</button>
                             </div>
                         </div>
                     </div>

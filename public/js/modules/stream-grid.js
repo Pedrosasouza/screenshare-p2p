@@ -1,22 +1,117 @@
-import { toggleTileFullscreen, showTapToUnmuteBadge } from './tile-dom.js';
+import { toggleTileFullscreen, showTapToUnmuteBadge, toggleVideoPictureInPicture } from './tile-dom.js';
 import { buildInviteUrl } from './signaling-url.js';
 
+/**
+ * @typedef {import('./types.js').AppState} AppState
+ * @typedef {import('./types.js').DomRefs} DomRefs
+ * @typedef {import('./types.js').ShowToastFn} ShowToastFn
+ * @typedef {import('./types.js').AnyWindow} AnyWindow
+ * @typedef {import('./types.js').AnyDocument} AnyDocument
+ */
+
+/**
+ * @param {{
+ *   state: AppState,
+ *   dom?: DomRefs,
+ *   getPeers?: () => Map<string, any>,
+ *   getRemoteActiveStreams?: () => Set<string>,
+ *   getQualityMonitor?: () => any,
+ *   isDesktopApp?: () => boolean,
+ *   getServerUrl?: () => string,
+ *   showToast?: ShowToastFn,
+ *   documentObj?: AnyDocument | null,
+ *   windowObj?: AnyWindow | null,
+ *   navigatorObj?: Navigator | null,
+ *   onToggleTileFullscreen?: typeof toggleTileFullscreen,
+ *   onShowTapToUnmuteBadge?: typeof showTapToUnmuteBadge,
+ *   onToggleVideoPictureInPicture?: typeof toggleVideoPictureInPicture
+ * }} options
+ */
 export function createStreamGridController({
     state,
-    dom = {},
+    dom = /** @type {DomRefs} */ ({}),
     getPeers = () => new Map(),
     getRemoteActiveStreams = () => new Set(),
     getQualityMonitor = () => null,
     isDesktopApp = () => false,
     getServerUrl = () => '',
-    showToast = () => {},
-    documentObj = (typeof document !== 'undefined' ? document : null),
-    windowObj = (typeof window !== 'undefined' ? window : null),
+    showToast = /** @type {ShowToastFn} */ (() => {}),
+    documentObj = (typeof document !== 'undefined' ? /** @type {AnyDocument} */ (document) : null),
+    windowObj = (typeof window !== 'undefined' ? /** @type {AnyWindow} */ (window) : null),
     navigatorObj = (typeof navigator !== 'undefined' ? navigator : null),
     onToggleTileFullscreen = toggleTileFullscreen,
-    onShowTapToUnmuteBadge = showTapToUnmuteBadge
-} = {}) {
+    onShowTapToUnmuteBadge = showTapToUnmuteBadge,
+    onToggleVideoPictureInPicture = toggleVideoPictureInPicture
+} = /** @type {any} */ ({})) {
     let copyLinkResetTimer = null;
+
+    function clearSpotlight() {
+        const { streamGrid } = dom;
+        if (!streamGrid) return false;
+        const wasActive = Boolean(
+            (streamGrid.classList && streamGrid.classList.contains('is-spotlight-mode')) ||
+            (streamGrid.dataset && streamGrid.dataset.spotlightPeerId)
+        );
+        if (streamGrid.classList) {
+            streamGrid.classList.remove('is-spotlight-mode');
+        }
+        if (streamGrid.dataset) {
+            delete streamGrid.dataset.spotlightPeerId;
+        }
+        const tiles = typeof streamGrid.querySelectorAll === 'function'
+            ? streamGrid.querySelectorAll('.stream-tile')
+            : [];
+        tiles.forEach((tileEl) => {
+            if (tileEl.classList) {
+                tileEl.classList.remove('is-spotlight');
+            }
+            const spotlightBtn = typeof tileEl.querySelector === 'function'
+                ? tileEl.querySelector('.btn-tile-spotlight')
+                : null;
+            if (spotlightBtn && typeof spotlightBtn.setAttribute === 'function') {
+                spotlightBtn.setAttribute('aria-pressed', 'false');
+            }
+        });
+        return wasActive;
+    }
+
+    function toggleTileSpotlight(tile) {
+        const { streamGrid } = dom;
+        if (!streamGrid || !tile) return false;
+        const isAlreadySpotlight = Boolean(
+            tile.classList &&
+            tile.classList.contains('is-spotlight') &&
+            streamGrid.classList &&
+            streamGrid.classList.contains('is-spotlight-mode')
+        );
+        if (isAlreadySpotlight) {
+            clearSpotlight();
+            return false;
+        }
+
+        clearSpotlight();
+        if (tile.classList) {
+            tile.classList.add('is-spotlight');
+        }
+        const spotlightBtn = typeof tile.querySelector === 'function'
+            ? tile.querySelector('.btn-tile-spotlight')
+            : null;
+        if (spotlightBtn && typeof spotlightBtn.setAttribute === 'function') {
+            spotlightBtn.setAttribute('aria-pressed', 'true');
+        }
+        if (streamGrid.classList) {
+            streamGrid.classList.add('is-spotlight-mode');
+        }
+        if (streamGrid.dataset) {
+            streamGrid.dataset.spotlightPeerId = (tile.dataset && tile.dataset.peerId) || '';
+        }
+        return true;
+    }
+
+    function isSpotlightActive() {
+        const { streamGrid } = dom;
+        return Boolean(streamGrid && streamGrid.classList && streamGrid.classList.contains('is-spotlight-mode'));
+    }
 
     function startTilePlayback(tile, videoEl) {
         const video = videoEl || (tile && typeof tile.querySelector === 'function' ? tile.querySelector('video') : null);
@@ -43,7 +138,11 @@ export function createStreamGridController({
         const doc = documentObj;
         const nav = navigatorObj || { userAgent: '' };
         const tile = doc.createElement('div');
-        tile.className = 'stream-tile';
+        if (tile.classList && typeof tile.classList.add === 'function') {
+            tile.classList.add('stream-tile');
+        } else {
+            tile.className = 'stream-tile';
+        }
         tile.dataset.peerId = id;
 
         const isMobile = /Android|iPhone|iPad|iPod|webOS/i.test(nav.userAgent || '');
@@ -86,8 +185,6 @@ export function createStreamGridController({
             if (typeof muteBtn.setAttribute === 'function') {
                 muteBtn.setAttribute('aria-label', 'Silenciar / Ativar Som');
             }
-            muteBtn.style.width = '32px';
-            muteBtn.style.height = '32px';
 
             const slider = doc.createElement('input');
             slider.type = 'range';
@@ -105,7 +202,8 @@ export function createStreamGridController({
                     ? '<i class="fa-solid fa-volume-xmark"></i>'
                     : '<i class="fa-solid fa-volume-high"></i>';
             };
-            tile._syncAudioUi = syncAudioUi;
+            const tileAny = /** @type {HTMLDivElement & { _syncAudioUi?: () => void, _cleanupTapUnmute?: () => void }} */ (tile);
+            tileAny._syncAudioUi = syncAudioUi;
             syncAudioUi();
 
             slider.addEventListener('click', (e) => {
@@ -113,14 +211,15 @@ export function createStreamGridController({
             });
 
             slider.addEventListener('input', (e) => {
-                const val = parseFloat(e.target.value);
+                const inputEl = /** @type {HTMLInputElement} */ (e.target);
+                const val = parseFloat(inputEl.value);
                 video.volume = val;
                 if (val > 0) {
                     lastNonZeroVolume = val;
                     video.muted = false;
                     video.removeAttribute('muted');
-                    if (typeof tile._cleanupTapUnmute === 'function') {
-                        tile._cleanupTapUnmute();
+                    if (typeof tileAny._cleanupTapUnmute === 'function') {
+                        tileAny._cleanupTapUnmute();
                     } else {
                         const badge = tile.querySelector('.tap-unmute-badge');
                         if (badge) badge.remove();
@@ -150,8 +249,8 @@ export function createStreamGridController({
                     video.volume = targetVol;
                     slider.value = targetVol.toString();
                     muteBtn.innerHTML = '<i class="fa-solid fa-volume-high"></i>';
-                    if (typeof tile._cleanupTapUnmute === 'function') {
-                        tile._cleanupTapUnmute();
+                    if (typeof tileAny._cleanupTapUnmute === 'function') {
+                        tileAny._cleanupTapUnmute();
                     } else {
                         const badge = tile.querySelector('.tap-unmute-badge');
                         if (badge) badge.remove();
@@ -163,11 +262,38 @@ export function createStreamGridController({
             controlsOverlay.appendChild(slider);
         }
 
+        const pipBtn = doc.createElement('button');
+        pipBtn.type = 'button';
+        pipBtn.className = 'btn-icon btn-tile-pip';
+        pipBtn.title = 'Janela Flutuante (PiP)';
+        if (typeof pipBtn.setAttribute === 'function') {
+            pipBtn.setAttribute('aria-label', 'Janela Flutuante (PiP)');
+        }
+        pipBtn.innerHTML = '<i class="fa-solid fa-up-right-from-square"></i>';
+        pipBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            onToggleVideoPictureInPicture(video, { documentObj, showToast });
+        });
+        controlsOverlay.appendChild(pipBtn);
+
+        const spotlightBtn = doc.createElement('button');
+        spotlightBtn.type = 'button';
+        spotlightBtn.className = 'btn-icon btn-tile-spotlight';
+        spotlightBtn.title = 'Destacar Tela (Spotlight)';
+        if (typeof spotlightBtn.setAttribute === 'function') {
+            spotlightBtn.setAttribute('aria-label', 'Destacar Tela (Spotlight)');
+            spotlightBtn.setAttribute('aria-pressed', 'false');
+        }
+        spotlightBtn.innerHTML = '<i class="fa-solid fa-thumbtack"></i>';
+        spotlightBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggleTileSpotlight(tile);
+        });
+        controlsOverlay.appendChild(spotlightBtn);
+
         const fsBtn = doc.createElement('button');
         fsBtn.type = 'button';
         fsBtn.className = 'btn-icon';
-        fsBtn.style.width = '32px';
-        fsBtn.style.height = '32px';
         fsBtn.title = 'Tela Cheia';
         if (typeof fsBtn.setAttribute === 'function') {
             fsBtn.setAttribute('aria-label', 'Tela Cheia');
@@ -207,6 +333,15 @@ export function createStreamGridController({
         if (!streamGrid) return;
         const tiles = streamGrid.querySelectorAll('.stream-tile');
         const count = tiles.length;
+
+        if (streamGrid.classList && streamGrid.classList.contains('is-spotlight-mode')) {
+            const hasSpotlightTile = Array.from(tiles).some(
+                (t) => t.classList && t.classList.contains('is-spotlight')
+            );
+            if (!hasSpotlightTile) {
+                clearSpotlight();
+            }
+        }
 
         if (emptyGridPlaceholder) emptyGridPlaceholder.hidden = (count > 0);
         if (activeStreamsText) activeStreamsText.textContent = `${count} ${count === 1 ? 'Transmissão Ativa' : 'Transmissões Ativas'}`;
@@ -299,6 +434,9 @@ export function createStreamGridController({
     return {
         startTilePlayback,
         createStreamTile,
+        toggleTileSpotlight,
+        clearSpotlight,
+        isSpotlightActive,
         updateGridState,
         updateMemberCount,
         updatePeerUserName,

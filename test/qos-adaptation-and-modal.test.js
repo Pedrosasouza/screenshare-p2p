@@ -105,6 +105,53 @@ describe('QoS adaptativo, Modal de Compartilhamento & Chime WebAudio', () => {
         assert.strictEqual(videoSender.getParameters().encodings[0].maxBitrate, 350000);
     });
 
+    it('T1b: evaluatePeerQoS nunca excede peerCap quando há 6+ peers em 720p30', async () => {
+        const { qosMonitorMod } = await loadModules();
+
+        for (const [peerCount, expectedCap] of [[6, 300000], [10, 180000]]) {
+            for (const initialBitrate of [expectedCap, 1000000]) {
+                let availableBitrate = 8000000;
+                const videoSender = createMockSender(createMockTrack('video'), {
+                    params: { encodings: [{ maxBitrate: initialBitrate, maxFramerate: 30 }] }
+                });
+                const peerObj = {
+                    _qosTelemetryState: null,
+                    tileEl: null,
+                    pc: {
+                        connectionState: 'connected',
+                        getStats: async () => makeStatsMap(availableBitrate),
+                        getSenders: () => [videoSender]
+                    }
+                };
+                const peers = new Map(
+                    Array.from({ length: peerCount }, (_, idx) => [`peer-${idx}`, idx === 0 ? peerObj : {}])
+                );
+                const monitor = qosMonitorMod.createQosMonitor({
+                    state: {
+                        localStream: { id: 'local' },
+                        selectedVideoFps: 30,
+                        selectedVideoResolution: '720p',
+                        contentHintMode: 'motion'
+                    },
+                    dom: {},
+                    getPeers: () => peers
+                });
+
+                await monitor.evaluatePeerQoS('peer-0', peerObj);
+                assert.ok(
+                    videoSender.getParameters().encodings[0].maxBitrate <= expectedCap,
+                    `peerCount=${peerCount} initial=${initialBitrate} should clamp <= ${expectedCap}`
+                );
+                assert.strictEqual(videoSender.getParameters().encodings[0].maxBitrate, expectedCap);
+
+                // Mesmo com congestão severa, o piso de 350kbps não deve ultrapassar peerCap
+                availableBitrate = 200000;
+                await monitor.evaluatePeerQoS('peer-0', peerObj);
+                assert.strictEqual(videoSender.getParameters().encodings[0].maxBitrate, expectedCap);
+            }
+        }
+    });
+
     it('T2: openShareConfigModal protege null em closest() e sincroniza appSelectorContainer', async () => {
         const { shareModalMod } = await loadModules();
 

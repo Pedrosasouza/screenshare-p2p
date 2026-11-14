@@ -11,14 +11,88 @@ export const SESSION_PASS_STORAGE_KEY = 'streamgrid_room_pass';
 
 
 
-export function resolveSignalingServerUrl(options = {}) {
-    const isLoopbackHost = (hostname) => (
+function isLoopbackHost(hostname) {
+    return (
         hostname === 'localhost' ||
         hostname === '127.0.0.1' ||
         hostname === '[::1]' ||
         hostname === '::1'
     );
+}
 
+export function parseSafeServerUrl(raw, options = {}) {
+    if (typeof raw !== 'string') return null;
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+
+    const win = options && options.windowObj !== undefined
+        ? options.windowObj
+        : (typeof window !== 'undefined' ? window : null);
+    const desktopMode = options && options.isDesktop !== undefined
+        ? Boolean(options.isDesktop)
+        : isDesktopApp(win);
+    const hasWindow = Boolean(win && win.location);
+    const pageProtocol = hasWindow ? (win.location.protocol || '') : '';
+    const pageOrigin = hasWindow ? (win.location.origin || '') : '';
+
+    let parsed;
+    try {
+        parsed = new URL(trimmed);
+    } catch (_) {
+        return null;
+    }
+
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        return null;
+    }
+    if (parsed.username || parsed.password) {
+        return null;
+    }
+
+    const isLoopback = isLoopbackHost(parsed.hostname);
+    const isSameOrigin = Boolean(pageOrigin && pageOrigin !== 'null' && parsed.origin === pageOrigin);
+
+    if (parsed.protocol === 'http:') {
+        const sameHttpOrigin = pageProtocol === 'http:' && isSameOrigin;
+        if (!isLoopback && !sameHttpOrigin) {
+            return null;
+        }
+    }
+
+    if (!desktopMode && !isSameOrigin && !isLoopback) {
+        return null;
+    }
+
+    return parsed.origin.replace(/\/+$/, '');
+}
+
+export function saveCustomSignalingServerUrl(rawUrl, options = {}) {
+    const validUrl = parseSafeServerUrl(rawUrl, options);
+    if (!validUrl) {
+        return {
+            ok: false,
+            error: 'URL do servidor inválida ou insegura. Use https://... ou http://localhost:porta (sem credenciais).'
+        };
+    }
+
+    const store = options && options.storage !== undefined
+        ? options.storage
+        : (typeof localStorage !== 'undefined' ? localStorage : null);
+
+    try {
+        if (store && typeof store.setItem === 'function') {
+            store.setItem(SERVER_URL_STORAGE_KEY, validUrl);
+        }
+        return { ok: true, url: validUrl };
+    } catch (_) {
+        return {
+            ok: false,
+            error: 'Não foi possível salvar a URL do servidor no armazenamento local.'
+        };
+    }
+}
+
+export function resolveSignalingServerUrl(options = {}) {
     const win = options && options.windowObj !== undefined
         ? options.windowObj
         : (typeof window !== 'undefined' ? window : null);
@@ -33,48 +107,13 @@ export function resolveSignalingServerUrl(options = {}) {
     const pageOrigin = hasWindow ? (win.location.origin || '') : '';
     const pageHostname = hasWindow ? (win.location.hostname || '') : '';
     const pageSearch = hasWindow ? (win.location.search || '') : '';
-
-    const parseSafeServerUrl = (raw) => {
-        if (typeof raw !== 'string') return null;
-        const trimmed = raw.trim();
-        if (!trimmed) return null;
-
-        let parsed;
-        try {
-            parsed = new URL(trimmed);
-        } catch (_) {
-            return null;
-        }
-
-        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-            return null;
-        }
-        if (parsed.username || parsed.password) {
-            return null;
-        }
-
-        const isLoopback = isLoopbackHost(parsed.hostname);
-        const isSameOrigin = Boolean(pageOrigin && pageOrigin !== 'null' && parsed.origin === pageOrigin);
-
-        if (parsed.protocol === 'http:') {
-            const sameHttpOrigin = pageProtocol === 'http:' && isSameOrigin;
-            if (!isLoopback && !sameHttpOrigin) {
-                return null;
-            }
-        }
-
-        if (!desktopMode && !isSameOrigin && !isLoopback) {
-            return null;
-        }
-
-        return parsed.origin.replace(/\/+$/, '');
-    };
+    const parseOpts = { windowObj: win, isDesktop: desktopMode };
 
     try {
         const params = new URLSearchParams(pageSearch);
         const paramServer = params.get('server');
         if (paramServer) {
-            const validParam = parseSafeServerUrl(paramServer);
+            const validParam = parseSafeServerUrl(paramServer, parseOpts);
             if (validParam) {
                 return validParam;
             }
@@ -83,7 +122,7 @@ export function resolveSignalingServerUrl(options = {}) {
         if (store && typeof store.getItem === 'function') {
             const savedServer = store.getItem(SERVER_URL_STORAGE_KEY);
             if (savedServer) {
-                const validSaved = parseSafeServerUrl(savedServer);
+                const validSaved = parseSafeServerUrl(savedServer, parseOpts);
                 if (validSaved) {
                     return validSaved;
                 }
@@ -148,8 +187,18 @@ export function clearSessionRoomPassword(
     } catch (_) {}
 }
 
+/**
+ * @param {{
+ *   roomId?: string,
+ *   password?: string,
+ *   isDesktop?: boolean,
+ *   serverUrl?: string,
+ *   origin?: string,
+ *   pathname?: string
+ * }} [options]
+ */
 export function buildInviteUrl({
-    roomId,
+    roomId = '',
     password = '',
     isDesktop = isDesktopApp(),
     serverUrl = '',

@@ -4,23 +4,51 @@ import {
     getSessionRoomPassword as defaultGetSessionPass,
     clearSessionRoomPassword as defaultClearSessionPass
 } from './signaling-url.js';
+import { activateModalFocus, restoreModalFocus } from './modal-a11y.js';
 
+/**
+ * @typedef {import('./types.js').AppState} AppState
+ * @typedef {import('./types.js').DomRefs} DomRefs
+ * @typedef {import('./types.js').ShowToastFn} ShowToastFn
+ * @typedef {import('./types.js').AnyWindow} AnyWindow
+ * @typedef {import('./types.js').AnyDocument} AnyDocument
+ */
+
+/**
+ * @param {{
+ *   state: AppState,
+ *   dom?: DomRefs,
+ *   getSocket?: () => any,
+ *   onCleanupRoomState?: (opts?: any) => void,
+ *   getMembership?: () => { isRoomMembershipConfirmed: boolean },
+ *   showToast?: ShowToastFn,
+ *   getSessionRoomPassword?: (targetRoomId: string, sessionStore?: Storage | null) => string,
+ *   clearSessionRoomPassword?: (sessionStore?: Storage | null) => void,
+ *   onThemeInit?: () => void,
+ *   onLoadPreferences?: () => void,
+ *   documentObj?: AnyDocument | null,
+ *   storage?: Storage | null,
+ *   windowObj?: AnyWindow | null
+ * }} options
+ */
 export function createRoomModalController({
     state,
-    dom = {},
+    dom = /** @type {DomRefs} */ ({}),
     getSocket = () => null,
     onCleanupRoomState = () => {},
     getMembership = () => ({ isRoomMembershipConfirmed: true }),
-    showToast = () => {},
-    getSessionRoomPassword = defaultGetSessionPass,
+    showToast = /** @type {ShowToastFn} */ (() => {}),
+    getSessionRoomPassword = /** @type {(targetRoomId: string, sessionStore?: Storage | null) => string} */ (defaultGetSessionPass),
     clearSessionRoomPassword = defaultClearSessionPass,
     onThemeInit = () => {},
     onLoadPreferences = () => {},
+    documentObj = (typeof document !== 'undefined' ? /** @type {AnyDocument} */ (document) : null),
     storage = (typeof localStorage !== 'undefined' ? localStorage : null),
-    windowObj = (typeof window !== 'undefined' ? window : null)
-} = {}) {
+    windowObj = (typeof window !== 'undefined' ? /** @type {AnyWindow} */ (window) : null)
+} = /** @type {any} */ ({})) {
     let checkCreateTimeout = null;
     let checkJoinTimeout = null;
+    let previousFocusEl = null;
 
     function showRoomError(msg) {
         const { roomErrorBanner } = dom;
@@ -181,6 +209,7 @@ export function createRoomModalController({
     }
 
     function openRoomModal(initialView = 'choice') {
+        const wasOpen = isRoomModalOpen();
         clearRoomError();
         updateRoomModalCloseButton();
         switchRoomView(initialView);
@@ -189,6 +218,9 @@ export function createRoomModalController({
             dom.roomModal.style.display = 'flex';
             dom.roomModal.classList.remove('hidden');
             dom.roomModal.hidden = false;
+            if (!wasOpen) {
+                previousFocusEl = activateModalFocus(dom.roomModal, documentObj);
+            }
         }
     }
 
@@ -203,6 +235,8 @@ export function createRoomModalController({
             dom.roomModal.classList.add('hidden');
             dom.roomModal.hidden = true;
         }
+        restoreModalFocus(previousFocusEl, documentObj);
+        previousFocusEl = null;
     }
 
     function isRoomModalOpen() {

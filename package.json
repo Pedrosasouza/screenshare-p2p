@@ -3,12 +3,15 @@
   "version": "1.1.0",
   "description": "Ultra low latency 1080p P2P screen sharing with audio for couples",
   "main": "server.js",
+  "type": "commonjs",
   "engines": {
     "node": ">=18"
   },
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.json",
     "tauri": "tauri",
     "dev:desktop": "tauri dev",
     "test": "node --test test/fuzz-crash-test.js test/audio-worklet-ring-buffer.test.js test/client-optimizations.test.js test/client-toast.test.js test/client-ui-lifecycle.test.js test/desktop-audio-session.test.js test/desktop-bridge.test.js test/ice-servers.test.js test/instance-and-session-reconnect.test.js test/invite-hash-status-prefs-csp.test.js test/invite-url.test.js test/ip-rate-limit.test.js test/late-joiner-keyframe-transceiver.test.js test/media-quality-and-audio-tuning.test.js test/modal-escape-backdrop.test.js test/password-hash.test.js test/presence-notification.test.js test/privacy-security-docs.test.js test/qos-adaptation-and-modal.test.js test/room-join-state.test.js test/room-reconnect-reconciliation.test.js test/screen-share-lifecycle.test.js test/sdp-optimization.test.js test/server-auth-race.test.js test/server-security-hardening.test.js test/signaling-url-security.test.js test/tile-fullscreen-and-cleanup.test.js test/toolbar-utilities.test.js test/ui-connection-and-controls.test.js test/ui-modal-theme-and-layout.test.js test/ui-responsive-and-a11y.test.js test/user-nickname.test.js test/video-quality-config.test.js test/webrtc-and-security-fixes.test.js test/webrtc-renegotiation-and-ice-lifecycle.test.js test/webrtc-signaling-race.test.js",
@@ -22,8 +25,12 @@
     "socket.io": "^4.7.5"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@tauri-apps/cli": "^2.12.4",
+    "eslint": "^10.15.0",
+    "globals": "^17.14.0",
     "socket.io-client": "^4.8.1",
+    "typescript": "^7.0.2",
     "ws": "^8.21.3"
   }
 }

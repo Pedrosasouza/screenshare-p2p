@@ -58,7 +58,7 @@ export async function prepareHelperAudioWorklet(expectedGeneration = desktopCapt
     if (helperSuspendPromise) {
         try {
             await helperSuspendPromise;
-        } catch (e) {}
+        } catch (_) {}
     }
 
     if (expectedGeneration !== desktopCaptureGeneration) {
@@ -91,7 +91,7 @@ export async function prepareHelperAudioWorklet(expectedGeneration = desktopCapt
         try {
             activeAudioWorkletNode.port.postMessage({ type: 'stop' });
             activeAudioWorkletNode.disconnect();
-        } catch (e) {}
+        } catch (_) {}
     }
 
     const AudioWorkletCtor = (win && win.AudioWorkletNode) || (typeof AudioWorkletNode !== 'undefined' ? AudioWorkletNode : null);
@@ -224,7 +224,7 @@ export async function startDesktopCaptureWith(startFn, windowObj) {
         }
 
         if (info) {
-            const modeDesc = info.mode === 'exclude' ? 'Exclusão do Discord' : 'Aplicativo Isolado';
+            const modeDesc = info.mode === 'exclude' ? 'Exclusão de Aplicativo' : 'Aplicativo Isolado';
             console.log(`[AudioHelper] ✅ Captura iniciada no modo [${modeDesc}] para PID ${info.pid} (${info.sample_rate}Hz, ${info.channels} canais)`);
         }
 
@@ -241,13 +241,22 @@ export async function startDesktopCaptureWith(startFn, windowObj) {
             stopAppAudioCapture(win);
         }
         const message = (err && err.message) ? err.message : String(err);
-        throw new Error(message);
+        throw new Error(message, { cause: err });
     }
 }
 
-export async function startAppAudioCapture(pid, windowObj) {
+export async function startAppAudioCapture(pid, windowObj, options = {}) {
     const win = getRuntimeWindow(windowObj);
-    return startDesktopCaptureWith((onPcm) => win.StreamGridDesktop.startAppAudioCapture(pid, onPcm), win);
+    const exclude = Boolean(options && options.exclude);
+    return startDesktopCaptureWith((onPcm) => (
+        exclude
+            ? win.StreamGridDesktop.startAppAudioCapture(pid, onPcm, { exclude: true })
+            : win.StreamGridDesktop.startAppAudioCapture(pid, onPcm)
+    ), win);
+}
+
+export async function startExcludeAppCapture(pid, windowObj) {
+    return startAppAudioCapture(pid, windowObj, { exclude: true });
 }
 
 export async function startExcludeDiscordCapture(windowObj) {
@@ -270,7 +279,7 @@ export function stopAppAudioCapture(windowObj) {
             activeAudioWorkletNode.port.postMessage({ type: 'flush' });
             activeAudioWorkletNode.port.postMessage({ type: 'stop' });
             activeAudioWorkletNode.disconnect();
-        } catch (e) {}
+        } catch (_) {}
         activeAudioWorkletNode = null;
     }
     if (helperAudioContext && helperAudioContext.state !== 'closed') {

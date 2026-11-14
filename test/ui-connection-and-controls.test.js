@@ -182,3 +182,122 @@ test('style.css keeps consistent dark overlay contrast on .tile-controls-overlay
     );
     assert(hoverMatch[0].includes('rgba(255, 255, 255, 0.2)') && hoverMatch[0].includes('color: #ffffff'));
 });
+
+test('Tile PiP & Spotlight: per-tile PiP switching, spotlight toggle/transfer/auto-clear, and Escape clears spotlight', async () => {
+    const { createStreamGridController } = await import(
+        pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/stream-grid.js')).href
+    );
+    const { initApp } = await import(
+        `${pathToFileURL(path.join(ROOT_DIR, 'public/app.js')).href}?spotlight=${Date.now()}`
+    );
+
+    const streamGrid = createMockElement('div', { id: 'streamGrid', className: 'stream-grid' });
+    const emptyGridPlaceholder = createMockElement('div', { id: 'emptyGridPlaceholder' });
+    const activeStreamsText = createMockElement('span', { id: 'activeStreamsText' });
+    const doc = createMockDocument({ streamGrid, emptyGridPlaceholder, activeStreamsText }, {
+        createElement: (tag) => createMockElement(tag)
+    });
+    doc.pictureInPictureEnabled = true;
+    doc.pictureInPictureElement = null;
+    let exitCount = 0;
+    doc.exitPictureInPicture = async () => {
+        exitCount += 1;
+        doc.pictureInPictureElement = null;
+    };
+
+    const grid = createStreamGridController({
+        state: { localStream: null, roomId: 'sala-spot', currentRoomPassword: '' },
+        dom: { streamGrid, emptyGridPlaceholder, activeStreamsText },
+        documentObj: doc,
+        navigatorObj: { userAgent: 'Mozilla/5.0' }
+    });
+
+    const tileA = grid.createStreamTile('peer-a', { id: 's-a' }, 'Alice', false);
+    const tileB = grid.createStreamTile('peer-b', { id: 's-b' }, 'Bob', false);
+    streamGrid.appendChild(tileA);
+    streamGrid.appendChild(tileB);
+
+    const videoA = tileA.querySelector('video');
+    const videoB = tileB.querySelector('video');
+    videoA.requestPictureInPicture = async () => { doc.pictureInPictureElement = videoA; };
+    videoB.requestPictureInPicture = async () => { doc.pictureInPictureElement = videoB; };
+
+    const pipBtnA = tileA.querySelector('.btn-tile-pip');
+    const pipBtnB = tileB.querySelector('.btn-tile-pip');
+    assert.ok(pipBtnA && pipBtnB);
+
+    pipBtnA.dispatchEvent({ type: 'click', stopPropagation: () => {} });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(doc.pictureInPictureElement, videoA);
+
+    pipBtnB.dispatchEvent({ type: 'click', stopPropagation: () => {} });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(doc.pictureInPictureElement, videoB);
+
+    pipBtnB.dispatchEvent({ type: 'click', stopPropagation: () => {} });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(exitCount, 1);
+    assert.equal(doc.pictureInPictureElement, null);
+
+    // Spotlight toggle, transfer to another tile, and auto-clear on removal
+    const spotBtnA = tileA.querySelector('.btn-tile-spotlight');
+    const spotBtnB = tileB.querySelector('.btn-tile-spotlight');
+    assert.equal(spotBtnA.getAttribute('aria-pressed'), 'false');
+
+    spotBtnA.dispatchEvent({ type: 'click', stopPropagation: () => {} });
+    assert.equal(streamGrid.classList.contains('is-spotlight-mode'), true);
+    assert.equal(streamGrid.dataset.spotlightPeerId, 'peer-a');
+    assert.equal(tileA.classList.contains('is-spotlight'), true);
+    assert.equal(spotBtnA.getAttribute('aria-pressed'), 'true');
+
+    spotBtnB.dispatchEvent({ type: 'click', stopPropagation: () => {} });
+    assert.equal(streamGrid.dataset.spotlightPeerId, 'peer-b');
+    assert.equal(tileA.classList.contains('is-spotlight'), false);
+    assert.equal(spotBtnA.getAttribute('aria-pressed'), 'false');
+    assert.equal(tileB.classList.contains('is-spotlight'), true);
+    assert.equal(spotBtnB.getAttribute('aria-pressed'), 'true');
+
+    // Removing spotlighted tile causes updateGridState() to clear spotlight mode
+    tileB.remove();
+    grid.updateGridState();
+    assert.equal(streamGrid.classList.contains('is-spotlight-mode'), false);
+    assert.equal(streamGrid.dataset.spotlightPeerId, undefined);
+
+    // Escape in app.js clears spotlight when no modal is open
+    const windowListeners = new Map();
+    const appStreamGrid = createMockElement('div', { id: 'streamGrid', className: 'stream-grid' });
+    const appDoc = createMockDocument({ streamGrid: appStreamGrid }, {
+        createElement: (tag) => createMockElement(tag)
+    });
+    const fakeWin = {
+        location: { origin: 'https://example.com', protocol: 'https:', hostname: 'example.com', pathname: '/', search: '' },
+        history: { replaceState: () => {} },
+        addEventListener: (ev, fn) => {
+            if (!windowListeners.has(ev)) windowListeners.set(ev, new Set());
+            windowListeners.get(ev).add(fn);
+        },
+        removeEventListener: (ev, fn) => {
+            windowListeners.get(ev)?.delete(fn);
+        }
+    };
+    const app = initApp({
+        windowObj: fakeWin,
+        documentObj: appDoc,
+        navigatorObj: { userAgent: 'Mozilla/5.0' },
+        storage: createMockStorage(),
+        ioFactory: () => ({ connected: false, on: () => {}, emit: () => {}, disconnect: () => {} }),
+        serverUrl: 'https://example.com'
+    });
+    try {
+        const t1 = app.grid.createStreamTile('peer-1', { id: 's-1' }, 'Carol', false);
+        appStreamGrid.appendChild(t1);
+        app.grid.toggleTileSpotlight(t1);
+        assert.equal(app.grid.isSpotlightActive(), true);
+        for (const fn of windowListeners.get('keydown') || []) {
+            fn({ key: 'Escape' });
+        }
+        assert.equal(app.grid.isSpotlightActive(), false);
+    } finally {
+        app.teardownClientSession();
+    }
+});

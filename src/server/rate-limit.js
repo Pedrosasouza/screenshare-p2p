@@ -3,6 +3,9 @@ const net = require('net');
 const ICE_RATE_LIMIT_WINDOW_MS = 600000;
 const ICE_RATE_LIMIT_MAX_REQUESTS = 30;
 const MAX_ICE_RATE_ENTRIES = 10000;
+const CHECK_ROOM_RATE_LIMIT_WINDOW_MS = 60000;
+const CHECK_ROOM_RATE_LIMIT_MAX_REQUESTS = 30;
+const MAX_CHECK_ROOM_RATE_ENTRIES = 10000;
 const MAX_LOGIN_ATTEMPTS_ENTRIES = 10000;
 const LOGIN_ATTEMPT_TTL_MS = 600000;
 
@@ -74,28 +77,32 @@ function getClientIdentifier(socket, env = process.env) {
     return socket.id;
 }
 
-function createHttpIceRateLimiter() {
-    const iceRateLimitMap = new Map();
+function createFixedWindowRateLimiter({
+    windowMs,
+    maxRequests,
+    maxEntries = 10000
+}) {
+    const entries = new Map();
 
-    function checkHttpIceRateLimit(clientIp, now = Date.now()) {
-        const existing = iceRateLimitMap.get(clientIp);
-        if (!existing || now - existing.windowStart >= ICE_RATE_LIMIT_WINDOW_MS) {
-            if (!existing && iceRateLimitMap.size >= MAX_ICE_RATE_ENTRIES) {
-                for (const [k, v] of iceRateLimitMap.entries()) {
-                    if (now - v.windowStart >= ICE_RATE_LIMIT_WINDOW_MS) {
-                        iceRateLimitMap.delete(k);
+    function check(key, now = Date.now()) {
+        const existing = entries.get(key);
+        if (!existing || now - existing.windowStart >= windowMs) {
+            if (!existing && entries.size >= maxEntries) {
+                for (const [k, v] of entries.entries()) {
+                    if (now - v.windowStart >= windowMs) {
+                        entries.delete(k);
                     }
                 }
-                while (iceRateLimitMap.size >= MAX_ICE_RATE_ENTRIES) {
-                    const oldest = iceRateLimitMap.keys().next().value;
+                while (entries.size >= maxEntries) {
+                    const oldest = entries.keys().next().value;
                     if (oldest === undefined) break;
-                    iceRateLimitMap.delete(oldest);
+                    entries.delete(oldest);
                 }
             }
-            iceRateLimitMap.set(clientIp, { count: 1, windowStart: now });
+            entries.set(key, { count: 1, windowStart: now });
             return true;
         }
-        if (existing.count >= ICE_RATE_LIMIT_MAX_REQUESTS) {
+        if (existing.count >= maxRequests) {
             return false;
         }
         existing.count += 1;
@@ -103,18 +110,40 @@ function createHttpIceRateLimiter() {
     }
 
     function purgeExpired(now = Date.now()) {
-        for (const [ip, tracker] of iceRateLimitMap.entries()) {
-            if (!tracker || now - tracker.windowStart >= ICE_RATE_LIMIT_WINDOW_MS) {
-                iceRateLimitMap.delete(ip);
+        for (const [key, tracker] of entries.entries()) {
+            if (!tracker || now - tracker.windowStart >= windowMs) {
+                entries.delete(key);
             }
         }
     }
 
     return {
-        iceRateLimitMap,
-        checkHttpIceRateLimit,
+        entries,
+        check,
         purgeExpired
     };
+}
+
+function createHttpIceRateLimiter() {
+    const limiter = createFixedWindowRateLimiter({
+        windowMs: ICE_RATE_LIMIT_WINDOW_MS,
+        maxRequests: ICE_RATE_LIMIT_MAX_REQUESTS,
+        maxEntries: MAX_ICE_RATE_ENTRIES
+    });
+
+    return {
+        iceRateLimitMap: limiter.entries,
+        checkHttpIceRateLimit: limiter.check,
+        purgeExpired: limiter.purgeExpired
+    };
+}
+
+function createCheckRoomRateLimiter() {
+    return createFixedWindowRateLimiter({
+        windowMs: CHECK_ROOM_RATE_LIMIT_WINDOW_MS,
+        maxRequests: CHECK_ROOM_RATE_LIMIT_MAX_REQUESTS,
+        maxEntries: MAX_CHECK_ROOM_RATE_ENTRIES
+    });
 }
 
 function createAttemptTracker() {
@@ -244,11 +273,16 @@ module.exports = {
     ICE_RATE_LIMIT_WINDOW_MS,
     ICE_RATE_LIMIT_MAX_REQUESTS,
     MAX_ICE_RATE_ENTRIES,
+    CHECK_ROOM_RATE_LIMIT_WINDOW_MS,
+    CHECK_ROOM_RATE_LIMIT_MAX_REQUESTS,
+    MAX_CHECK_ROOM_RATE_ENTRIES,
     MAX_LOGIN_ATTEMPTS_ENTRIES,
     LOGIN_ATTEMPT_TTL_MS,
     getHttpClientIp,
     getClientIdentifier,
+    createFixedWindowRateLimiter,
     createHttpIceRateLimiter,
+    createCheckRoomRateLimiter,
     createAttemptTracker,
     checkRateLimit,
     safeHandler

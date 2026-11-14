@@ -1,24 +1,59 @@
 import { getVideoConstraints } from './qos.js';
 
+const SYSTEM_AUDIO_CONSTRAINTS = {
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false
+};
+
+/**
+ * @typedef {import('./types.js').AppState} AppState
+ * @typedef {import('./types.js').DomRefs} DomRefs
+ * @typedef {import('./types.js').ShowToastFn} ShowToastFn
+ * @typedef {import('./types.js').AnyDocument} AnyDocument
+ */
+
+/**
+ * @param {{
+ *   state: AppState,
+ *   dom?: DomRefs,
+ *   getSocket?: () => any,
+ *   getPeers?: () => Map<string, any>,
+ *   getWebRtc?: () => any,
+ *   getGrid?: () => any,
+ *   getQosMonitor?: () => any,
+ *   startExcludeDiscordCapture?: () => Promise<any>,
+ *   startExcludeAppCapture?: ((pid: any) => Promise<any>) | null,
+ *   startAppAudioCapture?: (pid: any, opts?: any) => Promise<any>,
+ *   stopAppAudioCapture?: () => void,
+ *   showToast?: ShowToastFn,
+ *   documentObj?: AnyDocument | null,
+ *   navigatorObj?: (Navigator & Record<string, any>) | null,
+ *   MediaStreamCtor?: typeof MediaStream | null
+ * }} options
+ */
 export function createScreenShareController({
     state,
-    dom = {},
+    dom = /** @type {DomRefs} */ ({}),
     getSocket = () => null,
     getPeers = () => new Map(),
     getWebRtc = () => null,
     getGrid = () => null,
     getQosMonitor = () => null,
     startExcludeDiscordCapture = async () => null,
+    startExcludeAppCapture = null,
     startAppAudioCapture = async () => null,
     stopAppAudioCapture = () => {},
-    showToast = () => {},
-    documentObj = (typeof document !== 'undefined' ? document : null),
-    navigatorObj = (typeof navigator !== 'undefined' ? navigator : null),
+    showToast = /** @type {ShowToastFn} */ (() => {}),
+    documentObj = (typeof document !== 'undefined' ? /** @type {AnyDocument} */ (document) : null),
+    navigatorObj = (typeof navigator !== 'undefined' ? /** @type {Navigator & Record<string, any>} */ (navigator) : null),
     MediaStreamCtor = (typeof MediaStream !== 'undefined' ? MediaStream : null)
-} = {}) {
+} = /** @type {any} */ ({})) {
+    const shareMeta = /** @type {{ _generation?: number, _isStarting?: boolean, _attemptToken?: number }} */ (/** @type {unknown} */ (startScreenShare));
+
     async function stopScreenShare(options = {}) {
         const silent = Boolean(options && options.silent === true);
-        startScreenShare._generation = (startScreenShare._generation || 0) + 1;
+        shareMeta._generation = (shareMeta._generation || 0) + 1;
 
         const qm = getQosMonitor();
         if (qm) qm.stopQualityMonitor();
@@ -96,16 +131,64 @@ export function createScreenShareController({
         return Promise.allSettled(renegotiationPromises);
     }
 
+    async function captureDisplayMedia(constraints) {
+        try {
+            return await navigatorObj.mediaDevices.getDisplayMedia(constraints);
+        } catch (err) {
+            if (err && err.name === 'NotAllowedError') return null;
+            throw err;
+        }
+    }
+
+    async function findVbCableDeviceId(isShareCancelled) {
+        try {
+            let devices = await navigatorObj.mediaDevices.enumerateDevices();
+            if (isShareCancelled()) return null;
+            const hasEmptyLabels = devices.some((d) => d.deviceId && d.label === '');
+            if (hasEmptyLabels) {
+                let canProbeMicLabels = false;
+                if (navigatorObj.permissions && typeof navigatorObj.permissions.query === 'function') {
+                    try {
+                        const micPerm = await navigatorObj.permissions.query({ name: 'microphone' });
+                        canProbeMicLabels = Boolean(micPerm && micPerm.state === 'granted');
+                    } catch (_) {}
+                    if (isShareCancelled()) return null;
+                }
+                if (canProbeMicLabels) {
+                    try {
+                        const tempStream = await navigatorObj.mediaDevices.getUserMedia({ audio: true });
+                        tempStream.getTracks().forEach((t) => t.stop());
+                        devices = await navigatorObj.mediaDevices.enumerateDevices();
+                    } catch (_) {}
+                    if (isShareCancelled()) return null;
+                }
+            }
+
+            const cableOutput = devices.find((d) => {
+                if (d.kind !== 'audioinput') return false;
+                const label = (d.label || '').toLowerCase();
+                return label.includes('cable output') ||
+                    (label.includes('vb-audio') && label.includes('cable')) ||
+                    (label.includes('virtual cable') && !label.includes('16ch'));
+            });
+
+            return cableOutput ? cableOutput.deviceId : null;
+        } catch (_) {
+            return null;
+        }
+    }
+
     async function startScreenShare(
         audioMode = 'exclude_discord',
         targetPid = null,
         resolution = state.selectedVideoResolution,
-        fps = state.selectedVideoFps
+        fps = state.selectedVideoFps,
+        options = {}
     ) {
-        if (startScreenShare._isStarting) return;
-        startScreenShare._isStarting = true;
-        const attemptToken = (startScreenShare._attemptToken || 0) + 1;
-        startScreenShare._attemptToken = attemptToken;
+        if (shareMeta._isStarting) return;
+        shareMeta._isStarting = true;
+        const attemptToken = (shareMeta._attemptToken || 0) + 1;
+        shareMeta._attemptToken = attemptToken;
 
         let screenStream = null;
         let audioTrack = null;
@@ -115,20 +198,20 @@ export function createScreenShareController({
         let shareGen = null;
 
         try {
-            const preStopGen = startScreenShare._generation || 0;
+            const preStopGen = shareMeta._generation || 0;
             const hadLocalStream = Boolean(state.localStream);
             if (hadLocalStream) {
                 await stopScreenShare();
-                if ((startScreenShare._generation || 0) > preStopGen + 1) {
+                if ((shareMeta._generation || 0) > preStopGen + 1) {
                     return;
                 }
-            } else if ((startScreenShare._generation || 0) !== preStopGen) {
+            } else if ((shareMeta._generation || 0) !== preStopGen) {
                 return;
             }
 
-            shareGen = (startScreenShare._generation || 0) + 1;
-            startScreenShare._generation = shareGen;
-            const isShareCancelled = () => (startScreenShare._generation || 0) !== shareGen;
+            shareGen = (shareMeta._generation || 0) + 1;
+            shareMeta._generation = shareGen;
+            const isShareCancelled = () => (shareMeta._generation || 0) !== shareGen;
 
             let idealFps = Number(fps) || 60;
             let idealWidth = resolution === '720p' ? 1280 : 1920;
@@ -143,68 +226,76 @@ export function createScreenShareController({
             }
 
             const videoConstraints = getVideoConstraints(idealWidth === 1280 ? '720p' : '1080p', idealFps);
+            const shouldExcludeSelectedApp = audioMode === 'exclude_app' || (
+                audioMode === 'app' && Boolean(
+                    options && options.excludeApp !== undefined ? options.excludeApp : state.excludeSelectedApp
+                )
+            );
 
-            if (audioMode === 'exclude_discord') {
-                try {
-                    screenStream = await navigatorObj.mediaDevices.getDisplayMedia({
-                        video: videoConstraints,
-                        audio: false
-                    });
-                } catch (err) {
-                    if (err.name === 'NotAllowedError') return;
-                    throw err;
-                }
-                if (isShareCancelled()) return;
-
+            async function captureWithExcludeFallback(captureFn, targetLabel) {
+                let excludeSucceeded = false;
                 try {
                     startedDesktopAudioThisAttempt = true;
-                    audioTrack = await startExcludeDiscordCapture();
-                    console.log('[Audio] ✅ Capturando áudio de todo o sistema excluindo o Discord (WASAPI Exclusion Loopback)');
+                    audioTrack = await captureFn();
+                    if (audioTrack) {
+                        excludeSucceeded = true;
+                        console.log(`[Audio] ✅ Capturando áudio no modo exclusão (${targetLabel})`);
+                    } else {
+                        startedDesktopAudioThisAttempt = false;
+                        try {
+                            await stopAppAudioCapture();
+                        } catch (_) {}
+                        showToast(`Aviso de Áudio: Não foi possível isolar ${targetLabel} — alternando para áudio completo do sistema.`, 'warning');
+                    }
                 } catch (appErr) {
-                    console.warn('[Audio] Falha ao capturar no modo excluir Discord:', appErr.message);
+                    console.warn(`[Audio] Falha ao capturar no modo excluir ${targetLabel}:`, appErr.message);
                     showToast('Aviso de Áudio: ' + appErr.message + ' — alternando para áudio completo do sistema.', 'warning');
                     startedDesktopAudioThisAttempt = false;
                     try {
                         await stopAppAudioCapture();
                     } catch (_) {}
-                    try {
-                        const fallbackStream = await navigatorObj.mediaDevices.getDisplayMedia({
-                            video: videoConstraints,
-                            audio: {
-                                echoCancellation: false,
-                                noiseSuppression: false,
-                                autoGainControl: false
-                            }
-                        });
-                        if (isShareCancelled()) {
-                            fallbackStream.getTracks().forEach((t) => { try { t.stop(); } catch (_) {} });
-                            return;
-                        }
-                        if (fallbackStream && fallbackStream.getVideoTracks().length > 0) {
-                            if (screenStream) {
-                                screenStream.getTracks().forEach((t) => { try { t.stop(); } catch (_) {} });
-                            }
-                            screenStream = fallbackStream;
-                            audioTrack = fallbackStream.getAudioTracks()[0] || null;
-                        } else if (fallbackStream) {
-                            fallbackStream.getTracks().forEach((t) => { try { t.stop(); } catch (_) {} });
-                        }
-                    } catch (_) {
-                        // Fallback recusado ou indisponível: segue apenas com vídeo já capturado
-                    }
                 }
-                if (isShareCancelled()) return;
-            } else if (audioMode === 'app' && targetPid) {
-                try {
-                    screenStream = await navigatorObj.mediaDevices.getDisplayMedia({
+
+                if (isShareCancelled()) return null;
+
+                if (excludeSucceeded) {
+                    return captureDisplayMedia({
                         video: videoConstraints,
                         audio: false
                     });
-                } catch (err) {
-                    if (err.name === 'NotAllowedError') return;
-                    throw err;
                 }
-                if (isShareCancelled()) return;
+
+                const fallbackStream = await captureDisplayMedia({
+                    video: videoConstraints,
+                    audio: SYSTEM_AUDIO_CONSTRAINTS
+                });
+                if (fallbackStream && typeof fallbackStream.getAudioTracks === 'function') {
+                    audioTrack = fallbackStream.getAudioTracks()[0] || null;
+                }
+                return fallbackStream;
+            }
+
+            if (audioMode === 'exclude_discord') {
+                screenStream = await captureWithExcludeFallback(
+                    () => startExcludeDiscordCapture(),
+                    'o Discord'
+                );
+                if (!screenStream || isShareCancelled()) return;
+            } else if (shouldExcludeSelectedApp && targetPid) {
+                const excludeAppFn = typeof startExcludeAppCapture === 'function'
+                    ? () => startExcludeAppCapture(targetPid)
+                    : () => startAppAudioCapture(targetPid, { exclude: true });
+                screenStream = await captureWithExcludeFallback(
+                    excludeAppFn,
+                    'o aplicativo selecionado'
+                );
+                if (!screenStream || isShareCancelled()) return;
+            } else if (audioMode === 'app' && targetPid) {
+                screenStream = await captureDisplayMedia({
+                    video: videoConstraints,
+                    audio: false
+                });
+                if (!screenStream || isShareCancelled()) return;
 
                 try {
                     startedDesktopAudioThisAttempt = true;
@@ -216,62 +307,28 @@ export function createScreenShareController({
                 }
                 if (isShareCancelled()) return;
             } else if (audioMode === 'system') {
+                const useVbCable = Boolean(
+                    options && options.useVbCable !== undefined ? options.useVbCable : state.useVbCableAudio
+                );
                 let cableOutputId = null;
-                try {
-                    let devices = await navigatorObj.mediaDevices.enumerateDevices();
-                    if (isShareCancelled()) return;
-                    const hasEmptyLabels = devices.some((d) => d.deviceId && d.label === '');
-                    if (hasEmptyLabels) {
-                        let canProbeMicLabels = false;
-                        if (navigatorObj.permissions && typeof navigatorObj.permissions.query === 'function') {
-                            try {
-                                const micPerm = await navigatorObj.permissions.query({ name: 'microphone' });
-                                canProbeMicLabels = Boolean(micPerm && micPerm.state === 'granted');
-                            } catch (_) {}
-                            if (isShareCancelled()) return;
-                        }
-                        if (canProbeMicLabels) {
-                            try {
-                                const tempStream = await navigatorObj.mediaDevices.getUserMedia({ audio: true });
-                                tempStream.getTracks().forEach((t) => t.stop());
-                                devices = await navigatorObj.mediaDevices.enumerateDevices();
-                            } catch (_) {}
-                            if (isShareCancelled()) return;
-                        }
-                    }
 
-                    const cableOutput = devices.find((d) => {
-                        if (d.kind !== 'audioinput') return false;
-                        const label = d.label.toLowerCase();
-                        return label.includes('cable output') ||
-                            (label.includes('vb-audio') && label.includes('cable')) ||
-                            (label.includes('virtual cable') && !label.includes('16ch'));
+                if (useVbCable) {
+                    cableOutputId = await findVbCableDeviceId(isShareCancelled);
+                    if (isShareCancelled()) return;
+                }
+
+                if (useVbCable && cableOutputId) {
+                    screenStream = await captureDisplayMedia({
+                        video: videoConstraints,
+                        audio: false
                     });
-
-                    if (cableOutput) {
-                        cableOutputId = cableOutput.deviceId;
-                    }
-                } catch (_) {}
-
-                if (cableOutputId) {
-                    try {
-                        screenStream = await navigatorObj.mediaDevices.getDisplayMedia({
-                            video: videoConstraints,
-                            audio: false
-                        });
-                    } catch (err) {
-                        if (err.name === 'NotAllowedError') return;
-                        throw err;
-                    }
-                    if (isShareCancelled()) return;
+                    if (!screenStream || isShareCancelled()) return;
 
                     try {
                         cableStream = await navigatorObj.mediaDevices.getUserMedia({
                             audio: {
                                 deviceId: { exact: cableOutputId },
-                                echoCancellation: false,
-                                noiseSuppression: false,
-                                autoGainControl: false,
+                                ...SYSTEM_AUDIO_CONSTRAINTS,
                                 channelCount: 2,
                                 sampleRate: 48000
                             }
@@ -294,49 +351,33 @@ export function createScreenShareController({
                     }
                     if (isShareCancelled()) return;
                 } else {
-                    try {
-                        screenStream = await navigatorObj.mediaDevices.getDisplayMedia({
-                            video: videoConstraints,
-                            audio: {
-                                echoCancellation: false,
-                                noiseSuppression: false,
-                                autoGainControl: false
-                            }
-                        });
-                    } catch (err) {
-                        if (err.name === 'NotAllowedError') return;
-                        throw err;
+                    if (useVbCable && !cableOutputId) {
+                        showToast('Aviso de Áudio: VB-Cable não encontrado — usando áudio nativo do sistema.', 'warning', 5000);
                     }
-                    if (isShareCancelled()) return;
+                    screenStream = await captureDisplayMedia({
+                        video: videoConstraints,
+                        audio: SYSTEM_AUDIO_CONSTRAINTS
+                    });
+                    if (!screenStream || isShareCancelled()) return;
 
                     if (screenStream.getAudioTracks().length > 0) {
                         audioTrack = screenStream.getAudioTracks()[0];
                         console.log('[Audio] ✅ System audio captured directly via getDisplayMedia');
                     }
                 }
-            } else if (audioMode === 'app') {
+            } else if (audioMode === 'app' || audioMode === 'exclude_app') {
                 showToast('Nenhum aplicativo selecionado para áudio isolado. Continuando apenas com vídeo.', 'warning');
-                try {
-                    screenStream = await navigatorObj.mediaDevices.getDisplayMedia({
-                        video: videoConstraints,
-                        audio: false
-                    });
-                } catch (err) {
-                    if (err.name === 'NotAllowedError') return;
-                    throw err;
-                }
-                if (isShareCancelled()) return;
+                screenStream = await captureDisplayMedia({
+                    video: videoConstraints,
+                    audio: false
+                });
+                if (!screenStream || isShareCancelled()) return;
             } else {
-                try {
-                    screenStream = await navigatorObj.mediaDevices.getDisplayMedia({
-                        video: videoConstraints,
-                        audio: false
-                    });
-                } catch (err) {
-                    if (err.name === 'NotAllowedError') return;
-                    throw err;
-                }
-                if (isShareCancelled()) return;
+                screenStream = await captureDisplayMedia({
+                    video: videoConstraints,
+                    audio: false
+                });
+                if (!screenStream || isShareCancelled()) return;
             }
 
             if (isShareCancelled()) return;
@@ -412,7 +453,7 @@ export function createScreenShareController({
             }
         } finally {
             if (!captureSucceeded) {
-                if (state.localStream && (shareGen === null || (startScreenShare._generation || 0) === shareGen)) {
+                if (state.localStream && (shareGen === null || (shareMeta._generation || 0) === shareGen)) {
                     try {
                         state.localStream.getTracks().forEach((t) => { try { t.stop(); } catch (_) {} });
                     } catch (_) {}
@@ -431,13 +472,13 @@ export function createScreenShareController({
                 if (audioTrack) {
                     try { audioTrack.stop(); } catch (_) {}
                 }
-                if ((audioMode === 'exclude_discord' || audioMode === 'app') &&
+                if ((audioMode === 'exclude_discord' || audioMode === 'exclude_app' || audioMode === 'app') &&
                     startedDesktopAudioThisAttempt &&
-                    startScreenShare._attemptToken === attemptToken) {
+                    shareMeta._attemptToken === attemptToken) {
                     try { stopAppAudioCapture(); } catch (_) {}
                 }
             }
-            startScreenShare._isStarting = false;
+            shareMeta._isStarting = false;
         }
     }
 
@@ -449,7 +490,10 @@ export function createScreenShareController({
             return;
         }
 
-        const deadAudioTracks = state.localStream.getAudioTracks().filter((track) => track && track._isDesktopWasapiTrack);
+        const deadAudioTracks = state.localStream.getAudioTracks().filter((track) => {
+            const trackMeta = /** @type {MediaStreamTrack & { _isDesktopWasapiTrack?: boolean }} */ (track);
+            return Boolean(trackMeta && trackMeta._isDesktopWasapiTrack);
+        });
         if (deadAudioTracks.length === 0) {
             return;
         }
@@ -515,7 +559,7 @@ export function createScreenShareController({
     }
 
     function invalidateGeneration() {
-        startScreenShare._generation = (startScreenShare._generation || 0) + 1;
+        shareMeta._generation = (shareMeta._generation || 0) + 1;
     }
 
     function bindEvents() {

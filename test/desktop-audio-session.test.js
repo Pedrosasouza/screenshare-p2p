@@ -444,4 +444,22 @@ describe('Sessão Desktop WASAPI / AudioWorklet (desktop-audio.js)', () => {
             assert.strictEqual(unexpectedNotifications, 1);
         });
     });
+
+    it('T9: startExcludeAppCapture repassa exclude=true para StreamGridDesktop.startAppAudioCapture', async () => {
+        const startCalls = [];
+        await withDesktopEnv({
+            startAppAudioCapture: async (pid, onPcm, options) => {
+                startCalls.push({ pid, hasCb: typeof onPcm === 'function', options });
+                return { pid, sample_rate: 48000, channels: 2, mode: options && options.exclude ? 'exclude' : 'include' };
+            }
+        }, async ({ mod, windowObj }) => {
+            const track = await mod.startExcludeAppCapture(7777, windowObj);
+            assert.ok(track && track.kind === 'audio');
+            assert.strictEqual(track._isDesktopWasapiTrack, true);
+            assert.strictEqual(startCalls.length, 1);
+            assert.strictEqual(startCalls[0].pid, 7777);
+            assert.strictEqual(startCalls[0].hasCb, true);
+            assert.deepStrictEqual(startCalls[0].options, { exclude: true });
+        });
+    });
 });

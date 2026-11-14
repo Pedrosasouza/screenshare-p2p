@@ -298,6 +298,8 @@ test('T5 (Item D): Server sets CSP and security headers on /, /health, and /ice-
             const csp = res.headers.get('content-security-policy');
             assert(csp, `Content-Security-Policy header must exist on ${route}`);
             assert(csp.includes("default-src 'self'"));
+            assert(csp.includes("style-src 'self'"));
+            assert.equal(csp.includes("'unsafe-inline'"), false);
             assert(csp.includes("object-src 'none'"));
             assert(csp.includes("frame-ancestors 'none'"));
             assert.equal(res.headers.get('referrer-policy'), 'no-referrer');

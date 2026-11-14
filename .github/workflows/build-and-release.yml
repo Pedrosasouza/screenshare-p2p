@@ -44,6 +44,12 @@ jobs:
       - name: Install Node.js dependencies
         run: npm ci
 
+      - name: Run ESLint
+        run: npm run lint
+
+      - name: Run TypeScript JSDoc Typecheck
+        run: npm run typecheck
+
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

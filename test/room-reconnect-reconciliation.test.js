@@ -10,7 +10,6 @@ const {
     MockRTCSessionDescription,
     MockRTCIceCandidate,
     createMockTrack,
-    createMockSender,
     createMockPeerConnection
 } = require('./helpers/mock-webrtc');
 const { createMockElement, createMockDocument, createMockStorage } = require('./helpers/mock-dom');

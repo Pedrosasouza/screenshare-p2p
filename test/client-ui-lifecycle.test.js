@@ -289,7 +289,6 @@ test('T4: Anti-reentrancy and generation guards on startQualityMonitor / openSta
 });
 
 test('T5: teardownClientSession disconnects offline sockets, stops desktop listeners, and removes window/document listeners', async () => {
-    const mods = await loadModules();
     const { initApp } = await import(`${pathToFileURL(path.join(ROOT_DIR, 'public/app.js')).href}?teardown=${Date.now()}`);
 
     const windowListeners = new Map();

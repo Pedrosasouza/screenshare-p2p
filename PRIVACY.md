@@ -1,6 +1,6 @@
 # Privacy Policy for StreamGrid
 
-Last updated: October 2026
+Last updated: November 2026
 
 **StreamGrid** is an open-source real-time multi-screen sharing application developed by Pedro Souza. This Privacy Policy explains how StreamGrid handles information across both the web application and the Windows desktop package.
 
@@ -25,7 +25,7 @@ The signaling server coordinates the initial WebRTC connection setup:
 * **Session Metadata:** The server facilitates the exchange of SDP offers, answers, and ICE candidates between clients. Once the peer-to-peer connection is established, ongoing media traffic does not traverse the signaling server.
 * **Room Passwords:** When a private room is created with a password, the password is never stored in plain text. It is hashed using cryptographic hashing with random salts (`scrypt`) in server memory.
 * **Ephemeral Lifecycle:** Room states, participant sockets, and password hashes exist solely in volatile memory during the active session. Once all participants leave a room, the room and its associated state are evicted from memory.
-* **Abuse Prevention & Rate Limiting:** The server maintains temporary, rolling counters in memory to prevent brute-force password guessing and denial-of-service attempts. IP addresses used for rate limiting are stored in a volatile in-memory map and automatically evicted after 10 minutes of inactivity; they are never logged persistently or linked to personal profiles.
+* **Abuse Prevention & Rate Limiting:** The server maintains temporary, rolling counters in memory to prevent brute-force password guessing, room enumeration, and denial-of-service attempts across `check-room`, `join-room`, and `/ice-servers`. IP addresses used for rate limiting are stored in a volatile in-memory map and automatically evicted after 10 minutes of inactivity; they are never logged persistently or linked to personal profiles.
 
 ---
 
@@ -40,7 +40,7 @@ The Windows desktop version includes a native Rust module integrated directly in
 
 ## 4. Third-Party Services & Infrastructure
 
-* **STUN & TURN Relay Servers:** StreamGrid utilizes public STUN servers (`stun:stun.l.google.com:19302`, `stun1.l.google.com:19302`, `stun2.l.google.com:19302`, and `stun:global.stun.twilio.com:3478`) for NAT traversal (discovering external reflexive IP candidates) and public Metered.ca Open Relay TURN servers (`turn:openrelay.metered.ca:80` and `:443`) solely as a fallback when direct P2P connections are blocked by symmetric NAT or CGNAT. Media streams traversing TURN relays remain encrypted end-to-end via DTLS/SRTP; STUN/TURN servers do not receive room names, passwords, or decrypted media content.
+* **STUN & TURN Relay Servers:** StreamGrid utilizes public STUN servers (`stun:stun.cloudflare.com:3478`, `stun:stun.l.google.com:19302`, `stun:stun1.l.google.com:19302`, and `stun:global.stun.twilio.com:3478`) for NAT traversal (discovering external reflexive IP candidates) and public Metered.ca Open Relay TURN servers (`turn:openrelay.metered.ca:80`, `:443`, and `:443?transport=tcp`) as a fallback when direct P2P connections are blocked by symmetric NAT or CGNAT. Self-hosted or production deployments can also optionally issue short-lived TURN credentials (via Cloudflare TURN or Coturn REST HMAC) through `/ice-servers` without exposing long-lived secrets to clients. Media streams traversing TURN relays remain encrypted end-to-end via DTLS/SRTP; STUN/TURN servers do not receive room names, passwords, or decrypted media content.
 * **Hosting Infrastructure Logs (Render):** The public web demonstration and signaling instance are deployed on Render infrastructure. Standard connection logs (such as IP addresses, User-Agent strings, and request timestamps) are automatically processed and temporarily retained by Render's edge proxies in accordance with their privacy policy to maintain network availability, DDoS mitigation, and operational security.
 
 ---
@@ -48,8 +48,8 @@ The Windows desktop version includes a native Rust module integrated directly in
 ## 5. Cookies & Local Storage
 
 * StreamGrid does not use persistent tracking cookies or advertising identifiers.
-* Local browser storage (`localStorage`) is used strictly to retain non-sensitive client preferences (such as your chosen display name, preferred resolution, framerate, and custom signaling server URL if configured).
-* Session storage (`sessionStorage`) may be used strictly for ephemeral UI state across reloads within the current window session.
+* Local browser storage (`localStorage`) is used strictly to retain non-sensitive client preferences (such as your chosen display name, UI theme, preferred resolution, framerate, audio source mode, per-app exclusion / VB-Cable opt-in preferences, and custom signaling server URL if configured).
+* Session storage (`sessionStorage`) is used strictly within the active browser tab session to retain ephemeral reconnection state—specifically the active room password (`streamgrid_room_pass`) in memory for reloads (`F5`)—and is cleared when leaving the room or closing the tab.
 
 ---
 

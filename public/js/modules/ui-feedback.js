@@ -91,9 +91,13 @@ export function showToast(message, type = 'info', durationMs = 4000, doc) {
     container.appendChild(toast);
 }
 
-export function playPresenceChime(type = 'join', windowObj = (typeof window !== 'undefined' ? window : null)) {
+/**
+ * @param {string} [type]
+ * @param {import('./types.js').AnyWindow | null} [windowObj]
+ */
+export function playPresenceChime(type = 'join', windowObj = /** @type {import('./types.js').AnyWindow | null} */ (typeof window !== 'undefined' ? window : null)) {
     try {
-        const win = windowObj || (typeof window !== 'undefined' ? window : null);
+        const win = /** @type {import('./types.js').AnyWindow | null} */ (windowObj || (typeof window !== 'undefined' ? window : null));
         if (!win) return;
         const AudioCtx = win.AudioContext || win.webkitAudioContext;
         if (!AudioCtx) return;
@@ -141,7 +145,7 @@ export function initTheme(options = {}) {
     const storageObj = options.storage || (typeof localStorage !== 'undefined' ? localStorage : null);
     let savedTheme = null;
     if (storageObj && typeof storageObj.getItem === 'function') {
-        try { savedTheme = storageObj.getItem(THEME_KEY); } catch (e) {}
+        try { savedTheme = storageObj.getItem(THEME_KEY); } catch (_) {}
     }
 
     if (!savedTheme) {
@@ -158,7 +162,7 @@ export function applyTheme(theme, themeBtnEl = null, options = {}) {
         doc.documentElement.setAttribute('data-theme', theme);
     }
     if (storageObj && typeof storageObj.setItem === 'function') {
-        try { storageObj.setItem(THEME_KEY, theme); } catch (e) {}
+        try { storageObj.setItem(THEME_KEY, theme); } catch (_) {}
     }
 
     const themeBtn = themeBtnEl || (doc && typeof doc.getElementById === 'function' ? doc.getElementById('btnThemeToggle') : null);

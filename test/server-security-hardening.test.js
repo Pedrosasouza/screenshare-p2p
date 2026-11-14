@@ -184,6 +184,7 @@ describe('Hardening HTTP, signal relay & loginAttempts', () => {
 
             const aliceName = peerRes.data.userNames && peerRes.data.userNames[wsSocket.id];
             assert.ok(typeof aliceName === 'string' && aliceName.length > 0);
+            // eslint-disable-next-line no-control-regex
             assert.ok(!/[\x00-\x1f\x7f]/.test(aliceName));
         } finally {
             wsSocket.disconnect();
@@ -315,5 +316,263 @@ describe('Hardening HTTP, signal relay & loginAttempts', () => {
                     'Evicção de zumbi deve emitir user-left aos peers restantes'
                 );
             });
+    });
+});
+
+describe('Hardening CORS produção, rate-limit de check-room, CSP estrita e bloqueio de package.json', () => {
+    const { PassThrough } = require('stream');
+    const http = require('http');
+
+    function dispatchExpress(app, { method = 'GET', url = '/', headers = {} }) {
+        return new Promise((resolve, reject) => {
+            const socket = new PassThrough();
+            const req = new http.IncomingMessage(socket);
+            req.method = method;
+            req.url = url;
+            req.headers = Object.fromEntries(
+                Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v])
+            );
+            const res = new http.ServerResponse(req);
+            const outSocket = new PassThrough();
+            const chunks = [];
+            outSocket.on('data', (chunk) => chunks.push(chunk));
+            res.assignSocket(outSocket);
+            res.on('finish', () => {
+                const raw = Buffer.concat(chunks).toString('utf8');
+                const bodyIndex = raw.indexOf('\r\n\r\n');
+                resolve({
+                    statusCode: res.statusCode,
+                    headers: res.getHeaders(),
+                    body: bodyIndex >= 0 ? raw.slice(bodyIndex + 4) : raw
+                });
+            });
+            res.on('error', reject);
+            app.handle(req, res, reject);
+        });
+    }
+
+    it('T9: produção sem ALLOWED_ORIGINS não retorna wildcard CORS e /ice-servers bloqueia origem não autorizada com 403', async () => {
+        const {
+            parseAllowedOrigins,
+            getCorsOrigin,
+            setIceEndpointCorsHeaders
+        } = require('../src/server/security-headers');
+
+        assert.strictEqual(getCorsOrigin({}), '*');
+        assert.strictEqual(getCorsOrigin({ NODE_ENV: 'development' }), '*');
+
+        const origWarn = console.warn;
+        const warnings = [];
+        console.warn = (...args) => warnings.push(args.join(' '));
+        let prodCors;
+        try {
+            const parsed = parseAllowedOrigins({ NODE_ENV: 'production' });
+            assert.strictEqual(parsed.isProduction, true);
+            assert.strictEqual(parsed.allowWildcard, false);
+            assert.deepStrictEqual(parsed.allowed, []);
+
+            prodCors = getCorsOrigin({ NODE_ENV: 'production' });
+        } finally {
+            console.warn = origWarn;
+        }
+
+        assert.notStrictEqual(prodCors, '*');
+        assert.strictEqual(typeof prodCors, 'function');
+        assert.ok(warnings.some((msg) => msg.includes('ALLOWED_ORIGINS')));
+
+        await new Promise((resolve, reject) => {
+            prodCors(undefined, (err, allowed) => {
+                if (err) return reject(err);
+                assert.strictEqual(allowed, true);
+                resolve();
+            });
+        });
+
+        await new Promise((resolve, reject) => {
+            prodCors('https://evil.com', (err, allowed) => {
+                try {
+                    assert.ok(err instanceof Error);
+                    assert.notStrictEqual(allowed, true);
+                    resolve();
+                } catch (assertionErr) {
+                    reject(assertionErr);
+                }
+            });
+        });
+
+        const renderCors = getCorsOrigin({
+            NODE_ENV: 'production',
+            RENDER_EXTERNAL_URL: 'https://screenshare-demo.onrender.com/some/path'
+        });
+        assert.strictEqual(typeof renderCors, 'function');
+        await new Promise((resolve, reject) => {
+            renderCors('https://screenshare-demo.onrender.com', (err, allowed) => {
+                if (err) return reject(err);
+                assert.strictEqual(allowed, true);
+                resolve();
+            });
+        });
+
+        const capturedHeaders = {};
+        const mockRes = {
+            setHeader(k, v) { capturedHeaders[k.toLowerCase()] = v; }
+        };
+        const allowedDirect = setIceEndpointCorsHeaders(
+            { headers: { origin: 'https://evil.com' } },
+            mockRes,
+            { NODE_ENV: 'production' }
+        );
+        assert.strictEqual(allowedDirect, false);
+        assert.strictEqual(capturedHeaders['access-control-allow-origin'], undefined);
+
+        const { createServerApp } = require('../server');
+
+        const prodCtx = createServerApp({ env: { NODE_ENV: 'production' } });
+        try {
+            const blockedRes = await dispatchExpress(prodCtx.app, {
+                url: '/ice-servers',
+                headers: { Origin: 'https://evil.com' }
+            });
+            assert.strictEqual(blockedRes.statusCode, 403);
+            assert.strictEqual(blockedRes.headers['access-control-allow-origin'], undefined);
+
+            const sameOriginRes = await dispatchExpress(prodCtx.app, {
+                url: '/ice-servers'
+            });
+            assert.strictEqual(sameOriginRes.statusCode, 200);
+            assert.strictEqual(sameOriginRes.headers['access-control-allow-origin'], undefined);
+        } finally {
+            prodCtx.stopCleanupTimer();
+        }
+    });
+
+    it('T10: check-room aplica rate-limit por IP entre múltiplos sockets distintos', async () => {
+        const { registerSignalingHandlers } = require('../src/server/signaling');
+        const {
+            createAttemptTracker,
+            createCheckRoomRateLimiter,
+            CHECK_ROOM_RATE_LIMIT_MAX_REQUESTS
+        } = require('../src/server/rate-limit');
+
+        const rooms = new Map([
+            ['sala-demo', {
+                passwordHash: null,
+                passwordSalt: null,
+                members: new Map([['host-1', 'client-host']]),
+                names: new Map([['host-1', 'Host']]),
+                createdAt: Date.now()
+            }]
+        ]);
+
+        let connectionHandler = null;
+        const fakeIo = {
+            sockets: { sockets: new Map() },
+            to: () => ({ emit: () => {} }),
+            on: (ev, cb) => {
+                if (ev === 'connection') connectionHandler = cb;
+            }
+        };
+
+        const checkRoomRateLimiter = createCheckRoomRateLimiter();
+        registerSignalingHandlers(fakeIo, {
+            rooms,
+            attemptTracker: createAttemptTracker(),
+            checkRoomRateLimiter,
+            env: { TRUST_PROXY: 'false' }
+        });
+
+        const invokeCheckRoom = (socketId, ip) => {
+            const handlers = {};
+            const sock = {
+                id: socketId,
+                connected: true,
+                handshake: { address: ip, headers: {} },
+                roomId: null,
+                join: () => {},
+                leave: () => {},
+                emit: () => {},
+                to: () => ({ emit: () => {} }),
+                on: (ev, fn) => { handlers[ev] = fn; }
+            };
+            fakeIo.sockets.sockets.set(socketId, sock);
+            connectionHandler(sock);
+            return new Promise((resolve) => {
+                handlers['check-room']({ roomId: 'sala-demo' }, resolve);
+            });
+        };
+
+        for (let i = 0; i < CHECK_ROOM_RATE_LIMIT_MAX_REQUESTS; i += 1) {
+            const res = await invokeCheckRoom(`sock-ip1-${i}`, '203.0.113.99');
+            assert.strictEqual(res.exists, true);
+            assert.strictEqual(res.error, undefined);
+        }
+
+        const limitedRes = await invokeCheckRoom('sock-ip1-over', '203.0.113.99');
+        assert.strictEqual(limitedRes.exists, false);
+        assert.strictEqual(limitedRes.memberCount, 0);
+        assert.strictEqual(limitedRes.hasPassword, false);
+        assert.strictEqual(limitedRes.error, 'rate_limited');
+
+        const otherIpRes = await invokeCheckRoom('sock-ip2-0', '198.51.100.42');
+        assert.strictEqual(otherIpRes.exists, true);
+        assert.strictEqual(otherIpRes.error, undefined);
+    });
+
+    it('T11: CSP remove unsafe-inline de style-src no servidor e Tauri e não há estilos inline em HTML/JS', () => {
+        const fs = require('fs');
+        const path = require('path');
+        const { CONTENT_SECURITY_POLICY } = require('../src/server/security-headers');
+
+        assert.ok(CONTENT_SECURITY_POLICY.includes("style-src 'self'"));
+        assert.strictEqual(CONTENT_SECURITY_POLICY.includes("'unsafe-inline'"), false);
+
+        const tauriConf = JSON.parse(
+            fs.readFileSync(path.join(__dirname, '../src-tauri/tauri.conf.json'), 'utf8')
+        );
+        const tauriCsp = tauriConf.app && tauriConf.app.security && tauriConf.app.security.csp;
+        assert.ok(tauriCsp && tauriCsp.includes("style-src 'self'"));
+        assert.strictEqual(tauriCsp.includes("'unsafe-inline'"), false);
+
+        const html = fs.readFileSync(path.join(__dirname, '../public/index.html'), 'utf8');
+        assert.strictEqual(/\sstyle\s*=/i.test(html), false, 'public/index.html não deve conter atributos style="..."');
+
+        const jsDir = path.join(__dirname, '../public/js');
+        const jsFiles = [path.join(__dirname, '../public/app.js')];
+        const collectJs = (dir) => {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                const full = path.join(dir, entry.name);
+                if (entry.isDirectory()) collectJs(full);
+                else if (entry.name.endsWith('.js')) jsFiles.push(full);
+            }
+        };
+        collectJs(jsDir);
+
+        for (const filePath of jsFiles) {
+            const content = fs.readFileSync(filePath, 'utf8');
+            assert.strictEqual(
+                /cssText|setAttribute\(\s*['"]style['"]/i.test(content),
+                false,
+                `${path.relative(path.join(__dirname, '..'), filePath)} não deve usar cssText ou setAttribute('style', ...)`
+            );
+        }
+    });
+
+    it('T12: requisições HTTP a qualquer package.json estático retornam 404 antes do express.static', async () => {
+        const { createServerApp } = require('../server');
+        const ctx = createServerApp({ env: { NODE_ENV: 'development' } });
+        try {
+            const blockedPaths = [
+                '/package.json',
+                '/js/package.json',
+                '/js/modules/package.json',
+                '/js/modules/package.json?v=1'
+            ];
+            for (const url of blockedPaths) {
+                const res = await dispatchExpress(ctx.app, { url });
+                assert.strictEqual(res.statusCode, 404, `Esperado 404 para ${url}, recebeu ${res.statusCode}`);
+            }
+        } finally {
+            ctx.stopCleanupTimer();
+        }
     });
 });

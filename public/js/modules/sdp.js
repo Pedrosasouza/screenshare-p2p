@@ -74,7 +74,7 @@ export function optimizeSDP(sdp) {
 
     for (const line of lines) {
         if (line.startsWith('a=rtpmap:')) {
-            const match = line.match(/^a=rtpmap:(\d+)\s+([^\/]+)/i);
+            const match = line.match(/^a=rtpmap:(\d+)\s+([^/]+)/i);
             if (match) {
                 const pt = match[1];
                 const codec = match[2].toLowerCase();

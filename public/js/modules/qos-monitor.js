@@ -1,9 +1,27 @@
 import { getMaxBitrateForPeerCount, collectPeerTelemetry } from './qos.js';
 import { CONTENT_HINT_KEY, saveClientPreference } from './preferences.js';
 
+const MIN_VIDEO_BITRATE = 350000;
+
+/**
+ * Clamp a bitrate between the minimum floor and the absolute peerCap ceiling.
+ * peerCap always wins when peerCap < minBitrate (e.g., many peers at 720p30).
+ */
+export function clampBitrate(value, peerCap, minBitrate = MIN_VIDEO_BITRATE) {
+    return Math.min(peerCap, Math.max(minBitrate, value));
+}
+
+/**
+ * @param {{
+ *   state?: import('./types.js').AppState,
+ *   dom?: import('./types.js').DomRefs,
+ *   getPeers?: () => Map<string, any>,
+ *   storage?: Storage | null
+ * }} [options]
+ */
 export function createQosMonitor({
-    state,
-    dom = {},
+    state = /** @type {import('./types.js').AppState} */ ({}),
+    dom = /** @type {import('./types.js').DomRefs} */ ({}),
     getPeers = () => new Map(),
     storage = (typeof localStorage !== 'undefined' ? localStorage : null)
 } = {}) {
@@ -116,13 +134,13 @@ export function createQosMonitor({
                         }
                     }
 
-                    const boundedTarget = Math.max(350000, Math.min(peerCap, targetBitrate));
+                    const boundedTarget = clampBitrate(targetBitrate, peerCap);
                     let nextBitrate = current;
                     if (Math.abs(boundedTarget - current) <= 100000) {
                         nextBitrate = boundedTarget;
                     } else {
                         const smoothed = Math.floor(current + (boundedTarget - current) * 0.3);
-                        const clamped = Math.max(350000, Math.min(peerCap, smoothed));
+                        const clamped = clampBitrate(smoothed, peerCap);
                         if (Math.abs(clamped - current) >= 25000) {
                             nextBitrate = clamped;
                         }
@@ -161,8 +179,8 @@ export function createQosMonitor({
                 }
 
                 const fps = Math.round(inboundFps || 0);
-                let qosClass = 'good';
-                let qosText = `${fps > 0 ? fps + ' FPS' : 'Bom'}`;
+                let qosClass;
+                let qosText;
 
                 if (lossRatio > 0.08 || (fps > 0 && fps < 15)) {
                     qosClass = 'poor';

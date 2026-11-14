@@ -6,11 +6,14 @@ const { pathToFileURL } = require('node:url');
 const { createMockDocument, createMockElement } = require('./helpers/mock-dom');
 
 describe('Utilitários da barra inferior (PiP e Stats)', () => {
-    it('T1: public/index.html define btnTogglePip, btnToggleStats e statsModal', () => {
+    it('T1: public/index.html define btnTogglePip, btnToggleStats, statsModal e formulario de servidor customizado', () => {
         const html = fs.readFileSync(path.resolve(__dirname, '../public/index.html'), 'utf8');
         assert.ok(html.includes('id="btnTogglePip"'));
         assert.ok(html.includes('id="btnToggleStats"'));
         assert.ok(html.includes('id="statsModal"'));
+        assert.ok(html.includes('id="customServerFormContainer"'));
+        assert.ok(html.includes('id="inputCustomServerUrl"'));
+        assert.ok(html.includes('id="btnSaveServerUrl"'));
     });
 
     it('T2: stats-modal togglePictureInPicture ativa e sai de PiP corretamente', async () => {
@@ -101,5 +104,48 @@ describe('Utilitários da barra inferior (PiP e Stats)', () => {
         } finally {
             ctrl.closeStatsModal();
         }
+    });
+
+    it('T4: toggleVideoPictureInPicture alterna PiP entre dois vídeos distintos e trata saída no mesmo vídeo', async () => {
+        const { toggleVideoPictureInPicture } = await import(
+            pathToFileURL(path.resolve(__dirname, '../public/js/modules/tile-dom.js')).href
+        );
+
+        const doc = createMockDocument();
+        let exitCount = 0;
+        doc.pictureInPictureEnabled = true;
+        doc.pictureInPictureElement = null;
+        doc.exitPictureInPicture = async () => {
+            exitCount += 1;
+            doc.pictureInPictureElement = null;
+        };
+
+        const videoA = createMockElement('video');
+        const videoB = createMockElement('video');
+        let reqA = 0;
+        let reqB = 0;
+        videoA.requestPictureInPicture = async () => {
+            reqA += 1;
+            doc.pictureInPictureElement = videoA;
+        };
+        videoB.requestPictureInPicture = async () => {
+            reqB += 1;
+            doc.pictureInPictureElement = videoB;
+        };
+
+        await toggleVideoPictureInPicture(videoA, { documentObj: doc });
+        assert.strictEqual(reqA, 1);
+        assert.strictEqual(doc.pictureInPictureElement, videoA);
+
+        // Ativar PiP em B enquanto A está em PiP troca direto para B
+        await toggleVideoPictureInPicture(videoB, { documentObj: doc });
+        assert.strictEqual(reqB, 1);
+        assert.strictEqual(exitCount, 0);
+        assert.strictEqual(doc.pictureInPictureElement, videoB);
+
+        // Clicar novamente em B sai do PiP
+        await toggleVideoPictureInPicture(videoB, { documentObj: doc });
+        assert.strictEqual(exitCount, 1);
+        assert.strictEqual(doc.pictureInPictureElement, null);
     });
 });

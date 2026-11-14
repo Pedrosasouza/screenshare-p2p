@@ -24,9 +24,45 @@ export function clearPeerTimers(peerObj) {
     }
 }
 
+/**
+ * @typedef {import('./types.js').AppState} AppState
+ * @typedef {import('./types.js').DomRefs} DomRefs
+ * @typedef {import('./types.js').ShowToastFn} ShowToastFn
+ * @typedef {import('./types.js').PlayPresenceChimeFn} PlayPresenceChimeFn
+ * @typedef {import('./types.js').AnyWindow} AnyWindow
+ * @typedef {import('./types.js').AnyDocument} AnyDocument
+ */
+
+/**
+ * @param {{
+ *   state: AppState,
+ *   dom?: DomRefs,
+ *   getSocket?: () => any,
+ *   getQosMonitor?: () => any,
+ *   getGrid?: () => any,
+ *   getScreenShare?: () => any,
+ *   getRoomModal?: () => any,
+ *   getServerUrl?: () => string,
+ *   rtcConfig?: any,
+ *   refreshIceServers?: typeof defaultRefreshIceServers,
+ *   scheduleIceRefreshTimer?: typeof defaultScheduleIceRefreshTimer,
+ *   registerFullscreenChangeHandler?: typeof defaultRegisterFsHandler,
+ *   saveSessionRoomPassword?: (roomId: string, password: string, sessionStore?: Storage | null) => void,
+ *   clearSessionRoomPassword?: (sessionStore?: Storage | null) => void,
+ *   showToast?: ShowToastFn,
+ *   playPresenceChime?: PlayPresenceChimeFn,
+ *   RTCPeerConnectionCtor?: any,
+ *   RTCSessionDescriptionCtor?: any,
+ *   RTCIceCandidateCtor?: any,
+ *   MediaStreamCtor?: any,
+ *   documentObj?: AnyDocument | null,
+ *   windowObj?: AnyWindow | null,
+ *   storage?: Storage | null
+ * }} options
+ */
 export function createWebRtcMesh({
     state,
-    dom = {},
+    dom = /** @type {DomRefs} */ ({}),
     getSocket = () => null,
     getQosMonitor = () => null,
     getGrid = () => null,
@@ -37,18 +73,18 @@ export function createWebRtcMesh({
     refreshIceServers = defaultRefreshIceServers,
     scheduleIceRefreshTimer = defaultScheduleIceRefreshTimer,
     registerFullscreenChangeHandler = defaultRegisterFsHandler,
-    saveSessionRoomPassword = defaultSavePass,
+    saveSessionRoomPassword = /** @type {(roomId: string, password: string, sessionStore?: Storage | null) => void} */ (defaultSavePass),
     clearSessionRoomPassword = defaultClearPass,
-    showToast = () => {},
-    playPresenceChime = () => {},
+    showToast = /** @type {ShowToastFn} */ (() => {}),
+    playPresenceChime = /** @type {PlayPresenceChimeFn} */ (() => {}),
     RTCPeerConnectionCtor = (typeof RTCPeerConnection !== 'undefined' ? RTCPeerConnection : null),
     RTCSessionDescriptionCtor = (typeof RTCSessionDescription !== 'undefined' ? RTCSessionDescription : null),
     RTCIceCandidateCtor = (typeof RTCIceCandidate !== 'undefined' ? RTCIceCandidate : null),
     MediaStreamCtor = (typeof MediaStream !== 'undefined' ? MediaStream : null),
-    documentObj = (typeof document !== 'undefined' ? document : null),
-    windowObj = (typeof window !== 'undefined' ? window : null),
+    documentObj = (typeof document !== 'undefined' ? /** @type {AnyDocument} */ (document) : null),
+    windowObj = (typeof window !== 'undefined' ? /** @type {AnyWindow} */ (window) : null),
     storage = (typeof localStorage !== 'undefined' ? localStorage : null)
-} = {}) {
+} = /** @type {any} */ ({})) {
     const peers = new Map();
     const activeRoomPeers = new Set();
     const recentlyRemovedPeers = new Map();
@@ -136,7 +172,7 @@ export function createWebRtcMesh({
         const isHidden = Boolean(doc && doc.hidden);
         const pipEl = doc ? (doc.pictureInPictureElement || null) : null;
         const activeFsEl = doc
-            ? (doc.fullscreenElement || doc.webkitFullscreenElement || null)
+            ? (doc.fullscreenElement || (/** @type {any} */ (doc)).webkitFullscreenElement || null)
             : null;
         const activeFsTile = doc
             ? (doc.querySelector('.stream-tile.pseudo-fullscreen') ||
@@ -176,22 +212,21 @@ export function createWebRtcMesh({
         const replacePromises = [];
         state.localStream.getTracks().forEach((track) => {
             let existingSender = null;
-            let matchedTransceiver = null;
-            if (transceivers) {
-                matchedTransceiver = transceivers.find((t) => {
+            const matchedTransceiver = transceivers
+                ? (transceivers.find((t) => {
                     const s = t && t.sender;
                     if (!s) return false;
                     if (s.track) return s.track.id === track.id || s.track.kind === track.kind;
                     const receiverKind = t.receiver && t.receiver.track && t.receiver.track.kind;
                     return (s._kind && s._kind === track.kind) || (receiverKind === track.kind);
-                }) || null;
-                if (matchedTransceiver) {
-                    existingSender = matchedTransceiver.sender;
-                    if (matchedTransceiver.direction === 'recvonly') {
-                        matchedTransceiver.direction = 'sendrecv';
-                    } else if (matchedTransceiver.direction === 'inactive') {
-                        matchedTransceiver.direction = 'sendonly';
-                    }
+                }) || null)
+                : null;
+            if (matchedTransceiver) {
+                existingSender = matchedTransceiver.sender;
+                if (matchedTransceiver.direction === 'recvonly') {
+                    matchedTransceiver.direction = 'sendrecv';
+                } else if (matchedTransceiver.direction === 'inactive') {
+                    matchedTransceiver.direction = 'sendonly';
                 }
             }
             if (!existingSender) {

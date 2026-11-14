@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "skipLibCheck": true,
+    "strict": false
+  },
+  "include": [
+    "server.js",
+    "src/**/*.js",
+    "public/app.js",
+    "public/js/modules/**/*.js",
+    "public/js/desktop-bridge.js"
+  ],
+  "exclude": [
+    "node_modules",
+    "public/vendor",
+    "public/js/socket.io.min.js",
+    "src-tauri",
+    "dist"
+  ]
+}

@@ -1,5 +1,5 @@
 const { hashPassword, verifyPassword } = require('./password');
-const { getClientIdentifier, safeHandler } = require('./rate-limit');
+const { getClientIdentifier, safeHandler, createCheckRoomRateLimiter } = require('./rate-limit');
 
 const ROOM_ID_REGEX = /^[a-z0-9_-]{3,64}$/;
 const MAX_ROOMS = 2000;
@@ -10,6 +10,7 @@ function isPlainObject(obj) {
 }
 
 function sanitizeControlChars(str) {
+    // eslint-disable-next-line no-control-regex
     return String(str).replace(/[\x00-\x1f\x7f]/g, '');
 }
 
@@ -30,7 +31,15 @@ function isValidSignal(signal) {
     return isSdp || isIce || isKeyframeReq;
 }
 
-function registerSignalingHandlers(io, { rooms, attemptTracker, env = process.env }) {
+function registerSignalingHandlers(
+    io,
+    {
+        rooms,
+        attemptTracker,
+        checkRoomRateLimiter = createCheckRoomRateLimiter(),
+        env = process.env
+    }
+) {
     const {
         loginAttempts,
         withAttemptLock,
@@ -352,6 +361,17 @@ function registerSignalingHandlers(io, { rooms, attemptTracker, env = process.en
 
         socket.on('check-room', safeHandler(socket, 'check-room', (data, callback) => {
             if (typeof callback !== 'function') return;
+
+            const clientKey = getClientIdentifier(socket, env);
+            if (checkRoomRateLimiter && !checkRoomRateLimiter.check(clientKey)) {
+                return callback({
+                    exists: false,
+                    memberCount: 0,
+                    hasPassword: false,
+                    error: 'rate_limited',
+                    message: 'Muitas consultas de sala. Aguarde alguns instantes.'
+                });
+            }
 
             if (!isPlainObject(data) || typeof data.roomId !== 'string' || !ROOM_ID_REGEX.test(data.roomId.trim().toLowerCase())) {
                 return callback({

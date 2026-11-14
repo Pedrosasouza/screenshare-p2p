@@ -315,3 +315,79 @@ test('T5: sessionStorage preserves room password across F5 reload and clears on 
         global.sessionStorage = origSessionStorage;
     }
 });
+
+test('T7: saveCustomSignalingServerUrl validates URLs and stats-modal saves/reloads via inputCustomServerUrl & btnSaveServerUrl', async () => {
+    const {
+        createStatsModalController,
+        saveCustomSignalingServerUrl,
+        SERVER_URL_STORAGE_KEY
+    } = await loadModules();
+
+    const webWin = {
+        location: { protocol: 'https:', origin: 'https://app.example.com', hostname: 'app.example.com', reload: () => {} }
+    };
+    const webStorage = createMockStorage();
+
+    // Non-desktop rejects external HTTPS/HTTP URLs
+    const webExternal = saveCustomSignalingServerUrl('https://outro.example.com', { windowObj: webWin, storage: webStorage });
+    assert.equal(webExternal.ok, false);
+    assert.equal(webStorage.getItem(SERVER_URL_STORAGE_KEY), null);
+
+    // Loopback HTTP is allowed even in web mode; credentials are rejected
+    const badCreds = saveCustomSignalingServerUrl('https://user:pass@localhost:3000', { windowObj: webWin, storage: webStorage });
+    assert.equal(badCreds.ok, false);
+    const localOk = saveCustomSignalingServerUrl('http://localhost:3000/custom?a=1', { windowObj: webWin, storage: webStorage });
+    assert.deepEqual(localOk, { ok: true, url: 'http://localhost:3000' });
+    assert.equal(webStorage.getItem(SERVER_URL_STORAGE_KEY), 'http://localhost:3000');
+
+    // Desktop allows custom HTTPS server via modal UI (#inputCustomServerUrl + #btnSaveServerUrl + Enter)
+    let reloadCount = 0;
+    const desktopWin = {
+        __TAURI__: {},
+        location: { protocol: 'tauri:', origin: 'tauri://localhost', reload: () => { reloadCount += 1; } }
+    };
+    const desktopStorage = createMockStorage({ [SERVER_URL_STORAGE_KEY]: 'https://initial.example.com' });
+    const statsModal = createMockElement('div', { id: 'statsModal', hidden: true });
+    statsModal.style.display = 'none';
+    const inputCustomServerUrl = createMockElement('input', { id: 'inputCustomServerUrl', value: '' });
+    const btnSaveServerUrl = createMockElement('button', { id: 'btnSaveServerUrl' });
+    const doc = createMockDocument({
+        statsModal,
+        inputCustomServerUrl,
+        btnSaveServerUrl
+    });
+
+    const toasts = [];
+    const ctrl = createStatsModalController({
+        state: { localStream: null, selectedVideoFps: 60, selectedVideoResolution: '1080p', contentHintMode: 'motion' },
+        dom: { statsModal, inputCustomServerUrl, btnSaveServerUrl },
+        getPeers: () => new Map(),
+        getServerUrl: () => 'https://initial.example.com',
+        showToast: (msg, type) => toasts.push({ msg, type }),
+        documentObj: doc,
+        windowObj: desktopWin,
+        storage: desktopStorage
+    });
+    ctrl.bindEvents();
+
+    try {
+        ctrl.openStatsModal();
+        assert.equal(inputCustomServerUrl.value, 'https://initial.example.com');
+
+        // Invalid URL -> error toast, no reload, keeps saved override
+        inputCustomServerUrl.value = 'ftp://invalid.example.com';
+        btnSaveServerUrl.dispatchEvent({ type: 'click' });
+        assert.equal(reloadCount, 0);
+        assert.equal(desktopStorage.getItem(SERVER_URL_STORAGE_KEY), 'https://initial.example.com');
+        assert.equal(toasts[toasts.length - 1].type, 'error');
+
+        // Valid URL via Enter -> saves normalized origin, info toast, reloads
+        inputCustomServerUrl.value = 'https://custom-host.example.com:8443/room';
+        inputCustomServerUrl.dispatchEvent({ type: 'keydown', key: 'Enter', preventDefault: () => {} });
+        assert.equal(desktopStorage.getItem(SERVER_URL_STORAGE_KEY), 'https://custom-host.example.com:8443');
+        assert.equal(toasts[toasts.length - 1].type, 'info');
+        assert.equal(reloadCount, 1);
+    } finally {
+        ctrl.closeStatsModal();
+    }
+});

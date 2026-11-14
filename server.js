@@ -14,6 +14,7 @@ const {
     MAX_LOGIN_ATTEMPTS_ENTRIES,
     getHttpClientIp,
     createHttpIceRateLimiter,
+    createCheckRoomRateLimiter,
     createAttemptTracker
 } = require('./src/server/rate-limit');
 const { createIceServersResolver } = require('./src/server/ice');
@@ -47,11 +48,23 @@ function createServerApp({ env = process.env, fetchImpl = global.fetch } = {}) {
         maxHttpBufferSize: 1e5 // 100 KB max payload size
     });
 
+    app.use((req, res, next) => {
+        let normalizedPath = req.path || '';
+        try {
+            normalizedPath = decodeURIComponent(normalizedPath);
+        } catch (_) {}
+        if (/(?:^|\/)package\.json$/i.test(normalizedPath)) {
+            return res.status(404).end();
+        }
+        return next();
+    });
+
     app.use(express.static(path.join(__dirname, 'public')));
 
     const rooms = new Map();
     const attemptTracker = createAttemptTracker();
     const iceRateLimiter = createHttpIceRateLimiter();
+    const checkRoomRateLimiter = createCheckRoomRateLimiter();
     const defaultIceServersResolver = createIceServersResolver({ env, fetchImpl });
 
     app.get('/health', (_req, res) => {
@@ -116,12 +129,13 @@ function createServerApp({ env = process.env, fetchImpl = global.fetch } = {}) {
         }
     });
 
-    registerSignalingHandlers(io, { rooms, attemptTracker, env });
+    registerSignalingHandlers(io, { rooms, attemptTracker, checkRoomRateLimiter, env });
 
     const cleanupInterval = setInterval(() => {
         const now = Date.now();
         attemptTracker.purgeExpired(now);
         iceRateLimiter.purgeExpired(now);
+        checkRoomRateLimiter.purgeExpired(now);
         for (const [roomId, room] of rooms.entries()) {
             if (!room || !room.members || room.members.size === 0) {
                 rooms.delete(roomId);
@@ -149,6 +163,7 @@ function createServerApp({ env = process.env, fetchImpl = global.fetch } = {}) {
         getCorsOrigin,
         createIceServersResolver,
         iceRateLimitMap: iceRateLimiter.iceRateLimitMap,
+        checkRoomRateLimiter,
         isValidSignal,
         stopCleanupTimer
     };

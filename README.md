@@ -15,7 +15,7 @@
     <img src="https://img.shields.io/badge/🌐_Live_Demo-Acessar_no_Render-46E3B7?style=for-the-badge&logo=render&logoColor=white" alt="Live Demo no Render">
   </a>
   <a href="https://github.com/Pedrosasouza/screenshare-p2p/releases/latest">
-    <img src="https://img.shields.io/badge/📦_Download_Windows-Release_v1.0.0-blue?style=for-the-badge&logo=windows&logoColor=white" alt="Download Windows v1.0.0">
+    <img src="https://img.shields.io/badge/📦_Download_Windows-Release_v1.1.0-blue?style=for-the-badge&logo=windows&logoColor=white" alt="Download Windows v1.1.0">
   </a>
 </p>
 
@@ -64,18 +64,21 @@ Devido às restrições de segurança e sandbox dos navegadores (`getDisplayMedi
 
 ### 1. Visualização & Transmissão
 * **Grade Dinâmica Multi-Stream:** Visualização de múltiplas transmissões simultâneas na mesma sala, adaptando o layout conforme novos membros iniciam ou encerram transmissões.
-* **Controles por Transmissão:** Controle de volume individualizado para cada transmissão recebida, modo tela cheia e alternador de perfil de exibição.
+* **Modo Spotlight & Picture-in-Picture (PiP):** Foco dedicado em uma transmissão principal com barra lateral/inferior de miniaturas (com saída rápida pela tecla `Escape`) e botão de Picture-in-Picture individual por tile para assistir em janela flutuante.
+* **Controles por Transmissão & Acessibilidade:** Controle de volume individualizado para cada transmissão recebida, modo tela cheia, alternador de perfil de exibição e modais acessíveis com gerenciamento automático de foco, *focus trap* por teclado, fechamento via `Escape` e restauração do foco ao fechar.
 * **Otimização de SDP:** Ajustes nos parâmetros de negociação de mídia do WebRTC (*Session Description Protocol*), incluindo configurações de áudio estéreo Opus e taxas de vídeo, para priorizar os perfis desejados de transmissão durante a sinalização.
 
 ### 2. Motor de Áudio Dedicado (Exclusivo Desktop / Rust)
-* **WASAPI Loopback com Filtro por Processo:** Captura direta da sessão de áudio do Windows (`IAudioClient`), permitindo filtrar fluxos a partir do identificador de processo (PID).
-* **Sem Dependência de Drivers Externos:** Não requer instalação ou configuração de softwares de cabos virtuais adicionais.
+* **WASAPI Loopback com Filtro por Processo (Inclusão e Exclusão):** Captura direta da sessão de áudio do Windows (`IAudioClient`), permitindo tanto isolar um aplicativo específico (PID) quanto excluir a chamada do Discord ou qualquer outro aplicativo selecionado (`exclude_discord` / `exclude_app`).
+* **Monitoramento de Processo-Alvo & Fallback Limpo:** Detecção automática de encerramento do processo monitorado no motor WASAPI (com notificação na interface e remoção limpa da faixa de áudio encerrada) e fallback com único prompt de captura (`getDisplayMedia`) caso o isolamento por processo falhe.
+* **Sem Dependência de Drivers Externos (VB-Cable Opcional):** Não requer instalação de cabos virtuais; caso o usuário já utilize VB-Cable, há opção explícita e opcional no modo de áudio completo do sistema (`system`).
 * **Ciclo de Vida Unificado:** O módulo WASAPI em Rust é compilado diretamente no executável principal do Tauri v2, com encerramento imediato da captura ao parar a transmissão ou fechar a janela (sem processos externos ou portas locais abertas).
 
-### 3. Gerenciamento de Salas & Segurança
+### 3. Gerenciamento de Salas, Servidor & Segurança
 * **Salas Públicas ou Privadas:** Criação por identificadores legíveis (`grid-xxxx-xxxx`) ou códigos customizados.
-* **Proteção por Senha Opcional:** As senhas das salas privadas são armazenadas como hashes com salt no servidor.
-* **Mitigação de Abusos:** Rate-limiting para proteção contra tentativas repetitivas de senha e sanitização de dados para prevenção de injeção de scripts (DOM XSS).
+* **Servidor de Sinalização Configurável:** O modal de Estatísticas & Conexão permite configurar e validar uma URL customizada de servidor de sinalização (com exigência de HTTPS fora de loopback) ou restaurar o servidor padrão.
+* **Proteção por Senha Opcional:** As senhas das salas privadas são armazenadas como hashes com salt (`scrypt`) na memória do servidor.
+* **CSP Estrita & Mitigação de Abusos:** Política de Segurança de Conteúdo (CSP) restritiva com `style-src 'self'` (sem estilos inline), validação estrita de `ALLOWED_ORIGINS` em produção (sem fallback wildcard `*`), rate-limiting por IP nos eventos `check-room`, `join-room` e `/ice-servers` para proteção contra brute-force/enumeração, além de sanitização contra DOM XSS.
 
 ---
 
@@ -159,23 +162,30 @@ O pacote portátil estará em `dist/StreamGrid-Windows.zip` e os instaladores em
 
 ---
 
-## 🧪 Bateria de Testes
+## 🧪 Bateria de Testes & Qualidade
 
-O repositório inclui testes automatizados para verificar a robustez da sinalização e regras de segurança:
+O repositório inclui verificações estáticas e testes automatizados para validar a sinalização, UI, motor nativo em Rust e regras de segurança:
 
 ```bash
+# Lint (ESLint) e checagem de tipos via JSDoc (TypeScript checkJs)
+npm run lint
+npm run typecheck
+
+# Suíte principal (Sinalização, WebRTC, UI, Bridge Desktop e Segurança)
 npm test
-```
 
-A suíte padrão executa:
-* **Fuzzing & Resiliência:** Avalia a estabilidade do servidor diante de mensagens WebSocket com formatos inesperados ou incompletos (`test/fuzz-crash-test.js`).
-* **Otimização de SDP:** Valida a substituição correta de parâmetros para negociação de áudio e vídeo no WebRTC (`test/sdp-optimization.test.js`).
-* **Rate Limiting:** Testa o bloqueio temporário após tentativas consecutivas incorretas de senha (`test/ip-rate-limit.test.js`).
+# Testes End-to-End em navegador real (Microsoft Edge Headless + CDP)
+npm run test:e2e
 
-Para validar os testes unitários do motor de áudio WASAPI em Rust (`src-tauri`):
-```bash
+# Testes unitários do motor de áudio WASAPI em Rust (src-tauri)
 npm run test:rust
 ```
+
+A suíte automatizada cobre:
+* **Fuzzing & Resiliência:** Avalia a estabilidade do servidor diante de mensagens WebSocket com formatos inesperados ou incompletos (`test/fuzz-crash-test.js`).
+* **Otimização de SDP & QoS:** Valida parâmetros SDP e adaptação de bitrate P2P (`test/sdp-optimization.test.js`, `test/qos-adaptation-and-modal.test.js`).
+* **Hardening & Rate Limiting:** Testa bloqueios de tentativas de senha e enumeração por IP (`check-room`, `join-room`, `/ice-servers`), CSP `style-src 'self'`, `ALLOWED_ORIGINS` em produção e bloqueio de arquivos internos (`test/ip-rate-limit.test.js`, `test/server-security-hardening.test.js`).
+* **Ciclo de Vida de Interface & Desktop:** Valida o fluxo multi-tela, Spotlight, PiP, acessibilidade de modais e integração da ponte Desktop (`test/screen-share-lifecycle.test.js`, `test/e2e-browser.test.js`).
 
 ---
 
