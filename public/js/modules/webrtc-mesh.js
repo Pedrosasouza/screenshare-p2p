@@ -6,7 +6,7 @@ import {
 } from './ice-config.js';
 import { disposeTileElement, registerFullscreenChangeHandler as defaultRegisterFsHandler } from './tile-dom.js';
 import { saveSessionRoomPassword as defaultSavePass, clearSessionRoomPassword as defaultClearPass } from './signaling-url.js';
-import { STORAGE_KEY } from './preferences.js';
+import { STORAGE_KEY, saveRecentRoom } from './preferences.js';
 
 export function clearPeerTimers(peerObj) {
     if (!peerObj) return;
@@ -782,6 +782,7 @@ export function createWebRtcMesh({
 
             if (storage) {
                 try { storage.setItem(STORAGE_KEY, state.roomId); } catch (_) {}
+                saveRecentRoom(state.roomId, storage);
             }
             if (windowObj && windowObj.location && windowObj.location.protocol && windowObj.location.protocol.startsWith('http') && windowObj.history && windowObj.history.pushState) {
                 try {

@@ -1,5 +1,11 @@
 import { sanitizeRoomId, generateRandomRoomId } from './room-utils.js';
-import { STORAGE_KEY, saveUserName } from './preferences.js';
+import {
+    STORAGE_KEY,
+    saveUserName,
+    loadRecentRooms,
+    removeRecentRoom,
+    clearRecentRooms
+} from './preferences.js';
 import {
     getSessionRoomPassword as defaultGetSessionPass,
     clearSessionRoomPassword as defaultClearSessionPass
@@ -49,6 +55,7 @@ export function createRoomModalController({
     let checkCreateTimeout = null;
     let checkJoinTimeout = null;
     let previousFocusEl = null;
+    let recentRoomsRenderSeq = 0;
 
     function showRoomError(msg) {
         const { roomErrorBanner } = dom;
@@ -157,6 +164,154 @@ export function createRoomModalController({
         }
     }
 
+    function clearElementChildren(el) {
+        if (!el) return;
+        if (typeof el.replaceChildren === 'function') {
+            el.replaceChildren();
+            return;
+        }
+        if (typeof el.removeChild === 'function' && Array.isArray(el.children)) {
+            while (el.children.length > 0) {
+                el.removeChild(el.children[el.children.length - 1]);
+            }
+        }
+        el.innerHTML = '';
+    }
+
+    function renderRecentRooms() {
+        const section = dom.recentRoomsSection;
+        const list = dom.recentRoomsList;
+        if (!section || !list || !documentObj) return;
+
+        const rooms = loadRecentRooms(storage);
+        recentRoomsRenderSeq += 1;
+        const currentSeq = recentRoomsRenderSeq;
+
+        if (!rooms.length) {
+            clearElementChildren(list);
+            section.hidden = false;
+            section.style.removeProperty('display');
+            if (dom.btnClearRecentRooms) {
+                dom.btnClearRecentRooms.hidden = true;
+            }
+            const emptyState = documentObj.createElement('div');
+            emptyState.className = 'recent-rooms-empty';
+            emptyState.innerHTML = '<i class="fa-regular fa-clock" aria-hidden="true"></i> <span>Nenhuma sala recente ainda. As salas que você acessar aparecerão aqui.</span>';
+            list.appendChild(emptyState);
+            return;
+        }
+
+        section.hidden = false;
+        section.style.removeProperty('display');
+        if (dom.btnClearRecentRooms) {
+            dom.btnClearRecentRooms.hidden = false;
+        }
+        clearElementChildren(list);
+
+        const socket = getSocket();
+        const isSocketConnected = Boolean(socket && socket.connected);
+
+        rooms.forEach((roomId) => {
+            const isCurrent = Boolean(state.roomId && state.roomId === roomId);
+            let roomRequiresPassword = false;
+
+            const itemRow = documentObj.createElement('div');
+            itemRow.className = 'recent-room-item' + (isCurrent ? ' is-current' : '');
+            itemRow.setAttribute('role', 'listitem');
+
+            const mainBtn = documentObj.createElement('button');
+            mainBtn.type = 'button';
+            mainBtn.className = 'recent-room-btn';
+            mainBtn.setAttribute('aria-label', isCurrent ? `Sala atual: ${roomId}` : `Conectar à sala ${roomId}`);
+
+            const iconWrap = documentObj.createElement('span');
+            iconWrap.className = 'recent-room-icon';
+            iconWrap.setAttribute('aria-hidden', 'true');
+            iconWrap.innerHTML = '<i class="fa-solid fa-hashtag"></i>';
+
+            const infoWrap = documentObj.createElement('span');
+            infoWrap.className = 'recent-room-info';
+
+            const idEl = documentObj.createElement('span');
+            idEl.className = 'recent-room-id';
+            idEl.textContent = roomId;
+
+            const statusPill = documentObj.createElement('span');
+            statusPill.className = 'recent-room-pill' + (isCurrent ? ' is-live' : '');
+
+            const dot = documentObj.createElement('span');
+            dot.className = 'status-dot';
+            dot.setAttribute('aria-hidden', 'true');
+
+            const statusText = documentObj.createElement('span');
+            statusText.textContent = isCurrent ? 'Atual' : 'Recente';
+
+            statusPill.appendChild(dot);
+            statusPill.appendChild(statusText);
+
+            infoWrap.appendChild(idEl);
+            infoWrap.appendChild(statusPill);
+
+            mainBtn.appendChild(iconWrap);
+            mainBtn.appendChild(infoWrap);
+
+            mainBtn.addEventListener('click', () => {
+                if (state.roomId && state.roomId === roomId) {
+                    closeRoomModal();
+                    return;
+                }
+                const restoredPass = getSessionRoomPassword(roomId);
+                if (roomRequiresPassword && !restoredPass) {
+                    if (dom.inputJoinRoomId) dom.inputJoinRoomId.value = roomId;
+                    switchRoomView('join');
+                    if (dom.inputJoinRoomPassword) {
+                        setTimeout(() => {
+                            dom.inputJoinRoomPassword.focus();
+                        }, 50);
+                    }
+                    return;
+                }
+                joinRoom(roomId, restoredPass);
+            });
+
+            const removeBtn = documentObj.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'recent-room-remove';
+            removeBtn.title = `Remover ${roomId} das recentes`;
+            removeBtn.setAttribute('aria-label', `Remover ${roomId} das recentes`);
+            removeBtn.innerHTML = '<i class="fa-solid fa-xmark"></i>';
+            removeBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                removeRecentRoom(roomId, storage);
+                renderRecentRooms();
+            });
+
+            itemRow.appendChild(mainBtn);
+            itemRow.appendChild(removeBtn);
+            list.appendChild(itemRow);
+
+            if (isSocketConnected && !isCurrent) {
+                socket.emit('check-room', { roomId }, (res) => {
+                    if (currentSeq !== recentRoomsRenderSeq || !res) return;
+                    roomRequiresPassword = Boolean(res.hasPassword);
+                    if (res.exists && res.memberCount > 0) {
+                        statusPill.className = 'recent-room-pill is-live';
+                        statusText.textContent = `${res.memberCount} online`;
+                    } else {
+                        statusPill.className = 'recent-room-pill';
+                        statusText.textContent = 'Vazia';
+                    }
+                    if (res.hasPassword) {
+                        const lockIcon = documentObj.createElement('i');
+                        lockIcon.className = 'fa-solid fa-lock recent-room-lock';
+                        lockIcon.setAttribute('aria-hidden', 'true');
+                        statusPill.appendChild(lockIcon);
+                    }
+                });
+            }
+        });
+    }
+
     function rollRandomCreateRoom() {
         clearRoomError();
         const uniqueId = generateRandomRoomId();
@@ -183,6 +338,7 @@ export function createRoomModalController({
 
         if (viewName === 'choice') {
             updateRoomModalCloseButton();
+            renderRecentRooms();
         } else if (viewName === 'create') {
             if (dom.inputCreateUserName && state.currentUserName) dom.inputCreateUserName.value = state.currentUserName;
             if (dom.inputCreateRoomId && !dom.inputCreateRoomId.value.trim()) {
@@ -318,6 +474,19 @@ export function createRoomModalController({
         joinRoom(newRoomId, pass, state.currentUserName);
     }
 
+    function handleQuickJoin() {
+        clearRoomError();
+        const rawRoom = dom.inputQuickRoomId ? dom.inputQuickRoomId.value : '';
+        const cleanRoomId = sanitizeRoomId(rawRoom);
+        if (!cleanRoomId || cleanRoomId.length < 3) {
+            showRoomError('Informe um código de sala válido (mínimo 3 caracteres alfanuméricos).');
+            if (dom.inputQuickRoomId) dom.inputQuickRoomId.focus();
+            return;
+        }
+        const restoredPass = getSessionRoomPassword(cleanRoomId);
+        joinRoom(cleanRoomId, restoredPass, state.currentUserName);
+    }
+
     function handleJoinError({ error, message }) {
         console.warn('[Auth] Join error:', error, message);
         const failedRoomId = (state.pendingRoomJoin && state.pendingRoomJoin.roomId) || state.roomId || '';
@@ -447,6 +616,21 @@ export function createRoomModalController({
 
         if (dom.btnChooseCreate) dom.btnChooseCreate.addEventListener('click', () => switchRoomView('create'));
         if (dom.btnChooseJoin) dom.btnChooseJoin.addEventListener('click', () => switchRoomView('join'));
+        if (dom.btnClearRecentRooms) {
+            dom.btnClearRecentRooms.addEventListener('click', () => {
+                clearRecentRooms(storage);
+                renderRecentRooms();
+            });
+        }
+        if (dom.inputQuickRoomId) {
+            dom.inputQuickRoomId.addEventListener('input', clearRoomError);
+            dom.inputQuickRoomId.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') handleQuickJoin();
+            });
+        }
+        if (dom.btnQuickJoin) {
+            dom.btnQuickJoin.addEventListener('click', handleQuickJoin);
+        }
 
         if (dom.inputCreateUserName) {
             if (state.currentUserName) dom.inputCreateUserName.value = state.currentUserName;
@@ -546,6 +730,7 @@ export function createRoomModalController({
         handleConfirmJoin,
         handleJoinError,
         applyInitialUrlAndRestore,
+        renderRecentRooms,
         bindEvents,
         cleanup
     };

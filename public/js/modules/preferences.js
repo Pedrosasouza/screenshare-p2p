@@ -1,4 +1,6 @@
 export const STORAGE_KEY = 'streamgrid_last_room';
+export const RECENT_ROOMS_KEY = 'streamgrid_recent_rooms';
+export const MAX_RECENT_ROOMS = 5;
 export const CLIENT_ID_KEY = 'streamgrid_client_id';
 export const USERNAME_KEY = 'streamgrid_username';
 export const VIDEO_RES_KEY = 'streamgrid_video_resolution';
@@ -54,6 +56,74 @@ export function saveClientPreference(key, value, explicitStorage) {
     try {
         storage.setItem(key, String(value));
     } catch (_) {}
+}
+
+function normalizeRecentRoomId(roomId) {
+    if (typeof roomId !== 'string') return '';
+    return roomId.trim().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
+}
+
+export function loadRecentRooms(explicitStorage) {
+    const storage = resolveStorage(explicitStorage);
+    if (!storage) return [];
+    try {
+        const raw = storage.getItem(RECENT_ROOMS_KEY);
+        if (!raw) {
+            const legacyLast = normalizeRecentRoomId(storage.getItem(STORAGE_KEY));
+            return legacyLast.length >= 3 ? [legacyLast] : [];
+        }
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return [];
+        const seen = new Set();
+        const result = [];
+        for (const item of parsed) {
+            const clean = normalizeRecentRoomId(item);
+            if (clean.length >= 3 && !seen.has(clean)) {
+                seen.add(clean);
+                result.push(clean);
+                if (result.length >= MAX_RECENT_ROOMS) break;
+            }
+        }
+        return result;
+    } catch (_) {
+        return [];
+    }
+}
+
+export function saveRecentRoom(roomId, explicitStorage) {
+    const clean = normalizeRecentRoomId(roomId);
+    if (clean.length < 3) return loadRecentRooms(explicitStorage);
+    const storage = resolveStorage(explicitStorage);
+    const existing = loadRecentRooms(storage).filter((id) => id !== clean);
+    const updated = [clean, ...existing].slice(0, MAX_RECENT_ROOMS);
+    if (storage) {
+        try {
+            storage.setItem(RECENT_ROOMS_KEY, JSON.stringify(updated));
+        } catch (_) {}
+    }
+    return updated;
+}
+
+export function removeRecentRoom(roomId, explicitStorage) {
+    const clean = normalizeRecentRoomId(roomId);
+    const storage = resolveStorage(explicitStorage);
+    const updated = loadRecentRooms(storage).filter((id) => id !== clean);
+    if (storage) {
+        try {
+            storage.setItem(RECENT_ROOMS_KEY, JSON.stringify(updated));
+        } catch (_) {}
+    }
+    return updated;
+}
+
+export function clearRecentRooms(explicitStorage) {
+    const storage = resolveStorage(explicitStorage);
+    if (storage) {
+        try {
+            storage.setItem(RECENT_ROOMS_KEY, '[]');
+        } catch (_) {}
+    }
+    return [];
 }
 
 /**

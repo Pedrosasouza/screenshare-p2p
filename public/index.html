@@ -76,17 +76,24 @@
                         <p>Como você deseja começar? Crie sua própria sala exclusiva ou entre na sala de um amigo.</p>
                     </div>
 
-                    <div class="room-choice-list">
+                    <div class="quick-join-bar">
+                        <div class="quick-join-input-wrap">
+                            <i class="fa-solid fa-magnifying-glass quick-join-icon" aria-hidden="true"></i>
+                            <input type="search" id="inputQuickRoomId" name="quick-room-code" placeholder="Entrar rápido com código da sala..." maxlength="64" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-lpignore="true">
+                            <button type="button" class="btn btn-primary btn-pill btn-sm" id="btnQuickJoin">
+                                Entrar <i class="fa-solid fa-arrow-right"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="room-choice-list room-choice-grid">
                         <button type="button" class="room-choice-card" id="btnChooseCreate">
                             <div class="choice-icon-wrap choice-create">
                                 <i class="fa-solid fa-wand-magic-sparkles"></i>
                             </div>
                             <div class="choice-content">
-                                <strong>Criar Nova Sala</strong>
-                                <span>Defina um nome ou gere um código aleatório com senha opcional</span>
-                            </div>
-                            <div class="choice-arrow">
-                                <i class="fa-solid fa-chevron-right"></i>
+                                <strong>Criar Sala</strong>
+                                <span>Nome próprio ou código aleatório</span>
                             </div>
                         </button>
 
@@ -95,13 +102,20 @@
                                 <i class="fa-solid fa-right-to-bracket"></i>
                             </div>
                             <div class="choice-content">
-                                <strong>Entrar em uma Sala</strong>
-                                <span>Digite o código de uma sala existente criada por um amigo</span>
-                            </div>
-                            <div class="choice-arrow">
-                                <i class="fa-solid fa-chevron-right"></i>
+                                <strong>Entrar c/ Senha</strong>
+                                <span>Conectar usando código e senha</span>
                             </div>
                         </button>
+                    </div>
+
+                    <div class="recent-rooms-section" id="recentRoomsSection">
+                        <div class="recent-rooms-header">
+                            <span class="recent-rooms-title">Salas Recentes</span>
+                            <button type="button" class="btn-clear-recent" id="btnClearRecentRooms" title="Limpar histórico de salas recentes" hidden>
+                                Limpar
+                            </button>
+                        </div>
+                        <div class="recent-rooms-list" id="recentRoomsList" role="list"></div>
                     </div>
 
                     <div class="room-choice-footer" id="roomChoiceCancelContainer">
@@ -165,12 +179,12 @@
                             </div>
                         </div>
 
-                        <div class="room-action-buttons">
-                            <button class="btn btn-primary btn-block btn-lg" id="btnConfirmCreate" type="button">
-                                <i class="fa-solid fa-wand-magic-sparkles"></i> Criar e Entrar
-                            </button>
-                            <button class="btn btn-secondary btn-block" id="btnBackFromCreate" type="button">
+                        <div class="room-action-buttons room-action-footer">
+                            <button class="btn btn-secondary btn-pill" id="btnBackFromCreate" type="button">
                                 <i class="fa-solid fa-arrow-left"></i> Voltar
+                            </button>
+                            <button class="btn btn-primary btn-pill" id="btnConfirmCreate" type="button">
+                                Criar e Entrar <i class="fa-solid fa-arrow-right"></i>
                             </button>
                         </div>
                     </div>
@@ -222,12 +236,12 @@
                             </div>
                         </div>
 
-                        <div class="room-action-buttons">
-                            <button class="btn btn-primary btn-block btn-lg" id="btnConfirmJoin" type="button">
-                                <i class="fa-solid fa-right-to-bracket"></i> Entrar na Sala
-                            </button>
-                            <button class="btn btn-secondary btn-block" id="btnBackFromJoin" type="button">
+                        <div class="room-action-buttons room-action-footer">
+                            <button class="btn btn-secondary btn-pill" id="btnBackFromJoin" type="button">
                                 <i class="fa-solid fa-arrow-left"></i> Voltar
+                            </button>
+                            <button class="btn btn-primary btn-pill" id="btnConfirmJoin" type="button">
+                                Continuar <i class="fa-solid fa-arrow-right"></i>
                             </button>
                         </div>
                     </div>

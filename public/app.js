@@ -49,6 +49,8 @@ function collectDomReferences(doc) {
     const ids = [
         'roomModal', 'roomErrorBanner', 'btnCloseRoomModal', 'btnCancelRoomModal',
         'roomChoiceCancelContainer', 'roomViewChoice', 'roomViewCreate', 'roomViewJoin',
+        'recentRoomsSection', 'recentRoomsList', 'btnClearRecentRooms',
+        'inputQuickRoomId', 'btnQuickJoin',
         'btnChooseCreate', 'btnChooseJoin', 'inputCreateUserName', 'inputCreateRoomId',
         'inputCreateRoomPassword', 'btnRandomRoom', 'btnGenerateRandomQuick',
         'btnToggleCreatePass', 'createRoomStatusIndicator', 'btnConfirmCreate', 'btnBackFromCreate',
