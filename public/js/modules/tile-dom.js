@@ -10,6 +10,119 @@ export function registerFullscreenChangeHandler(handler) {
 
 
 
+function isTileFullscreen(tile, documentObj) {
+    if (!tile) return false;
+    if (tile.classList && tile.classList.contains('pseudo-fullscreen')) return true;
+    if (documentObj && (documentObj.fullscreenElement === tile || documentObj.webkitFullscreenElement === tile)) {
+        return true;
+    }
+    return false;
+}
+
+export function attachFullscreenAutoHide(tile, documentObj = (typeof document !== 'undefined' ? document : null), hideDelayMs = 2500) {
+    if (!tile || !tile.classList) return () => {};
+    if (typeof tile._resetFullscreenAutoHide === 'function') {
+        tile._resetFullscreenAutoHide();
+        return tile._cleanupFullscreenAutoHide || (() => {});
+    }
+
+    let timer = null;
+
+    const clearHideTimer = () => {
+        if (timer) {
+            clearTimeout(timer);
+            timer = null;
+        }
+    };
+
+    const cleanup = () => {
+        clearHideTimer();
+        tile.classList.remove('fs-controls-hidden');
+        if (typeof tile.removeEventListener === 'function') {
+            tile.removeEventListener('mousemove', onActivity);
+            tile.removeEventListener('pointermove', onActivity);
+            tile.removeEventListener('pointerdown', onActivity);
+            tile.removeEventListener('touchstart', onActivity);
+            tile.removeEventListener('keydown', onActivity);
+        }
+        if (documentObj && typeof documentObj.removeEventListener === 'function') {
+            documentObj.removeEventListener('fullscreenchange', onFsChange);
+            documentObj.removeEventListener('webkitfullscreenchange', onFsChange);
+        }
+        if (tile._cleanupFullscreenAutoHide === cleanup) {
+            delete tile._cleanupFullscreenAutoHide;
+        }
+        if (tile._resetFullscreenAutoHide === resetAutoHide) {
+            delete tile._resetFullscreenAutoHide;
+        }
+    };
+
+    const scheduleHide = () => {
+        clearHideTimer();
+        if (!isTileFullscreen(tile, documentObj)) {
+            tile.classList.remove('fs-controls-hidden');
+            return;
+        }
+        timer = setTimeout(() => {
+            timer = null;
+            if (!isTileFullscreen(tile, documentObj)) {
+                tile.classList.remove('fs-controls-hidden');
+                return;
+            }
+            let isInteractingWithControls = false;
+            try {
+                if (typeof tile.querySelector === 'function') {
+                    isInteractingWithControls = Boolean(
+                        tile.querySelector('.tile-controls-overlay:hover, .tile-controls-overlay:focus-within, .btn-exit-pseudo-fs:hover')
+                    );
+                }
+            } catch (_) {}
+            if (isInteractingWithControls) {
+                scheduleHide();
+                return;
+            }
+            tile.classList.add('fs-controls-hidden');
+        }, hideDelayMs);
+        if (timer && typeof /** @type {any} */ (timer).unref === 'function') {
+            /** @type {any} */ (timer).unref();
+        }
+    };
+
+    const resetAutoHide = () => {
+        tile.classList.remove('fs-controls-hidden');
+        scheduleHide();
+    };
+
+    const onActivity = () => {
+        resetAutoHide();
+    };
+
+    const onFsChange = () => {
+        if (!isTileFullscreen(tile, documentObj)) {
+            cleanup();
+        } else {
+            resetAutoHide();
+        }
+    };
+
+    if (typeof tile.addEventListener === 'function') {
+        tile.addEventListener('mousemove', onActivity);
+        tile.addEventListener('pointermove', onActivity);
+        tile.addEventListener('pointerdown', onActivity);
+        tile.addEventListener('touchstart', onActivity, { passive: true });
+        tile.addEventListener('keydown', onActivity);
+    }
+    if (documentObj && typeof documentObj.addEventListener === 'function') {
+        documentObj.addEventListener('fullscreenchange', onFsChange);
+        documentObj.addEventListener('webkitfullscreenchange', onFsChange);
+    }
+
+    tile._cleanupFullscreenAutoHide = cleanup;
+    tile._resetFullscreenAutoHide = resetAutoHide;
+    resetAutoHide();
+    return cleanup;
+}
+
 function notifyFullscreenChange() {
     if (typeof fullscreenChangeCallback === 'function') {
         fullscreenChangeCallback();
@@ -68,6 +181,9 @@ export async function toggleVideoPictureInPicture(
  */
 export function disposeTileElement(tileEl, documentObj = /** @type {import('./types.js').AnyDocument | null} */ (typeof document !== 'undefined' ? document : null)) {
     if (!tileEl) return;
+    if (typeof tileEl._cleanupFullscreenAutoHide === 'function') {
+        tileEl._cleanupFullscreenAutoHide();
+    }
     if (typeof tileEl._cleanupTapUnmute === 'function') {
         tileEl._cleanupTapUnmute();
     }
@@ -103,6 +219,9 @@ export function toggleTileFullscreen(tile, video, documentObj = /** @type {impor
     // 1. If currently in pseudo-fullscreen, exit it
     if (tile.classList.contains('pseudo-fullscreen')) {
         tile.classList.remove('pseudo-fullscreen');
+        if (typeof tile._cleanupFullscreenAutoHide === 'function') {
+            tile._cleanupFullscreenAutoHide();
+        }
         const exitBtn = tile.querySelector('.btn-exit-pseudo-fs');
         if (exitBtn) exitBtn.remove();
         notifyFullscreenChange();
@@ -135,7 +254,12 @@ export function toggleTileFullscreen(tile, video, documentObj = /** @type {impor
     const req = tile.requestFullscreen || tile.webkitRequestFullscreen || tile.mozRequestFullScreen || tile.msRequestFullscreen;
     if (req) {
         try {
-            Promise.resolve(req.call(tile)).catch(err => {
+            attachFullscreenAutoHide(tile, documentObj);
+            Promise.resolve(req.call(tile)).then(() => {
+                if (typeof tile._resetFullscreenAutoHide === 'function') {
+                    tile._resetFullscreenAutoHide();
+                }
+            }).catch(err => {
                 console.warn('[FS] Native requestFullscreen rejected, falling back to pseudo:', err);
                 enterPseudoFullscreen(tile, documentObj);
             });
@@ -151,6 +275,7 @@ export function toggleTileFullscreen(tile, video, documentObj = /** @type {impor
 
 export function enterPseudoFullscreen(tile, documentObj = (typeof document !== 'undefined' ? document : null)) {
     tile.classList.add('pseudo-fullscreen');
+    attachFullscreenAutoHide(tile, documentObj);
     notifyFullscreenChange();
     if (!tile.querySelector('.btn-exit-pseudo-fs') && documentObj && typeof documentObj.createElement === 'function') {
         const exitBtn = documentObj.createElement('button');
@@ -164,6 +289,9 @@ export function enterPseudoFullscreen(tile, documentObj = (typeof document !== '
         exitBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             tile.classList.remove('pseudo-fullscreen');
+            if (typeof tile._cleanupFullscreenAutoHide === 'function') {
+                tile._cleanupFullscreenAutoHide();
+            }
             exitBtn.remove();
             notifyFullscreenChange();
         });

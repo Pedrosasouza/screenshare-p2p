@@ -121,9 +121,10 @@ body {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 4px 6px;
+    padding: 6px 6px 12px;
     background: transparent;
     border: none;
+    border-bottom: 1px solid var(--border);
     border-radius: 0;
     flex-shrink: 0;
     box-shadow: none;
@@ -1278,6 +1279,7 @@ body {
 
 .toolbar-center,
 .active-streams-counter,
+#btnTogglePip,
 #btnToggleStats {
     display: none !important;
 }
@@ -1465,6 +1467,35 @@ body {
 
 .btn-exit-pseudo-fs:hover {
     background: rgba(255, 255, 255, 0.2);
+}
+
+/* Retractable (auto-hiding) controls in fullscreen */
+.stream-tile.fs-controls-hidden {
+    cursor: none;
+}
+
+.stream-tile.fs-controls-hidden .tile-controls-overlay {
+    opacity: 0 !important;
+    pointer-events: none;
+    transform: translateY(12px);
+}
+
+.stream-tile.fs-controls-hidden .tile-header-badge,
+.stream-tile.fs-controls-hidden .tile-quality-badge {
+    opacity: 0 !important;
+    pointer-events: none;
+    transform: translateY(-10px);
+}
+
+.stream-tile.fs-controls-hidden .btn-exit-pseudo-fs {
+    opacity: 0 !important;
+    pointer-events: none;
+    transform: scale(0.9);
+}
+
+.tile-header-badge,
+.tile-quality-badge {
+    transition: opacity 0.25s ease, transform 0.25s ease;
 }
 
 /* Mobile Responsive Breakpoints */
