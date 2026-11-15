@@ -71,7 +71,76 @@ function httpRequest(url, options = {}) {
     });
 }
 
+function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function waitForEvent(socket, event, timeoutMs = 4000) {
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            socket.off(event, onEvent);
+            reject(new Error(`Timeout waiting for "${event}"`));
+        }, timeoutMs);
+        const onEvent = (payload) => {
+            clearTimeout(timer);
+            resolve(payload);
+        };
+        socket.once(event, onEvent);
+    });
+}
+
+function tryJoin(socket, roomId, password = '', clientId = null, userName = null, timeoutMs = 4000) {
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            cleanup();
+            reject(new Error(`Timeout waiting join response for room "${roomId}"`));
+        }, timeoutMs);
+
+        const onJoinError = (data) => {
+            cleanup();
+            resolve({ status: 'error', data });
+        };
+        const onRoomUsers = (data) => {
+            cleanup();
+            resolve({ status: 'joined', data });
+        };
+
+        function cleanup() {
+            clearTimeout(timer);
+            socket.off('join-error', onJoinError);
+            socket.off('room-users', onRoomUsers);
+        }
+
+        socket.once('join-error', onJoinError);
+        socket.once('room-users', onRoomUsers);
+        socket.emit('join-room', { roomId, password, clientId, userName });
+    });
+}
+
+function checkRoom(socket, roomId, timeoutMs = 3000) {
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+            if (!settled) {
+                settled = true;
+                reject(new Error(`Timeout on check-room "${roomId}"`));
+            }
+        }, timeoutMs);
+        socket.emit('check-room', { roomId }, (res) => {
+            if (!settled) {
+                settled = true;
+                clearTimeout(timer);
+                resolve(res);
+            }
+        });
+    });
+}
+
 module.exports = {
     startTestServer,
-    httpRequest
+    httpRequest,
+    delay,
+    waitForEvent,
+    tryJoin,
+    checkRoom
 };

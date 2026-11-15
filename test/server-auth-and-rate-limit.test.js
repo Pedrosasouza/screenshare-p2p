@@ -1,50 +1,12 @@
+'use strict';
+
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { startTestServer } = require('./helpers/test-server');
+const { hashPassword, verifyPassword } = require('../src/server/password');
+const { createAttemptTracker, getHttpClientIp, getClientIdentifier } = require('../src/server/rate-limit');
+const { startTestServer, delay, waitForEvent, tryJoin, checkRoom } = require('./helpers/test-server');
 
-function tryJoin(socket, roomId, password, clientId = null, userName = null) {
-    return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
-            cleanup();
-            reject(new Error(`Timeout waiting join response for room "${roomId}"`));
-        }, 4000);
-
-        const onJoinError = (data) => {
-            cleanup();
-            resolve({ status: 'error', data });
-        };
-        const onRoomUsers = (data) => {
-            cleanup();
-            resolve({ status: 'joined', data });
-        };
-
-        function cleanup() {
-            clearTimeout(timer);
-            socket.off('join-error', onJoinError);
-            socket.off('room-users', onRoomUsers);
-        }
-
-        socket.once('join-error', onJoinError);
-        socket.once('room-users', onRoomUsers);
-        socket.emit('join-room', { roomId, password, clientId, userName });
-    });
-}
-
-function checkRoom(socket, roomId) {
-    return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error('check-room timeout')), 3000);
-        socket.emit('check-room', { roomId }, (res) => {
-            clearTimeout(timer);
-            resolve(res);
-        });
-    });
-}
-
-function delay(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-describe('Isolamento de rate limit & race conditions no join', () => {
+describe('Autenticação scrypt, isolamento de rate limit & race conditions no join', () => {
     let ts;
 
     before(async () => {
@@ -123,14 +85,12 @@ describe('Isolamento de rate limit & race conditions no join', () => {
             });
 
             assert.strictEqual((await tryJoin(userB, dupRoom, 'senha-dup', 'client-b', 'Bob')).status, 'joined');
-            await delay(50);
+            await checkRoom(userA, dupRoom);
             assert.strictEqual(userJoinedCount, 1);
 
             assert.strictEqual((await tryJoin(userB, dupRoom, 'senha-dup', 'client-b', 'Bob')).status, 'joined');
-            await delay(80);
-            assert.strictEqual(userJoinedCount, 1);
-
             const checkRes = await checkRoom(userA, dupRoom);
+            assert.strictEqual(userJoinedCount, 1);
             assert.strictEqual(checkRes.memberCount, 2);
         } finally {
             userA.disconnect();
@@ -152,12 +112,12 @@ describe('Isolamento de rate limit & race conditions no join', () => {
             });
 
             const joinAttacker = await tryJoin(attacker, spoofRoom, 'segredo-spoof', victim.id, 'Attacker');
-            await delay(100);
+            const spoofCheck = await checkRoom(victim, spoofRoom);
 
             assert.strictEqual(victimDisconnected, false);
             assert.strictEqual(victim.connected, true);
             assert.ok(
-                joinAttacker.status === 'error' || (await checkRoom(victim, spoofRoom)).memberCount >= 1
+                joinAttacker.status === 'error' || spoofCheck.memberCount >= 1
             );
         } finally {
             victim.disconnect();
@@ -196,13 +156,7 @@ describe('Isolamento de rate limit & race conditions no join', () => {
             const srcInfo = await checkRoom(user, srcRoom);
             assert.strictEqual(srcInfo.memberCount, 2);
 
-            const relayPromise = new Promise((resolve, reject) => {
-                const t = setTimeout(() => reject(new Error('Sinal não retransmitido na sala de origem')), 2000);
-                peerInSrc.once('signal', (msg) => {
-                    clearTimeout(t);
-                    resolve(msg);
-                });
-            });
+            const relayPromise = waitForEvent(peerInSrc, 'signal', 2000);
             user.emit('signal', {
                 targetId: peerInSrc.id,
                 signal: { type: 'offer', sdp: 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n' }
@@ -305,7 +259,9 @@ describe('Isolamento de rate limit & race conditions no join', () => {
             switcher.emit('join-room', { roomId: roomA, password: 'segredo-a', userName: 'Switcher' });
             switcher.emit('join-room', { roomId: roomB, password: '', userName: 'Switcher' });
 
-            await delay(300);
+            for (let i = 0; i < 60 && !receivedRoomUsers.some((u) => Array.isArray(u.users) && u.users.includes(ownerB.id)); i++) {
+                await delay(15);
+            }
 
             const infoA = await checkRoom(ownerA, roomA);
             const infoB = await checkRoom(ownerB, roomB);
@@ -319,6 +275,221 @@ describe('Isolamento de rate limit & race conditions no join', () => {
             ownerA.disconnect();
             ownerB.disconnect();
             switcher.disconnect();
+        }
+    });
+
+    it('P1: hashPassword e verifyPassword geram salt aleatório e validam corretamente', async () => {
+        const pass = 'senha-super-secreta';
+        const res1 = await hashPassword(pass);
+        const res2 = await hashPassword(pass);
+
+        assert.ok(res1 && res1.hash && res1.salt);
+        assert.ok(Buffer.isBuffer(res1.hash), 'hash deve ser Buffer');
+        assert.ok(Buffer.isBuffer(res1.salt), 'salt deve ser Buffer');
+        assert.strictEqual(res1.salt.length, 16, 'salt deve ter 16 bytes');
+        assert.strictEqual(res1.hash.length, 32, 'hash deve ter 32 bytes');
+
+        assert.notDeepStrictEqual(res1.salt, res2.salt, 'salts devem ser distintos');
+        assert.notDeepStrictEqual(res1.hash, res2.hash, 'hashes devem ser distintos');
+        assert.ok(!res1.hash.toString('utf8').includes(pass), 'Hash não deve conter senha em texto puro');
+
+        assert.strictEqual(await verifyPassword(pass, res1.hash, res1.salt), true);
+        assert.strictEqual(await verifyPassword('senha-errada', res1.hash, res1.salt), false);
+        assert.strictEqual(await verifyPassword('', res1.hash, res1.salt), false);
+    });
+
+    it('P2: inspeção de memória da sala não contém password em texto puro', async () => {
+        const creatorSocket = await ts.connectClient();
+        const secretPass = 'senha-em-memoria-987';
+        const roomId = 'sala-teste-crypto';
+
+        try {
+            const joinRes = await tryJoin(creatorSocket, roomId, secretPass, 'user-criador');
+            assert.strictEqual(joinRes.status, 'joined');
+
+            const room = ts.rooms.get(roomId);
+            assert.ok(room, 'A sala deve existir no Map de salas');
+            assert.strictEqual(room.password, undefined, 'room.password NÃO deve existir em texto puro');
+            assert.ok(Buffer.isBuffer(room.passwordHash));
+            assert.ok(Buffer.isBuffer(room.passwordSalt));
+            assert.strictEqual(room.passwordSalt.length, 16);
+            assert.strictEqual(room.passwordHash.length, 32);
+            assert.ok(!room.passwordHash.toString('utf8').includes(secretPass));
+        } finally {
+            creatorSocket.disconnect();
+        }
+    });
+
+    it('P3: fluxo de autenticação e proteção via Socket.IO', async () => {
+        const roomId = 'sala-auth-flow';
+        const pass = 'segredo-autorizacao';
+
+        const creator = await ts.connectClient();
+        const checker = await ts.connectClient();
+        const wrongUser = await ts.connectClient();
+        const emptyUser = await ts.connectClient();
+        const correctUser = await ts.connectClient();
+
+        try {
+            const resCreate = await tryJoin(creator, roomId, pass, 'criador');
+            assert.strictEqual(resCreate.status, 'joined');
+            assert.strictEqual(resCreate.data.hasPassword, true);
+
+            const checkRes = await checkRoom(checker, roomId);
+            assert.strictEqual(checkRes.exists, true);
+            assert.strictEqual(checkRes.hasPassword, true);
+
+            const resWrong = await tryJoin(wrongUser, roomId, 'senha-falsa', 'errado');
+            assert.strictEqual(resWrong.status, 'error');
+            assert.strictEqual(resWrong.data.error, 'invalid_password');
+
+            const resEmpty = await tryJoin(emptyUser, roomId, '', 'vazio');
+            assert.strictEqual(resEmpty.status, 'error');
+            assert.strictEqual(resEmpty.data.error, 'invalid_password');
+
+            const resCorrect = await tryJoin(correctUser, roomId, pass, 'correto');
+            assert.strictEqual(resCorrect.status, 'joined');
+        } finally {
+            creator.disconnect();
+            checker.disconnect();
+            wrongUser.disconnect();
+            emptyUser.disconnect();
+            correctUser.disconnect();
+        }
+    });
+
+    it('P4: sala pública sem senha não cria hash nem exige autenticação', async () => {
+        const pubId = 'sala-publica-teste';
+        const pubCreator = await ts.connectClient();
+        const pubJoiner = await ts.connectClient();
+        try {
+            const pubRes = await tryJoin(pubCreator, pubId, '', 'pub-criador');
+            assert.strictEqual(pubRes.status, 'joined');
+            assert.strictEqual(pubRes.data.hasPassword, false);
+
+            const room = ts.rooms.get(pubId);
+            assert.strictEqual(room.password, undefined);
+            assert.strictEqual(room.passwordHash, null);
+            assert.strictEqual(room.passwordSalt, null);
+
+            const joinRes = await tryJoin(pubJoiner, pubId, '', 'pub-membro');
+            assert.strictEqual(joinRes.status, 'joined');
+        } finally {
+            pubCreator.disconnect();
+            pubJoiner.disconnect();
+        }
+    });
+});
+
+describe('Rate limit por IP & cabeçalhos proxy', () => {
+    it('IP1: sem TRUST_PROXY, ignora X-Forwarded-For forjado e bloqueia na 5ª tentativa', async () => {
+        const ts = await startTestServer({ env: { ...process.env, TRUST_PROXY: 'false' } });
+        try {
+            const ownerSocket = await ts.connectClient({ transports: ['websocket', 'polling'] });
+            const createRes = await tryJoin(ownerSocket, 'sala-protegida', 'senha-correta');
+            assert.strictEqual(createRes.status, 'joined', 'Criador deveria conseguir criar a sala');
+
+            let lastResult = null;
+            for (let i = 1; i <= 5; i++) {
+                const forgedIp = `198.51.100.${i}`;
+                const attackerSocket = await ts.connectClient({
+                    transports: ['websocket', 'polling'],
+                    extraHeaders: { 'x-forwarded-for': forgedIp }
+                });
+                lastResult = await tryJoin(attackerSocket, 'sala-protegida', `senha-errada-${i}`);
+                attackerSocket.disconnect();
+            }
+
+            ownerSocket.disconnect();
+
+            assert.strictEqual(lastResult.status, 'error', 'Tentativa deveria retornar erro');
+            assert.strictEqual(
+                lastResult.data.error,
+                'rate_limited',
+                `Na 5ª tentativa o erro deveria ser "rate_limited", mas foi "${lastResult.data.error}"`
+            );
+        } finally {
+            await ts.close();
+        }
+    });
+
+    it('IP2: com TRUST_PROXY=true, defende contra IP injection usando IP à direita', async () => {
+        const ts = await startTestServer({ env: { ...process.env, TRUST_PROXY: 'true' } });
+        try {
+            const ownerSocket = await ts.connectClient({ transports: ['websocket', 'polling'] });
+            await tryJoin(ownerSocket, 'sala-proxy', 'senha-correta');
+
+            let lastResult = null;
+            for (let i = 1; i <= 5; i++) {
+                const injectedChain = `10.0.0.${i}, 203.0.113.88`;
+                const attackerSocket = await ts.connectClient({
+                    transports: ['websocket', 'polling'],
+                    extraHeaders: { 'x-forwarded-for': injectedChain }
+                });
+                lastResult = await tryJoin(attackerSocket, 'sala-proxy', `senha-errada-${i}`);
+                attackerSocket.disconnect();
+            }
+
+            ownerSocket.disconnect();
+
+            assert.strictEqual(lastResult.status, 'error');
+            assert.strictEqual(
+                lastResult.data.error,
+                'rate_limited',
+                'Deveria bloquear por rate_limited atribuindo ao IP real anexado pelo proxy à direita'
+            );
+        } finally {
+            await ts.close();
+        }
+    });
+
+    it('IP3: normaliza ::FFFF:, IPv6 /64 e X-Forwarded-For com vírgula final', () => {
+        const env = { TRUST_PROXY: 'true' };
+
+        const reqTrailing = {
+            headers: { 'x-forwarded-for': '198.51.100.7, ' },
+            socket: { remoteAddress: '10.0.0.1' }
+        };
+        assert.strictEqual(getHttpClientIp(reqTrailing, env), '198.51.100.7');
+
+        const reqUpperMapped = {
+            headers: { 'x-forwarded-for': '::FFFF:203.0.113.5' },
+            socket: { remoteAddress: '10.0.0.1' }
+        };
+        assert.strictEqual(getHttpClientIp(reqUpperMapped, env), '203.0.113.5');
+
+        const sockA = {
+            id: 's-a',
+            handshake: { headers: { 'x-forwarded-for': '2001:0db8:0000:0001:aaaa::1, ' }, address: '10.0.0.1' }
+        };
+        const sockB = {
+            id: 's-b',
+            handshake: { headers: { 'x-forwarded-for': '2001:db8:0:1:bbbb::99' }, address: '10.0.0.1' }
+        };
+        assert.strictEqual(
+            getClientIdentifier(sockA, env),
+            getClientIdentifier(sockB, env),
+            'Endereços IPv6 do mesmo /64 em formas não canônicas devem gerar mesma chave'
+        );
+    });
+
+    it('IP4: erro em withAttemptLock não gera unhandledRejection e permite próximas chamadas', async () => {
+        const tracker = createAttemptTracker();
+        const unhandled = [];
+        const onUnhandled = (reason) => unhandled.push(reason);
+        process.on('unhandledRejection', onUnhandled);
+        try {
+            await assert.rejects(
+                () => tracker.withAttemptLock('k1', async () => { throw new Error('scrypt fail'); }),
+                /scrypt fail/
+            );
+            await new Promise((r) => setTimeout(r, 15));
+            assert.strictEqual(unhandled.length, 0, 'tail interno de withAttemptLock não pode vazar unhandledRejection');
+
+            const ok = await tracker.withAttemptLock('k1', async () => 'recovered');
+            assert.strictEqual(ok, 'recovered');
+        } finally {
+            process.off('unhandledRejection', onUnhandled);
         }
     });
 });

@@ -1,5 +1,8 @@
+'use strict';
+
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 
@@ -7,6 +10,25 @@ const BRIDGE_PATH = path.resolve(__dirname, '../public/js/desktop-bridge.js');
 const DESKTOP_AUDIO_URL = pathToFileURL(path.resolve(__dirname, '../public/js/modules/desktop-audio.js')).href;
 
 let moduleSeq = 0;
+
+function loadDesktopBridgeWithWindow(mockWindow) {
+    const prevWindow = global.window;
+    const prevDescriptor = Object.getOwnPropertyDescriptor(global, 'window');
+    delete require.cache[BRIDGE_PATH];
+    global.window = mockWindow;
+    try {
+        return require(BRIDGE_PATH);
+    } finally {
+        delete require.cache[BRIDGE_PATH];
+        if (prevDescriptor) {
+            Object.defineProperty(global, 'window', prevDescriptor);
+        } else if (prevWindow === undefined) {
+            delete global.window;
+        } else {
+            global.window = prevWindow;
+        }
+    }
+}
 
 async function withDesktopEnv(overrides, fn) {
     const createdNodes = [];
@@ -135,6 +157,136 @@ async function withDesktopEnv(overrides, fn) {
     }
 }
 
+describe('Desktop Bridge (Tauri v2 IPC & Modo Web)', () => {
+    it('T1: opera em modo Web puro sem __TAURI__ com fallbacks seguros', async () => {
+        const win = {};
+        const bridge = loadDesktopBridgeWithWindow(win);
+
+        assert.strictEqual(bridge.isDesktop(), false);
+        assert.strictEqual(win.StreamGridDesktop.isDesktop(), false);
+
+        const status = await bridge.getDiscordStatus();
+        assert.strictEqual(status.detected, false);
+        assert.strictEqual(status.pid, 0);
+
+        const windows = await bridge.listWindows();
+        assert.strictEqual(windows.length, 0);
+
+        await bridge.stopAppAudioCapture();
+        await assert.rejects(() => bridge.startExcludeDiscordCapture(() => {}), /indisponível/i);
+    });
+
+    it('T2: invoca comandos Tauri v2 e encaminha ArrayBuffer via Channel', async () => {
+        const calls = [];
+        class FakeChannel {
+            constructor() {
+                this.onmessage = null;
+            }
+        }
+        const win = {
+            __TAURI_INTERNALS__: {},
+            __TAURI__: {
+                core: {
+                    Channel: FakeChannel,
+                    invoke: async (cmd, args) => {
+                        calls.push({ cmd, args });
+                        if (cmd === 'get_discord_status') {
+                            return { detected: true, pid: 4242, name: 'Discord Desktop' };
+                        }
+                        if (cmd === 'list_windows') {
+                            return [{ pid: 9001, title: 'Game', exe: 'game.exe' }];
+                        }
+                        if (cmd === 'start_capture' || cmd === 'start_exclude_discord') {
+                            const samplePcm = new Float32Array([0.25, -0.25, 0.5, -0.5]);
+                            args.onAudio.onmessage(samplePcm.buffer);
+                            return {
+                                pid: args.pid || 4242,
+                                sample_rate: 48000,
+                                channels: 2,
+                                format: 'f32le',
+                                mode: cmd === 'start_exclude_discord' ? 'exclude' : 'include'
+                            };
+                        }
+                        return null;
+                    }
+                },
+                event: {
+                    listen: async (eventName, cb) => {
+                        calls.push({ cmd: 'listen', eventName });
+                        cb({ payload: { pid: 8888, generation: 1, mode: 'exclude_discord', reason: 'rebound' } });
+                        return () => {};
+                    }
+                }
+            }
+        };
+
+        const bridge = loadDesktopBridgeWithWindow(win);
+        assert.strictEqual(bridge.isDesktop(), true);
+
+        const discord = await bridge.getDiscordStatus();
+        assert.strictEqual(discord.detected, true);
+        assert.strictEqual(discord.pid, 4242);
+
+        const list = await bridge.listWindows();
+        assert.strictEqual(list.length, 1);
+        assert.strictEqual(list[0].pid, 9001);
+
+        const received = [];
+        const started = await bridge.startAppAudioCapture(9001, (buf) => received.push(buf));
+        assert.strictEqual(started.sample_rate, 48000);
+        assert.strictEqual(received.length, 1);
+        assert.strictEqual(Object.prototype.toString.call(received[0]), '[object ArrayBuffer]');
+        assert.strictEqual(received[0].byteLength, 16);
+        const defaultCall = calls.find((c) => c.cmd === 'start_capture' && c.args.pid === 9001);
+        assert.strictEqual(defaultCall.args.exclude, false);
+
+        const receivedExcludeOpt = [];
+        await bridge.startAppAudioCapture(9002, (buf) => receivedExcludeOpt.push(buf), { exclude: true });
+        assert.strictEqual(receivedExcludeOpt.length, 1);
+        const optExcludeCall = calls.find((c) => c.cmd === 'start_capture' && c.args.pid === 9002);
+        assert.strictEqual(optExcludeCall.args.exclude, true);
+
+        const receivedExcludeHelper = [];
+        await bridge.startExcludeAppCapture(9003, (buf) => receivedExcludeHelper.push(buf));
+        assert.strictEqual(receivedExcludeHelper.length, 1);
+        const helperExcludeCall = calls.find((c) => c.cmd === 'start_capture' && c.args.pid === 9003);
+        assert.strictEqual(helperExcludeCall.args.exclude, true);
+
+        const receivedExclude = [];
+        await bridge.startExcludeDiscordCapture((buf) => receivedExclude.push(buf));
+        assert.strictEqual(receivedExclude.length, 1);
+
+        await bridge.stopAppAudioCapture();
+        assert.ok(calls.some((c) => c.cmd === 'stop_capture'));
+
+        const reboundPayloads = [];
+        await bridge.onCaptureRebound((payload) => reboundPayloads.push(payload));
+        assert.strictEqual(reboundPayloads.length, 1);
+        assert.strictEqual(reboundPayloads[0].pid, 8888);
+        assert.ok(calls.some((c) => c.cmd === 'listen' && c.eventName === 'wasapi-capture-rebound'));
+
+        await assert.rejects(() => bridge.startAppAudioCapture(0, () => {}), /PID inválido/i);
+        await assert.rejects(() => bridge.startAppAudioCapture(4294967296, () => {}), /PID inválido/i);
+    });
+
+    it('T3: client modules e index.html usam desktop-bridge sem legado Neutralino/WS 45454', () => {
+        const indexHtml = fs.readFileSync(path.resolve(__dirname, '../public/index.html'), 'utf8');
+        const appJs = fs.readFileSync(path.resolve(__dirname, '../public/app.js'), 'utf8');
+        const modulesDir = path.resolve(__dirname, '../public/js/modules');
+        const moduleSources = fs.readdirSync(modulesDir)
+            .filter((f) => f.endsWith('.js'))
+            .map((f) => fs.readFileSync(path.join(modulesDir, f), 'utf8'));
+        const allClientJs = [appJs, ...moduleSources].join('\n');
+
+        assert.ok(indexHtml.includes('js/desktop-bridge.js'), 'index.html deve carregar js/desktop-bridge.js');
+        assert.ok(!indexHtml.includes('js/neutralino.js'), 'index.html não deve mais carregar js/neutralino.js');
+        assert.ok(!allClientJs.includes('Neutralino'), 'código cliente não deve referenciar Neutralino');
+        assert.ok(!allClientJs.includes('NL_PORT'), 'código cliente não deve referenciar window.NL_PORT');
+        assert.ok(!allClientJs.includes('127.0.0.1:45454'), 'código cliente não deve abrir WebSocket na porta 45454');
+        assert.ok(appJs.includes('isDesktopApp('), 'app.js deve usar isDesktopApp()');
+    });
+});
+
 describe('Sessão Desktop WASAPI / AudioWorklet (desktop-audio.js)', () => {
     it('T1: stopAppAudioCapture invalida geração e bloqueia onPcm tardio', async () => {
         const onPcmCallbacks = [];
@@ -155,12 +307,10 @@ describe('Sessão Desktop WASAPI / AudioWorklet (desktop-audio.js)', () => {
             assert.strictEqual(createdNodes.length, 2);
             const node2 = createdNodes[1];
 
-            // Callback antigo de sessão 1 não pode chegar ao node2
             onPcmCallbacks[0](new Float32Array([0.5, -0.5]).buffer);
             assert.strictEqual(node2.posted.length, 0);
             assert.strictEqual(node1.posted.filter((m) => m.data instanceof Float32Array).length, 0);
 
-            // Callback ativo da sessão 2 chega normalmente ao node2
             onPcmCallbacks[1](new Float32Array([0.25, -0.25]).buffer);
             assert.strictEqual(node2.posted.length, 1);
         });
@@ -278,7 +428,6 @@ describe('Sessão Desktop WASAPI / AudioWorklet (desktop-audio.js)', () => {
             }
         };
 
-        // Carrega desktop-bridge real sobre win
         const prevWindow = global.window;
         delete require.cache[BRIDGE_PATH];
         global.window = win;
@@ -499,20 +648,16 @@ describe('Sessão Desktop WASAPI / AudioWorklet (desktop-audio.js)', () => {
             const track = await mod.startExcludeDiscordCapture(windowObj);
             assert.ok(track && track.kind === 'audio');
 
-            // Rebound obsoleto (outra geração) deve ser ignorado
             onReboundCb({ pid: 9991, generation: 2, mode: 'exclude_discord', reason: 'stale' });
             assert.strictEqual(reboundNotifications.length, 0);
 
-            // Rebound da geração ativa (Discord reiniciou ou foi para fallback 9999)
             onReboundCb({ pid: 9999, generation: 3, mode: 'system_fallback', reason: 'Discord encerrado' });
             assert.strictEqual(reboundNotifications.length, 1);
             assert.strictEqual(stopIpcCalls, 0);
 
-            // Stop antigo com PID anterior (4242) é ignorado porque PID ativo agora é 9999
             onStopCb({ pid: 4242, generation: 3, reason: 'stale_pid' });
             assert.strictEqual(stopNotifications.length, 0);
 
-            // Stop real com o PID atualizado (9999) e geração 3 encerra normalmente
             onStopCb({ pid: 9999, generation: 3, reason: 'device_error' });
             assert.strictEqual(stopIpcCalls, 1);
             assert.strictEqual(stopNotifications.length, 1);

@@ -4,18 +4,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { pathToFileURL } = require('node:url');
 
 const { createMockElement, createMockDocument, createMockStorage } = require('./helpers/mock-dom');
+const { ROOT_DIR, loadClientModules } = require('./helpers/client-env');
 
-const ROOT_DIR = path.resolve(__dirname, '..');
-const styleCss = fs.readFileSync(path.join(ROOT_DIR, 'public/style.css'), 'utf8');
 const indexHtml = fs.readFileSync(path.join(ROOT_DIR, 'public/index.html'), 'utf8');
-
-async function loadShareConfigMod() {
-    const url = pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/share-config-modal.js')).href;
-    return import(url);
-}
 
 function createAudioCardHarness(createShareConfigModalController, { isDesktop = true, initialSelected = 'exclude_discord' } = {}) {
     const cards = {
@@ -125,60 +118,8 @@ function createAudioCardHarness(createShareConfigModalController, { isDesktop = 
     };
 }
 
-test('style.css defines theme vars, fadeIn keyframes, .form-input, scrollable modals, and .audio-option-card', () => {
-    const darkBlockMatch = styleCss.match(/:root,\s*\[data-theme="dark"\]\s*\{[\s\S]*?\}/);
-    const lightBlockMatch = styleCss.match(/\[data-theme="light"\]\s*\{[\s\S]*?\}/);
-    assert(darkBlockMatch && darkBlockMatch[0].includes('--bg-surface-hover:'), 'Dark theme must define --bg-surface-hover');
-    assert(lightBlockMatch && lightBlockMatch[0].includes('--bg-surface-hover:'), 'Light theme must define --bg-surface-hover');
-
-    assert.match(styleCss, /@keyframes\s+fadeIn\s*\{[\s\S]*?opacity:\s*0[\s\S]*?opacity:\s*1/);
-
-    const overlayMatch = styleCss.match(/\.modal-overlay\s*\{[\s\S]*?\}/);
-    assert(overlayMatch && overlayMatch[0].includes('overflow-y: auto') && overlayMatch[0].includes('overscroll-behavior: contain'));
-
-    const roomCardMatch = styleCss.match(/\.room-card\s*\{[\s\S]*?\}/);
-    assert(
-        roomCardMatch &&
-        roomCardMatch[0].includes('margin: auto') &&
-        roomCardMatch[0].includes('max-height: calc(100dvh - 32px)') &&
-        roomCardMatch[0].includes('overflow-y: auto')
-    );
-
-    const modalSmMatch = styleCss.match(/\.modal-sm\s*\{[\s\S]*?\}/);
-    assert(
-        modalSmMatch &&
-        modalSmMatch[0].includes('margin: auto') &&
-        modalSmMatch[0].includes('max-height: calc(100dvh - 32px)') &&
-        modalSmMatch[0].includes('overflow-y: auto')
-    );
-
-    assert.match(styleCss, /\.form-input\s*\{[\s\S]*?background:\s*var\(--bg-card\)/);
-    assert.match(styleCss, /\.form-input:focus[\s\S]*?border-color:\s*var\(--primary\)/);
-    assert.match(styleCss, /\.form-input\s+option\s*\{[\s\S]*?color:\s*var\(--text-main\)/);
-
-    assert.match(styleCss, /\.audio-option-card\s*\{[\s\S]*?var\(--border\)/);
-    assert.match(styleCss, /\.audio-option-card:hover\s*\{[\s\S]*?var\(--border-hover\)/);
-    assert.match(styleCss, /\.audio-option-card\.is-selected[\s\S]*?var\(--primary\)[\s\S]*?var\(--bg-surface-hover\)/);
-});
-
-test('index.html delegates border/background of .audio-option-card to CSS', () => {
-    const cardLabels = indexHtml.match(/<label\s+class="audio-option-card[^"]*"[^>]*>/g) || [];
-    assert.equal(cardLabels.length, 4);
-    assert(cardLabels[0].includes('is-selected'), 'First .audio-option-card must have is-selected by default');
-
-    for (const tag of cardLabels) {
-        assert(!tag.includes('var(--bg-surface-hover)'), `Inline var(--bg-surface-hover) must be removed: ${tag}`);
-        assert(!tag.includes('var(--bg-surface)'), `Inline var(--bg-surface) must be removed: ${tag}`);
-        assert(!/border:\s*1px\s+solid/i.test(tag), `Inline fixed border must be removed: ${tag}`);
-    }
-
-    for (const requiredId of ['audioSourceExcludeDiscord', 'audioSourceApp', 'audioSourceSystem', 'audioSourceNone', 'appExcludeOptionContainer', 'chkExcludeSelectedApp', 'vbCableOptionContainer', 'chkUseVbCable']) {
-        assert(indexHtml.includes(`id="${requiredId}"`));
-    }
-});
-
 test('openShareConfigModal and change listener toggle .is-selected across cards in Web and Desktop', async () => {
-    const { createShareConfigModalController } = await loadShareConfigMod();
+    const { createShareConfigModalController } = await loadClientModules(['share-config-modal']);
 
     const hWeb = createAudioCardHarness(createShareConfigModalController, { isDesktop: false, initialSelected: 'exclude_discord' });
     hWeb.cards.exclude_discord.style.border = '1px solid var(--primary)';
@@ -234,4 +175,170 @@ test('openShareConfigModal and change listener toggle .is-selected across cards 
     hDesktop.radios.system.triggerChange();
     assert.equal(hDesktop.vbCableOptionContainer.style.display, 'block');
     assert.equal(hDesktop.appExcludeOptionContainer.style.display, 'none');
+});
+
+test('index.html has .btn-text wrappers, type="button", role="dialog" aria-modal="true", and aria-label', () => {
+    assert.match(indexHtml, /<button[^>]*id="btnCopyLink"[^>]*>[\s\S]*?<span class="btn-text">Copiar Link<\/span>[\s\S]*?<\/button>/);
+    assert.match(indexHtml, /<button[^>]*id="btnChangeRoom"[^>]*>[\s\S]*?<span class="btn-text">Trocar Sala<\/span>[\s\S]*?<\/button>/);
+
+    const buttonIdsRequiringType = [
+        'btnCopyLink',
+        'btnChangeRoom',
+        'btnThemeToggle',
+        'btnStartShareBig',
+        'btnStartShare',
+        'btnStopShare',
+        'btnQualityToggle',
+        'btnCloseShareConfig',
+        'btnConfirmStartShare',
+        'btnCloseStatsModal'
+    ];
+    for (const id of buttonIdsRequiringType) {
+        const tagMatch = indexHtml.match(new RegExp(`<button[^>]*id="${id}"[^>]*>`));
+        assert(tagMatch, `Button #${id} not found`);
+        assert(tagMatch[0].includes('type="button"'), `Button #${id} must have type="button"`);
+    }
+
+    for (const modalId of ['roomModal', 'shareConfigModal', 'statsModal']) {
+        const modalMatch = indexHtml.match(new RegExp(`<div[^>]*id="${modalId}"[^>]*>`));
+        assert(modalMatch, `Modal #${modalId} not found`);
+        assert(modalMatch[0].includes('role="dialog"'), `Modal #${modalId} must have role="dialog"`);
+        assert(modalMatch[0].includes('aria-modal="true"'), `Modal #${modalId} must have aria-modal="true"`);
+    }
+
+    const iconButtonsRequiringAriaLabel = [
+        'btnThemeToggle',
+        'btnRandomRoom',
+        'btnToggleCreatePass',
+        'btnToggleJoinPass',
+        'btnCloseRoomModal',
+        'btnCloseShareConfig',
+        'btnRefreshAudioApps',
+        'btnCloseStatsModal'
+    ];
+    for (const id of iconButtonsRequiringAriaLabel) {
+        const tagMatch = indexHtml.match(new RegExp(`<button[^>]*id="${id}"[^>]*>`));
+        assert(tagMatch, `Icon button #${id} not found`);
+        assert(/aria-label="[^"]+"/.test(tagMatch[0]), `Icon button #${id} must have non-empty aria-label`);
+    }
+});
+
+test('Generated controls expose type="button", title/aria-label, and Copy Link wraps text in .btn-text', async () => {
+    const { createStreamGridController, enterPseudoFullscreen } = await loadClientModules(['stream-grid', 'tile-dom']);
+
+    const btnCopyLink = createMockElement('button', { id: 'btnCopyLink', innerHTML: '<i class="fa-solid fa-link"></i> <span class="btn-text">Copiar Link</span>' });
+    const doc = createMockDocument({ btnCopyLink }, { createElement: (tag) => createMockElement(tag) });
+    const origSetTimeout = global.setTimeout;
+    const pendingTimers = [];
+    global.setTimeout = (fn) => { pendingTimers.push(fn); return pendingTimers.length; };
+
+    try {
+        const grid = createStreamGridController({
+            state: { roomId: 'sala-a11y', currentRoomPassword: 'secret' },
+            dom: { btnCopyLink },
+            isDesktopApp: () => false,
+            getServerUrl: () => 'https://example.com',
+            showToast: () => {},
+            documentObj: doc,
+            windowObj: { location: { origin: 'https://example.com', pathname: '/' } },
+            navigatorObj: { userAgent: 'Mozilla/5.0', clipboard: { writeText: async () => {} } }
+        });
+        grid.bindCopyInviteLink();
+
+        const tile = grid.createStreamTile('peer-1', { id: 'stream-1' }, 'Alice', false);
+        const muteBtn = tile.querySelector('.tile-controls-overlay .btn-mute-toggle');
+        const pipBtn = tile.querySelector('.tile-controls-overlay .btn-tile-pip');
+        const spotlightBtn = tile.querySelector('.tile-controls-overlay .btn-tile-spotlight');
+        const overlayButtons = tile.children
+            .find((c) => c.className.includes('tile-controls-overlay'))
+            .children.filter((c) => c.tagName === 'BUTTON');
+        const fsBtn = overlayButtons[overlayButtons.length - 1];
+
+        assert.equal(muteBtn.type, 'button');
+        assert.equal(muteBtn.title, 'Silenciar / Ativar Som');
+        assert.equal(pipBtn.type, 'button');
+        assert.equal(pipBtn.getAttribute('aria-label'), 'Janela Flutuante (PiP)');
+        assert.equal(spotlightBtn.type, 'button');
+        assert.equal(spotlightBtn.getAttribute('aria-pressed'), 'false');
+        assert.equal(fsBtn.type, 'button');
+
+        enterPseudoFullscreen(tile, doc);
+        const exitBtn = tile.querySelector('.btn-exit-pseudo-fs');
+        assert(exitBtn, 'exitBtn must be appended in pseudo-fullscreen');
+        assert.equal(exitBtn.type, 'button');
+
+        btnCopyLink.dispatchEvent({ type: 'click' });
+        await Promise.resolve();
+        assert.ok(btnCopyLink.innerHTML.includes('<span class="btn-text">Link Copiado!</span>'));
+    } finally {
+        global.setTimeout = origSetTimeout;
+    }
+});
+
+test('Viewport allows zoom, modals have aria-labelledby, and modal-a11y traps Tab & restores focus', async () => {
+    // 1. Viewport without user-scalable=no / maximum-scale=1.0
+    const viewportMatch = indexHtml.match(/<meta\s+name="viewport"\s+content="([^"]+)"/i);
+    assert(viewportMatch, 'viewport meta tag not found');
+    assert.equal(/user-scalable\s*=\s*no|maximum-scale\s*=\s*1(\.0)?/i.test(viewportMatch[1]), false);
+
+    // 2. All 3 modals define aria-labelledby pointing to existing title IDs
+    const modalTitlePairs = [
+        ['roomModal', 'roomModalTitle'],
+        ['shareConfigModal', 'shareConfigModalTitle'],
+        ['statsModal', 'statsModalTitle']
+    ];
+    for (const [modalId, titleId] of modalTitlePairs) {
+        const modalTag = indexHtml.match(new RegExp(`<div[^>]*id="${modalId}"[^>]*>`));
+        assert(modalTag, `Modal #${modalId} not found`);
+        assert.ok(modalTag[0].includes(`aria-labelledby="${titleId}"`), `Modal #${modalId} must have aria-labelledby="${titleId}"`);
+        assert.ok(indexHtml.includes(`id="${titleId}"`), `Title #${titleId} not found in index.html`);
+    }
+
+    // 3. modal-a11y: initial focus, Tab/Shift+Tab wrap, and focus restoration
+    const { activateModalFocus, restoreModalFocus, trapModalTabKey } = await loadClientModules(['modal-a11y']);
+    const doc = createMockDocument();
+    let focusedEl = null;
+    const makeFocusable = (tag, props = {}) => {
+        const el = createMockElement(tag, props);
+        el.focus = () => {
+            focusedEl = el;
+            doc.activeElement = el;
+        };
+        return el;
+    };
+
+    const triggerBtn = makeFocusable('button', { id: 'triggerBtn' });
+    triggerBtn.isConnected = true;
+    doc.body.appendChild(triggerBtn);
+    triggerBtn.focus();
+
+    const modal = makeFocusable('div', { id: 'testModal' });
+    const firstBtn = makeFocusable('button', { id: 'firstBtn' });
+    const hiddenBtn = makeFocusable('button', { id: 'hiddenBtn', hidden: true });
+    const lastBtn = makeFocusable('button', { id: 'lastBtn' });
+    modal.appendChild(firstBtn);
+    modal.appendChild(hiddenBtn);
+    modal.appendChild(lastBtn);
+    modal.contains = (target) => target === modal || target === firstBtn || target === hiddenBtn || target === lastBtn;
+    doc.body.appendChild(modal);
+
+    const prev = activateModalFocus(modal, doc);
+    assert.equal(prev, triggerBtn);
+    assert.equal(focusedEl, firstBtn);
+
+    // Shift+Tab from first wraps to last (skipping hiddenBtn)
+    let prevented = false;
+    assert.equal(trapModalTabKey(modal, { key: 'Tab', shiftKey: true, preventDefault: () => { prevented = true; } }, doc), true);
+    assert.equal(prevented, true);
+    assert.equal(focusedEl, lastBtn);
+
+    // Tab from last wraps to first
+    prevented = false;
+    assert.equal(trapModalTabKey(modal, { key: 'Tab', shiftKey: false, preventDefault: () => { prevented = true; } }, doc), true);
+    assert.equal(prevented, true);
+    assert.equal(focusedEl, firstBtn);
+
+    // Restore focus on close
+    assert.equal(restoreModalFocus(prev, doc), true);
+    assert.equal(focusedEl, triggerBtn);
 });

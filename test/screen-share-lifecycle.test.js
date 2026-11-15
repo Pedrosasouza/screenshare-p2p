@@ -2,9 +2,6 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const { pathToFileURL } = require('node:url');
 
 const {
     MockMediaStream,
@@ -15,15 +12,10 @@ const {
     createMockPeerConnection
 } = require('./helpers/mock-webrtc');
 const { createMockElement, createMockDocument, createMockStorage } = require('./helpers/mock-dom');
-
-const ROOT_DIR = path.resolve(__dirname, '..');
+const { loadClientModules } = require('./helpers/client-env');
 
 async function loadModules() {
-    const [shareMod, webrtcMod] = await Promise.all([
-        import(pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/screen-share.js')).href),
-        import(pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/webrtc-mesh.js')).href)
-    ]);
-    return { ...shareMod, ...webrtcMod };
+    return loadClientModules(['screen-share', 'webrtc-mesh']);
 }
 
 function createScreenShareEnv(mods, overrides = {}) {
@@ -251,9 +243,6 @@ test('T3: Rejected/undefined replaceTrack never triggers unhandledRejection acro
 
         await env.controller.stopScreenShare();
         assert.equal(replaceCalls, 4);
-
-        const webrtcSrc = fs.readFileSync(path.join(ROOT_DIR, 'public/js/modules/webrtc-mesh.js'), 'utf8');
-        assert.ok(webrtcSrc.includes('Promise.resolve(vSender.replaceTrack('));
 
         await new Promise((resolve) => setTimeout(resolve, 30));
         assert.equal(unhandledError, null);

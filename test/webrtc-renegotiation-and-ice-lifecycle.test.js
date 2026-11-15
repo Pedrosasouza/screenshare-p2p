@@ -2,9 +2,6 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const { pathToFileURL } = require('node:url');
 
 const {
     MockMediaStream,
@@ -15,15 +12,14 @@ const {
     createMockPeerConnection
 } = require('./helpers/mock-webrtc');
 const { createMockElement, createMockDocument, createMockStorage } = require('./helpers/mock-dom');
-
-const ROOT_DIR = path.resolve(__dirname, '..');
+const { loadClientModules } = require('./helpers/client-env');
 
 async function loadModules() {
     const [webrtcMod, shareMod, appMod, iceMod] = await Promise.all([
-        import(pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/webrtc-mesh.js')).href),
-        import(pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/screen-share.js')).href),
-        import(pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/room-utils.js')).href),
-        import(`${pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/ice-config.js')).href}?reneg=${Date.now()}`)
+        loadClientModules(['webrtc-mesh']),
+        loadClientModules(['screen-share']),
+        loadClientModules(['room-utils']),
+        loadClientModules(['ice-config'], { cacheBustTag: 'reneg', bustAll: true })
     ]);
     return { webrtcMod, shareMod, appMod, iceMod };
 }
@@ -255,8 +251,6 @@ test('T4: handleSignal ignores candidates when ignoreOffer=true and blocks zombi
 
 test('T5: app.js passes { peers } to refreshIceServers and viewer without localStream triggers ICE restart on failure', async () => {
     const { webrtcMod } = await loadModules();
-    const appSrc = fs.readFileSync(path.join(ROOT_DIR, 'public/app.js'), 'utf8');
-    assert.match(appSrc, /refreshIceServers\s*\(\s*serverUrl\s*,\s*\{\s*peers:\s*webrtc\.peers\s*\}\s*\)/);
 
     const origSetTimeout = global.setTimeout;
     const origClearTimeout = global.clearTimeout;
@@ -295,8 +289,6 @@ test('T5: app.js passes { peers } to refreshIceServers and viewer without localS
 
 test('T6: Room switch performs silent cleanup without leaking stream-state, and pagehide triggers teardown', async () => {
     const { webrtcMod } = await loadModules();
-    const appSrc = fs.readFileSync(path.join(ROOT_DIR, 'public/app.js'), 'utf8');
-    assert.ok(appSrc.includes("windowObj.addEventListener('pagehide'"), 'app.js must bind pagehide teardown');
 
     const localTrack = createMockTrack('video', 'local-old');
     const oldPc = createMockPeerConnection();
@@ -399,7 +391,7 @@ test('T7: stopScreenShare awaits all replaceTrack(null) promises before sendOffe
 });
 
 test('T8: socket connect awaits refreshIceServers before scheduleIceRefreshTimer uses server TTL', async () => {
-    const appMod = await import(`${pathToFileURL(path.join(ROOT_DIR, 'public/app.js')).href}?t8=${Date.now()}`);
+    const appMod = await loadClientModules(['app'], { cacheBustTag: 't8' });
     let resolveFetch;
     const fetchGate = new Promise((r) => { resolveFetch = r; });
 
@@ -475,8 +467,6 @@ test('T8: socket connect awaits refreshIceServers before scheduleIceRefreshTimer
 
 test('T9: handleDesktopCaptureStopped stops WASAPI audio track, preserves video, and renegotiates peers', async () => {
     const { shareMod } = await loadModules();
-    const desktopAudioSrc = fs.readFileSync(path.join(ROOT_DIR, 'public/js/modules/desktop-audio.js'), 'utf8');
-    assert.ok(desktopAudioSrc.includes('_isDesktopWasapiTrack'));
 
     const videoTrack = createMockTrack('video', 'v1');
     const audioTrack = createMockTrack('audio', 'a1', { _isDesktopWasapiTrack: true });

@@ -19,6 +19,7 @@ import {
 import {
     setSignalingStatus,
     showToast,
+    clearPendingToastTimers,
     playPresenceChime,
     initTheme,
     toggleTheme
@@ -27,7 +28,8 @@ import {
     rtcConfig,
     refreshIceServers,
     scheduleIceRefreshTimer,
-    stopIceRefreshTimer
+    stopIceRefreshTimer,
+    abortIceServersFetch
 } from './js/modules/ice-config.js';
 import { registerFullscreenChangeHandler } from './js/modules/tile-dom.js';
 import {
@@ -87,6 +89,7 @@ function collectDomReferences(doc) {
  *   storage?: Storage | null,
  *   sessionStorageObj?: Storage | null,
  *   ioFactory?: ((url: string, opts?: any) => any) | null,
+ *   fetchImpl?: typeof fetch | null,
  *   serverUrl?: string
  * }} [options]
  */
@@ -97,6 +100,7 @@ export function initApp({
     storage = (typeof localStorage !== 'undefined' ? localStorage : null),
     sessionStorageObj = (typeof sessionStorage !== 'undefined' ? sessionStorage : null),
     ioFactory = (typeof (/** @type {any} */ (globalThis)).io === 'function' ? (/** @type {any} */ (globalThis)).io : null),
+    fetchImpl = null,
     serverUrl: explicitServerUrl
 } = {}) {
     configureDesktopAudioRuntime({ windowObj, documentObj });
@@ -112,6 +116,8 @@ export function initApp({
     const boundSaveSessionRoomPassword = (roomId, password) => saveSessionRoomPassword(roomId, password, sessionStorageObj);
     const boundGetSessionRoomPassword = (roomId) => getSessionRoomPassword(roomId, sessionStorageObj);
     const boundClearSessionRoomPassword = () => clearSessionRoomPassword(sessionStorageObj);
+    const boundRefreshIceServers = (url = serverUrl, opts = {}) => refreshIceServers(url, { fetchImpl, ...opts });
+    const boundScheduleIceRefreshTimer = (url = serverUrl, opts = {}) => scheduleIceRefreshTimer(url, { fetchImpl, ...opts });
     const state = {
         clientId: getOrCreateClientId(storage),
         currentUserName: loadSavedUserName(storage),
@@ -156,6 +162,9 @@ export function initApp({
             boundSetSignalingStatus('waking');
             boundShowToast('Acordando servidor de sinalização... isso pode levar alguns segundos.', 'info', 6000);
         }, COLD_START_NOTICE_DELAY_MS);
+        if (coldStartTimer && typeof /** @type {any} */ (coldStartTimer).unref === 'function') {
+            /** @type {any} */ (coldStartTimer).unref();
+        }
     }
 
     function cancelColdStartNotice() {
@@ -204,8 +213,8 @@ export function initApp({
         getRoomModal: () => roomModalCtrl,
         getServerUrl: () => serverUrl,
         rtcConfig,
-        refreshIceServers,
-        scheduleIceRefreshTimer,
+        refreshIceServers: boundRefreshIceServers,
+        scheduleIceRefreshTimer: boundScheduleIceRefreshTimer,
         registerFullscreenChangeHandler,
         saveSessionRoomPassword: boundSaveSessionRoomPassword,
         clearSessionRoomPassword: boundClearSessionRoomPassword,
@@ -289,7 +298,7 @@ export function initApp({
 
     boundSetSignalingStatus(socket && socket.connected ? 'connected' : 'connecting');
     scheduleColdStartNotice();
-    refreshIceServers(serverUrl, { peers: webrtc.peers });
+    boundRefreshIceServers(serverUrl, { peers: webrtc.peers });
 
     // Bind DOM events
     roomModalCtrl.bindEvents();
@@ -340,11 +349,11 @@ export function initApp({
             state.myId = socket.id;
             cancelColdStartNotice();
             boundSetSignalingStatus('connected');
-            Promise.resolve(refreshIceServers(serverUrl, { peers: webrtc.peers }))
+            Promise.resolve(boundRefreshIceServers(serverUrl, { peers: webrtc.peers }))
                 .catch(() => {})
                 .finally(() => {
                     if (!isTornDown) {
-                        scheduleIceRefreshTimer(serverUrl, { peers: webrtc.peers });
+                        boundScheduleIceRefreshTimer(serverUrl, { peers: webrtc.peers });
                     }
                 });
             console.log('[Socket] Connected to server. Socket ID:', state.myId);
@@ -409,7 +418,9 @@ export function initApp({
         isTornDown = true;
         try {
             cancelColdStartNotice();
+            clearPendingToastTimers();
             stopIceRefreshTimer();
+            abortIceServersFetch();
             qosMonitor.stopQualityMonitor();
             statsModalCtrl.stop();
             roomModalCtrl.cleanup();

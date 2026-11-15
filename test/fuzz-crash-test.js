@@ -1,12 +1,14 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const path = require('node:path');
-const { pathToFileURL } = require('node:url');
-const { startTestServer, httpRequest } = require('./helpers/test-server');
-
-function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-}
+const { loadClientModules } = require('./helpers/client-env');
+const {
+    startTestServer,
+    httpRequest,
+    delay,
+    waitForEvent,
+    tryJoin,
+    checkRoom
+} = require('./helpers/test-server');
 
 describe('Reprodução de crashes, validação estrutural & segurança (Fuzzing)', () => {
     let ts;
@@ -35,25 +37,23 @@ describe('Reprodução de crashes, validação estrutural & segurança (Fuzzing)
             const socket = await ts.connectClient();
             try {
                 emitFuzz(socket);
-                await sleep(60);
+                await checkRoom(socket, 'fuzz-health-probe');
                 assert.strictEqual(ts.server.listening, true, 'Servidor deve permanecer ativo');
-                const health = await httpRequest(`${ts.baseUrl}/health`);
-                assert.strictEqual(health.statusCode, 200);
             } finally {
                 socket.disconnect();
             }
         });
     }
 
+    it('T-HEALTH: servidor permanece saudável via HTTP /health após payloads malformados', async () => {
+        const health = await httpRequest(`${ts.baseUrl}/health`);
+        assert.strictEqual(health.statusCode, 200);
+    });
+
     it('T4-ASSERT: { password: true } responde com invalid_password_format', async () => {
         const socket = await ts.connectClient();
         try {
-            const result = await new Promise((resolve) => {
-                const timer = setTimeout(() => resolve({ status: 'timeout' }), 1500);
-                socket.once('join-error', (data) => { clearTimeout(timer); resolve({ status: 'error', data }); });
-                socket.once('room-users', (data) => { clearTimeout(timer); resolve({ status: 'joined', data }); });
-                socket.emit('join-room', { roomId: 'sala-teste', password: true });
-            });
+            const result = await tryJoin(socket, 'sala-teste', true);
             assert.strictEqual(result.status, 'error');
             assert.strictEqual(result.data?.error, 'invalid_password_format');
         } finally {
@@ -65,22 +65,21 @@ describe('Reprodução de crashes, validação estrutural & segurança (Fuzzing)
         const socketA = await ts.connectClient();
         const socketB = await ts.connectClient();
         try {
-            socketA.emit('join-room', { roomId: 'sala-signal' });
-            socketB.emit('join-room', { roomId: 'sala-signal' });
-            await sleep(150);
+            assert.strictEqual((await tryJoin(socketA, 'sala-signal')).status, 'joined');
+            assert.strictEqual((await tryJoin(socketB, 'sala-signal')).status, 'joined');
 
             const receivedSignals = [];
             socketB.on('signal', (data) => {
                 receivedSignals.push(data.signal);
             });
 
+            const validRelayed = waitForEvent(socketB, 'signal', 2000);
             socketA.emit('signal', { targetId: socketB.id, signal: 'not-an-object' });
             socketA.emit('signal', { targetId: socketB.id, signal: { foo: 'bar' } });
-            await sleep(100);
 
             const validSdp = { type: 'offer', sdp: 'v=0\r\no=- 12345 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n' };
             socketA.emit('signal', { targetId: socketB.id, signal: validSdp });
-            await sleep(150);
+            await validRelayed;
 
             assert.strictEqual(receivedSignals.length, 1);
             assert.strictEqual(receivedSignals[0].type, 'offer');
@@ -91,9 +90,7 @@ describe('Reprodução de crashes, validação estrutural & segurança (Fuzzing)
     });
 
     it('T-UNIT: sanitização real de sanitizeRoomId (acentos, emojis, limites)', async () => {
-        const { sanitizeRoomId } = await import(
-            pathToFileURL(path.resolve(__dirname, '../public/js/modules/room-utils.js')).href
-        );
+        const { sanitizeRoomId } = await loadClientModules(['room-utils']);
         const cases = [
             { input: 'Sala do João', expected: 'sala-do-joao' },
             { input: 'quarto #1 👍 . teste', expected: 'quarto-1-teste' },
@@ -126,14 +123,9 @@ describe('Reprodução de crashes, validação estrutural & segurança (Fuzzing)
     it('T-XSS: join-room com payload HTML é rejeitado com invalid_room', async () => {
         const socket = await ts.connectClient();
         try {
-            const result = await new Promise((resolve) => {
-                const timer = setTimeout(() => resolve({ status: 'timeout' }), 1500);
-                socket.once('join-error', (err) => { clearTimeout(timer); resolve({ status: 'rejected', err }); });
-                socket.once('room-users', (data) => { clearTimeout(timer); resolve({ status: 'accepted', data }); });
-                socket.emit('join-room', { roomId: '<img src=x onerror=alert(1)>' });
-            });
-            assert.strictEqual(result.status, 'rejected');
-            assert.strictEqual(result.err?.error, 'invalid_room');
+            const result = await tryJoin(socket, '<img src=x onerror=alert(1)>');
+            assert.strictEqual(result.status, 'error');
+            assert.strictEqual(result.data?.error, 'invalid_room');
         } finally {
             socket.disconnect();
         }
@@ -145,39 +137,26 @@ describe('Reprodução de crashes, validação estrutural & segurança (Fuzzing)
         const socketC = await ts.connectClient();
 
         try {
-            const roomAJoined = new Promise((resolve) => socketA.once('room-users', resolve));
-            socketA.emit('join-room', { roomId: 'sala-secreta', password: 'senha-super-segura', clientId: 'user-1' });
-            await roomAJoined;
+            assert.strictEqual(
+                (await tryJoin(socketA, 'sala-secreta', 'senha-super-segura', 'user-1')).status,
+                'joined'
+            );
 
-            const socketADisconnected = new Promise((resolve) => {
-                socketA.once('disconnect', () => resolve(true));
-                setTimeout(() => resolve(false), 2000);
-            });
-            const bJoined = new Promise((resolve) => socketB.once('room-users', resolve));
-            socketB.emit('join-room', { roomId: 'sala-secreta', password: 'senha-super-segura', clientId: 'user-1' });
-
-            const [aWasEvicted] = await Promise.all([socketADisconnected, bJoined]);
+            const socketADisconnected = waitForEvent(socketA, 'disconnect', 2000).then(() => true, () => false);
+            const [aWasEvicted, bJoinRes] = await Promise.all([
+                socketADisconnected,
+                tryJoin(socketB, 'sala-secreta', 'senha-super-segura', 'user-1')
+            ]);
+            assert.strictEqual(bJoinRes.status, 'joined');
             assert.ok(aWasEvicted && !socketA.connected, 'Socket A deve ser expulso pelo servidor');
 
-            const checkResult = await new Promise((resolve) => {
-                const timer = setTimeout(() => resolve({ status: 'timeout' }), 1500);
-                socketC.emit('check-room', { roomId: 'sala-secreta' }, (res) => {
-                    clearTimeout(timer);
-                    resolve({ status: 'ok', res });
-                });
-            });
-            assert.strictEqual(checkResult.status, 'ok');
-            assert.strictEqual(checkResult.res?.exists, true);
-            assert.strictEqual(checkResult.res?.hasPassword, true);
-            assert.strictEqual(checkResult.res?.memberCount, 1);
+            const checkResult = await checkRoom(socketC, 'sala-secreta');
+            assert.strictEqual(checkResult?.exists, true);
+            assert.strictEqual(checkResult?.hasPassword, true);
+            assert.strictEqual(checkResult?.memberCount, 1);
 
-            const cResult = await new Promise((resolve) => {
-                const timer = setTimeout(() => resolve({ status: 'timeout' }), 2000);
-                socketC.once('room-users', (data) => { clearTimeout(timer); resolve({ status: 'joined', data }); });
-                socketC.once('join-error', (data) => { clearTimeout(timer); resolve({ status: 'rejected', data }); });
-                socketC.emit('join-room', { roomId: 'sala-secreta', password: '' });
-            });
-            assert.strictEqual(cResult.status, 'rejected');
+            const cResult = await tryJoin(socketC, 'sala-secreta', '');
+            assert.strictEqual(cResult.status, 'error');
             assert.strictEqual(cResult.data?.error, 'invalid_password');
         } finally {
             socketA.disconnect();
@@ -190,9 +169,8 @@ describe('Reprodução de crashes, validação estrutural & segurança (Fuzzing)
         const socketAlice = await ts.connectClient();
         const socketBob = await ts.connectClient();
         try {
-            socketAlice.emit('join-room', { roomId: 'sala-a' });
-            socketBob.emit('join-room', { roomId: 'sala-b' });
-            await sleep(150);
+            assert.strictEqual((await tryJoin(socketAlice, 'sala-a')).status, 'joined');
+            assert.strictEqual((await tryJoin(socketBob, 'sala-b')).status, 'joined');
 
             let bobReceivedSpoofedEvent = false;
             socketBob.on('stream-state', () => {
@@ -200,9 +178,36 @@ describe('Reprodução de crashes, validação estrutural & segurança (Fuzzing)
             });
 
             socketAlice.emit('stream-state', { roomId: 'sala-b', state: 'started' });
-            await sleep(150);
+            await checkRoom(socketAlice, 'sala-b');
+            await delay(20);
 
             assert.strictEqual(bobReceivedSpoofedEvent, false);
+        } finally {
+            socketAlice.disconnect();
+            socketBob.disconnect();
+        }
+    });
+
+    it('T-NICKNAME: server.js propaga userName em room-users e user-joined', async () => {
+        const socketAlice = await ts.connectClient();
+        const socketBob = await ts.connectClient();
+        try {
+            const aliceJoin = await tryJoin(socketAlice, 'sala-apelidos', '', null, 'Alice');
+            assert.strictEqual(aliceJoin.status, 'joined');
+
+            const bobJoinedPromise = waitForEvent(socketAlice, 'user-joined');
+            const bobJoin = await tryJoin(socketBob, 'sala-apelidos', '', null, 'Bob');
+            assert.strictEqual(bobJoin.status, 'joined');
+
+            const bobJoinedEvent = await bobJoinedPromise;
+            const bobRoomUsersEvent = bobJoin.data;
+
+            assert.ok(bobJoinedEvent && bobJoinedEvent.userName === 'Bob');
+            assert.ok(
+                bobRoomUsersEvent &&
+                bobRoomUsersEvent.userNames &&
+                Object.values(bobRoomUsersEvent.userNames).includes('Alice')
+            );
         } finally {
             socketAlice.disconnect();
             socketBob.disconnect();

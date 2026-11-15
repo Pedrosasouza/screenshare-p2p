@@ -32,7 +32,21 @@ let iceServersFetchPromise = null;
 let iceRefreshTimerId = null;
 let iceRefreshTimerGeneration = 0;
 let consecutiveIceRefreshFailures = 0;
+/** @type {Set<AbortController>} */
+const activeIceFetchControllers = new Set();
+const manuallyAbortedControllers = new WeakSet();
 export const rtcConfig = createDefaultRtcConfig();
+
+export function abortIceServersFetch() {
+    for (const controller of activeIceFetchControllers) {
+        manuallyAbortedControllers.add(controller);
+        try {
+            controller.abort();
+        } catch (_) {}
+    }
+    activeIceFetchControllers.clear();
+    iceServersFetchPromise = null;
+}
 
 export function stopIceRefreshTimer() {
     iceRefreshTimerGeneration += 1;
@@ -87,15 +101,24 @@ export async function refreshIceServers(serverUrl = '', options = {}) {
     }
 
     const run = (async () => {
-        if (typeof fetch !== 'function') {
+        const fetchFn = (options && typeof options.fetchImpl === 'function')
+            ? options.fetchImpl
+            : (typeof fetch === 'function' ? fetch : null);
+        if (!fetchFn) {
             return { provider: activeIceProvider, iceServers: rtcConfig.iceServers };
         }
         const base = typeof serverUrl === 'string' ? serverUrl.trim().replace(/\/+$/, '') : '';
         const endpoint = base ? `${base}/ice-servers` : '/ice-servers';
         const controller = typeof AbortController === 'function' ? new AbortController() : null;
+        if (controller) {
+            activeIceFetchControllers.add(controller);
+        }
         const timeoutId = controller ? setTimeout(() => controller.abort(), 3500) : null;
+        if (timeoutId && typeof /** @type {any} */ (timeoutId).unref === 'function') {
+            /** @type {any} */ (timeoutId).unref();
+        }
         try {
-            const response = await fetch(endpoint, {
+            const response = await fetchFn(endpoint, {
                 method: 'GET',
                 cache: 'no-store',
                 signal: controller ? controller.signal : undefined
@@ -130,6 +153,9 @@ export async function refreshIceServers(serverUrl = '', options = {}) {
             }
             return { provider: activeIceProvider, iceServers: rtcConfig.iceServers };
         } catch (err) {
+            if (controller && manuallyAbortedControllers.has(controller)) {
+                return { provider: activeIceProvider, iceServers: rtcConfig.iceServers, aborted: true };
+            }
             if (typeof consecutiveIceRefreshFailures !== 'undefined') {
                 consecutiveIceRefreshFailures += 1;
             }
@@ -138,6 +164,9 @@ export async function refreshIceServers(serverUrl = '', options = {}) {
             }
             return { provider: activeIceProvider, iceServers: rtcConfig.iceServers, error: err };
         } finally {
+            if (controller) {
+                activeIceFetchControllers.delete(controller);
+            }
             if (timeoutId !== null) {
                 clearTimeout(timeoutId);
             }

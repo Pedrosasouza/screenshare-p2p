@@ -1,5 +1,21 @@
 export const THEME_KEY = 'streamgrid_theme';
 
+/** @type {Set<ReturnType<typeof setTimeout>>} */
+const activeToastTimers = new Set();
+
+export function clearPendingToastTimers() {
+    for (const timerId of activeToastTimers) {
+        clearTimeout(timerId);
+    }
+    activeToastTimers.clear();
+}
+
+function unrefIfNodeTimer(timerId) {
+    if (timerId && typeof /** @type {any} */ (timerId).unref === 'function') {
+        /** @type {any} */ (timerId).unref();
+    }
+}
+
 
 
 export function setSignalingStatus(status, customLabelOrOptions, maybeDoc) {
@@ -72,17 +88,28 @@ export function showToast(message, type = 'info', durationMs = 4000, doc) {
     closeBtn.innerHTML = '<i class="fa-solid fa-xmark"></i>';
 
     let timeoutId = null;
+    let hideTimeoutId = null;
     const dismiss = () => {
-        if (timeoutId) clearTimeout(timeoutId);
+        if (timeoutId) {
+            clearTimeout(timeoutId);
+            activeToastTimers.delete(timeoutId);
+            timeoutId = null;
+        }
         toast.classList.add('hiding');
-        setTimeout(() => {
+        hideTimeoutId = setTimeout(() => {
+            activeToastTimers.delete(hideTimeoutId);
+            hideTimeoutId = null;
             if (toast.parentNode) toast.parentNode.removeChild(toast);
         }, 250);
+        activeToastTimers.add(hideTimeoutId);
+        unrefIfNodeTimer(hideTimeoutId);
     };
 
     closeBtn.addEventListener('click', dismiss);
     if (durationMs > 0) {
         timeoutId = setTimeout(dismiss, durationMs);
+        activeToastTimers.add(timeoutId);
+        unrefIfNodeTimer(timeoutId);
     }
 
     toast.appendChild(iconEl);

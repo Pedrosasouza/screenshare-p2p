@@ -1,38 +1,16 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { startTestServer, httpRequest } = require('./helpers/test-server');
-
-function tryJoin(socket, roomId, password = '', userName = null) {
-    return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
-            cleanup();
-            reject(new Error(`Timeout joining room "${roomId}"`));
-        }, 4000);
-
-        const onJoinError = (data) => {
-            cleanup();
-            resolve({ status: 'error', data });
-        };
-        const onRoomUsers = (data) => {
-            cleanup();
-            resolve({ status: 'joined', data });
-        };
-
-        function cleanup() {
-            clearTimeout(timer);
-            socket.off('join-error', onJoinError);
-            socket.off('room-users', onRoomUsers);
-        }
-
-        socket.once('join-error', onJoinError);
-        socket.once('room-users', onRoomUsers);
-        socket.emit('join-room', { roomId, password, userName });
-    });
-}
-
-function delay(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-}
+const fs = require('node:fs');
+const path = require('node:path');
+const { getCorsOrigin } = require('../src/server/security-headers');
+const {
+    startTestServer,
+    httpRequest,
+    delay,
+    waitForEvent,
+    tryJoin,
+    checkRoom
+} = require('./helpers/test-server');
 
 describe('Hardening HTTP, signal relay & loginAttempts', () => {
     let ts;
@@ -60,6 +38,22 @@ describe('Hardening HTTP, signal relay & loginAttempts', () => {
         assert.strictEqual(healthRes.headers['x-content-type-options'], 'nosniff');
         assert.strictEqual(healthRes.headers['x-frame-options'], 'DENY');
         assert.strictEqual(healthRes.headers['x-powered-by'], undefined);
+        assert.strictEqual(JSON.parse(healthRes.body).status, 'ok');
+
+        for (const route of ['/', '/health', '/ice-servers']) {
+            const routeRes = await httpRequest(`${ts.baseUrl}${route}`);
+            assert.strictEqual(routeRes.statusCode, 200);
+            const csp = routeRes.headers['content-security-policy'] || '';
+            assert.ok(csp, `Content-Security-Policy header must exist on ${route}`);
+            assert.ok(csp.includes("default-src 'self'"));
+            assert.ok(csp.includes("style-src 'self'"));
+            assert.strictEqual(csp.includes("'unsafe-inline'"), false);
+            assert.ok(csp.includes("object-src 'none'"));
+            assert.ok(csp.includes("frame-ancestors 'none'"));
+            assert.strictEqual(routeRes.headers['referrer-policy'], 'no-referrer');
+            assert.strictEqual(routeRes.headers['x-content-type-options'], 'nosniff');
+            assert.strictEqual(routeRes.headers['x-frame-options'], 'DENY');
+        }
     });
 
     it('T2: auto-sinalização é ignorada e relay entre peers legítimos funciona', async () => {
@@ -80,16 +74,10 @@ describe('Hardening HTTP, signal relay & loginAttempts', () => {
                 targetId: peerA.id,
                 signal: { type: 'offer', sdp: 'v=0\r\nself-signal' }
             });
-            await delay(80);
+            await checkRoom(peerA, roomId);
             assert.strictEqual(selfEchoCount, 0);
 
-            const relayedPromise = new Promise((resolve, reject) => {
-                const timer = setTimeout(() => reject(new Error('Timeout esperando relay para peerB')), 3000);
-                peerB.once('signal', (payload) => {
-                    clearTimeout(timer);
-                    resolve(payload);
-                });
-            });
+            const relayedPromise = waitForEvent(peerB, 'signal', 3000);
 
             peerA.emit('signal', {
                 targetId: peerB.id,
@@ -101,13 +89,7 @@ describe('Hardening HTTP, signal relay & loginAttempts', () => {
             assert.strictEqual(relayed.signal.type, 'offer');
             assert.strictEqual(relayed.signal.sdp, 'v=0\r\nvalid-offer');
 
-            const iceRelayedPromise = new Promise((resolve, reject) => {
-                const timer = setTimeout(() => reject(new Error('Timeout esperando relay ICE para peerB')), 3000);
-                peerB.once('signal', (payload) => {
-                    clearTimeout(timer);
-                    resolve(payload);
-                });
-            });
+            const iceRelayedPromise = waitForEvent(peerB, 'signal', 3000);
 
             peerA.emit('signal', { targetId: peerB.id, signal: { candidate: 12345 } });
             peerA.emit('signal', {
@@ -698,9 +680,13 @@ describe('Hardening CORS produção, rate-limit de check-room, CSP estrita e blo
 
             c1.client.disconnect();
             c1 = null;
-            await new Promise((r) => setTimeout(r, 80));
+            await delay(30);
 
             c4 = await connectRaw();
+            if (!c4.ok) {
+                await delay(50);
+                c4 = await connectRaw();
+            }
             assert.strictEqual(c4.ok, true);
         } finally {
             if (c1 && c1.client) c1.client.close();
@@ -708,5 +694,28 @@ describe('Hardening CORS produção, rate-limit de check-room, CSP estrita e blo
             if (c4 && c4.client) c4.client.close();
             await ts.close();
         }
+    });
+
+    it('T15: ALLOWED_ORIGINS restringe CORS via getCorsOrigin e config Tauri desabilita devtools', async () => {
+        const openCors = getCorsOrigin({});
+        assert.strictEqual(openCors, '*');
+
+        const restrictedCors = getCorsOrigin({ ALLOWED_ORIGINS: 'https://app.example.com, https://admin.example.com' });
+        assert.strictEqual(typeof restrictedCors, 'function');
+
+        await new Promise((resolve, reject) => {
+            restrictedCors('https://app.example.com', (err, allowed) => {
+                if (err) return reject(err);
+                assert.strictEqual(allowed, true);
+                restrictedCors('https://evil.example.com', (err2, allowed2) => {
+                    assert.ok(err2 instanceof Error);
+                    assert.strictEqual(allowed2, undefined);
+                    resolve();
+                });
+            });
+        });
+
+        const tauriConf = JSON.parse(fs.readFileSync(path.join(__dirname, '../src-tauri/tauri.conf.json'), 'utf8'));
+        assert.strictEqual(tauriConf.app.windows[0].devtools, false, 'Production Tauri config must disable devtools');
     });
 });

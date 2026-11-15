@@ -1,22 +1,15 @@
 'use strict';
 
-const test = require('node:test');
+const { describe, it, test } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const path = require('node:path');
-const { pathToFileURL } = require('node:url');
 
 const { createMockElement, createMockDocument, createMockStorage } = require('./helpers/mock-dom');
-
-const ROOT_DIR = path.resolve(__dirname, '..');
+const { ROOT_DIR, loadClientModules } = require('./helpers/client-env');
 
 async function loadModules() {
-    const [gridMod, tileDomMod, qosMonMod, statsMod] = await Promise.all([
-        import(pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/stream-grid.js')).href),
-        import(pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/tile-dom.js')).href),
-        import(pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/qos-monitor.js')).href),
-        import(pathToFileURL(path.join(ROOT_DIR, 'public/js/modules/stats-modal.js')).href)
-    ]);
-    return { ...gridMod, ...tileDomMod, ...qosMonMod, ...statsMod };
+    return loadClientModules(['stream-grid', 'tile-dom', 'qos-monitor', 'stats-modal', 'preferences', 'room-modal']);
 }
 
 function createHarness(mods, overrides = {}) {
@@ -289,7 +282,7 @@ test('T4: Anti-reentrancy and generation guards on startQualityMonitor / openSta
 });
 
 test('T5: teardownClientSession disconnects offline sockets, stops desktop listeners, and removes window/document listeners', async () => {
-    const { initApp } = await import(`${pathToFileURL(path.join(ROOT_DIR, 'public/app.js')).href}?teardown=${Date.now()}`);
+    const { initApp } = await loadClientModules(['app'], { cacheBustTag: 'teardown' });
 
     const windowListeners = new Map();
     const docListeners = new Map();
@@ -342,6 +335,7 @@ test('T5: teardownClientSession disconnects offline sockets, stops desktop liste
         navigatorObj: { clipboard: { writeText: async () => {} } },
         storage: createMockStorage(),
         ioFactory: () => socket,
+        fetchImpl: async () => ({ ok: false, status: 503 }),
         serverUrl: 'http://localhost:3000'
     });
 
@@ -354,4 +348,268 @@ test('T5: teardownClientSession disconnects offline sockets, stops desktop liste
     assert.equal((windowListeners.get('keydown') || new Set()).size, 0, 'listener keydown deve ser removido');
     assert.equal((windowListeners.get('pagehide') || new Set()).size, 0, 'listener pagehide deve ser removido');
     assert.equal((docListeners.get('visibilitychange') || new Set()).size, 0, 'listener visibilitychange deve ser removido');
+});
+
+test('Salas Recentes: persistência e renderização no room-modal', async (t) => {
+    const mods = await loadModules();
+
+    await t.test('saveRecentRoom, loadRecentRooms, removeRecentRoom e clearRecentRooms respeitam limite, deduplicação e sanitização', () => {
+        const storage = createMockStorage();
+
+        assert.deepEqual(mods.loadRecentRooms(storage), []);
+
+        mods.saveRecentRoom('ab', storage);
+        assert.deepEqual(mods.loadRecentRooms(storage), []);
+
+        mods.saveRecentRoom('sala-1', storage);
+        mods.saveRecentRoom('sala-2', storage);
+        mods.saveRecentRoom('sala-3', storage);
+        mods.saveRecentRoom('sala-1', storage);
+        assert.deepEqual(mods.loadRecentRooms(storage), ['sala-1', 'sala-3', 'sala-2']);
+
+        mods.saveRecentRoom('sala-4', storage);
+        mods.saveRecentRoom('sala-5', storage);
+        mods.saveRecentRoom('sala-6', storage);
+        assert.deepEqual(mods.loadRecentRooms(storage), ['sala-6', 'sala-5', 'sala-4', 'sala-1', 'sala-3']);
+
+        mods.removeRecentRoom('sala-4', storage);
+        assert.deepEqual(mods.loadRecentRooms(storage), ['sala-6', 'sala-5', 'sala-1', 'sala-3']);
+
+        mods.clearRecentRooms(storage);
+        assert.deepEqual(mods.loadRecentRooms(storage), []);
+    });
+
+    await t.test('renderRecentRooms exibe lista, consulta check-room, remove item e redireciona sala com senha para view join', () => {
+        const storage = createMockStorage();
+        mods.saveRecentRoom('sala-publica', storage);
+        mods.saveRecentRoom('sala-privada', storage);
+        mods.saveRecentRoom('sala-atual', storage);
+
+        const recentRoomsSection = createMockElement('div', { id: 'recentRoomsSection', hidden: true });
+        const recentRoomsList = createMockElement('div', { id: 'recentRoomsList' });
+        const btnClearRecentRooms = createMockElement('button', { id: 'btnClearRecentRooms' });
+        const inputJoinRoomId = createMockElement('input', { id: 'inputJoinRoomId' });
+        const inputJoinRoomPassword = createMockElement('input', { id: 'inputJoinRoomPassword' });
+        const roomViewChoice = createMockElement('div', { id: 'roomViewChoice', style: { display: 'block' } });
+        const roomViewCreate = createMockElement('div', { id: 'roomViewCreate', style: { display: 'none' } });
+        const roomViewJoin = createMockElement('div', { id: 'roomViewJoin', style: { display: 'none' } });
+        const roomModal = createMockElement('div', { id: 'roomModal', hidden: false, style: { display: 'flex' } });
+
+        const dom = {
+            roomModal,
+            roomViewChoice,
+            roomViewCreate,
+            roomViewJoin,
+            recentRoomsSection,
+            recentRoomsList,
+            btnClearRecentRooms,
+            inputJoinRoomId,
+            inputJoinRoomPassword
+        };
+        const doc = createMockDocument(dom, { createElement: (tag) => createMockElement(tag) });
+
+        const emittedJoin = [];
+        const socket = {
+            connected: true,
+            emit(event, payload, cb) {
+                if (event === 'check-room' && typeof cb === 'function') {
+                    if (payload.roomId === 'sala-privada') {
+                        cb({ exists: true, memberCount: 3, hasPassword: true });
+                    } else if (payload.roomId === 'sala-publica') {
+                        cb({ exists: false, memberCount: 0, hasPassword: false });
+                    }
+                } else if (event === 'join-room') {
+                    emittedJoin.push(payload);
+                }
+            }
+        };
+
+        const state = {
+            roomId: 'sala-atual',
+            clientId: 'c_test',
+            currentUserName: 'Pedro',
+            pendingRoomJoin: null
+        };
+
+        const ctrl = mods.createRoomModalController({
+            state,
+            dom,
+            getSocket: () => socket,
+            getSessionRoomPassword: () => '',
+            clearSessionRoomPassword: () => {},
+            documentObj: doc,
+            storage,
+            windowObj: { location: { search: '', hash: '', pathname: '/' } }
+        });
+
+        ctrl.bindEvents();
+        ctrl.openRoomModal('choice');
+
+        assert.equal(recentRoomsSection.hidden, false);
+        assert.equal(recentRoomsList.children.length, 3);
+
+        // Primeiro item é a sala atual
+        const firstRow = recentRoomsList.children[0];
+        assert.ok(firstRow.className.includes('is-current'));
+
+        // Segundo item é sala-privada (3 online + hasPassword) -> clicar abre view join
+        const privateRow = recentRoomsList.children[1];
+        const privateMainBtn = privateRow.children[0];
+        privateMainBtn.dispatchEvent({ type: 'click' });
+        assert.equal(inputJoinRoomId.value, 'sala-privada');
+        assert.equal(roomViewJoin.hidden, false);
+
+        // Volta para choice e clica no botão remover de sala-publica
+        ctrl.switchRoomView('choice');
+        const publicRow = recentRoomsList.children[2];
+        const removeBtn = publicRow.children[1];
+        removeBtn.dispatchEvent({ type: 'click', stopPropagation: () => {} });
+        assert.equal(recentRoomsList.children.length, 2);
+
+        // Limpar tudo esconde o botão Limpar e exibe estado vazio na seção
+        btnClearRecentRooms.dispatchEvent({ type: 'click' });
+        assert.equal(recentRoomsSection.hidden, false);
+        assert.equal(btnClearRecentRooms.hidden, true);
+        assert.equal(recentRoomsList.children.length, 1);
+        assert.equal(recentRoomsList.children[0].className, 'recent-rooms-empty');
+    });
+});
+
+describe('Utilitários da barra inferior (PiP e Stats)', () => {
+    it('T1: public/index.html define btnTogglePip, btnToggleStats, statsModal e formulario de servidor customizado', () => {
+        const html = fs.readFileSync(path.join(ROOT_DIR, 'public/index.html'), 'utf8');
+        assert.ok(html.includes('id="btnTogglePip"'));
+        assert.ok(html.includes('id="btnToggleStats"'));
+        assert.ok(html.includes('id="statsModal"'));
+        assert.ok(html.includes('id="customServerFormContainer"'));
+        assert.ok(html.includes('id="inputCustomServerUrl"'));
+        assert.ok(html.includes('id="btnSaveServerUrl"'));
+    });
+
+    it('T2: stats-modal togglePictureInPicture ativa e sai de PiP corretamente', async () => {
+        const { createStatsModalController } = await loadModules();
+
+        const doc = createMockDocument();
+        let pipRequested = 0;
+        let pipExited = 0;
+        doc.pictureInPictureEnabled = true;
+        doc.pictureInPictureElement = null;
+        doc.exitPictureInPicture = async () => {
+            pipExited += 1;
+            doc.pictureInPictureElement = null;
+        };
+
+        const streamGrid = createMockElement('div', { id: 'streamGrid' });
+        const remoteTile = createMockElement('div', { id: 'tile-peer-1', className: 'stream-tile' });
+        const remoteVideo = createMockElement('video');
+        remoteVideo.requestPictureInPicture = async () => {
+            pipRequested += 1;
+            doc.pictureInPictureElement = remoteVideo;
+        };
+        remoteTile.appendChild(remoteVideo);
+        streamGrid.appendChild(remoteTile);
+        doc.body.appendChild(streamGrid);
+
+        const toasts = [];
+        const ctrl = createStatsModalController({
+            state: { selectedVideoResolution: '1080p' },
+            dom: { streamGrid },
+            getPeers: () => new Map(),
+            getServerUrl: () => 'http://127.0.0.1',
+            showToast: (msg, type) => toasts.push({ msg, type }),
+            documentObj: doc,
+            windowObj: { location: { reload: () => {} } }
+        });
+
+        await ctrl.togglePictureInPicture();
+        assert.strictEqual(pipRequested, 1);
+        assert.strictEqual(doc.pictureInPictureElement, remoteVideo);
+
+        await ctrl.togglePictureInPicture();
+        assert.strictEqual(pipExited, 1);
+        assert.strictEqual(doc.pictureInPictureElement, null);
+        assert.strictEqual(toasts.length, 0);
+    });
+
+    it('T3: openStatsModal/closeStatsModal respondem a clique de backdrop e API pública', async () => {
+        const { createStatsModalController } = await loadModules();
+
+        const doc = createMockDocument();
+        const statsModal = createMockElement('div', { id: 'statsModal' });
+        statsModal.hidden = true;
+        statsModal.style.display = 'none';
+        const btnToggleStats = createMockElement('button', { id: 'btnToggleStats' });
+        const btnCloseStatsModal = createMockElement('button', { id: 'btnCloseStatsModal' });
+        doc.body.appendChild(statsModal);
+
+        const ctrl = createStatsModalController({
+            state: { selectedVideoResolution: '1080p' },
+            dom: { statsModal, btnToggleStats, btnCloseStatsModal },
+            getPeers: () => new Map(),
+            getServerUrl: () => 'http://127.0.0.1',
+            showToast: () => {},
+            documentObj: doc,
+            windowObj: { location: { reload: () => {} } }
+        });
+        ctrl.bindEvents();
+
+        try {
+            ctrl.openStatsModal();
+            assert.strictEqual(ctrl.isStatsModalOpen(), true);
+
+            // Backdrop click fecha
+            statsModal.dispatchEvent({ type: 'click', target: statsModal });
+            assert.strictEqual(ctrl.isStatsModalOpen(), false);
+            assert.strictEqual(statsModal.style.display, 'none');
+
+            // Reabre e fecha via botão
+            btnToggleStats.click();
+            assert.strictEqual(ctrl.isStatsModalOpen(), true);
+            btnCloseStatsModal.click();
+            assert.strictEqual(ctrl.isStatsModalOpen(), false);
+        } finally {
+            ctrl.closeStatsModal();
+        }
+    });
+
+    it('T4: toggleVideoPictureInPicture alterna PiP entre dois vídeos distintos e trata saída no mesmo vídeo', async () => {
+        const { toggleVideoPictureInPicture } = await loadModules();
+
+        const doc = createMockDocument();
+        let exitCount = 0;
+        doc.pictureInPictureEnabled = true;
+        doc.pictureInPictureElement = null;
+        doc.exitPictureInPicture = async () => {
+            exitCount += 1;
+            doc.pictureInPictureElement = null;
+        };
+
+        const videoA = createMockElement('video');
+        const videoB = createMockElement('video');
+        let reqA = 0;
+        let reqB = 0;
+        videoA.requestPictureInPicture = async () => {
+            reqA += 1;
+            doc.pictureInPictureElement = videoA;
+        };
+        videoB.requestPictureInPicture = async () => {
+            reqB += 1;
+            doc.pictureInPictureElement = videoB;
+        };
+
+        await toggleVideoPictureInPicture(videoA, { documentObj: doc });
+        assert.strictEqual(reqA, 1);
+        assert.strictEqual(doc.pictureInPictureElement, videoA);
+
+        // Ativar PiP em B enquanto A está em PiP troca direto para B
+        await toggleVideoPictureInPicture(videoB, { documentObj: doc });
+        assert.strictEqual(reqB, 1);
+        assert.strictEqual(exitCount, 0);
+        assert.strictEqual(doc.pictureInPictureElement, videoB);
+
+        // Clicar novamente em B sai do PiP
+        await toggleVideoPictureInPicture(videoB, { documentObj: doc });
+        assert.strictEqual(exitCount, 1);
+        assert.strictEqual(doc.pictureInPictureElement, null);
+    });
 });
