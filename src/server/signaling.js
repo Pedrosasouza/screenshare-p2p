@@ -9,9 +9,20 @@ const {
 const ROOM_ID_REGEX = /^[a-z0-9_-]{3,64}$/;
 const MAX_ROOMS = 2000;
 const MAX_MEMBERS_PER_ROOM = 32;
+const VALID_QUALITY_PRESETS = new Set(['auto', '1080p60', '1080p30', '720p60', '720p30', '480p30']);
+const VALID_OPTIMIZATION_MODES = new Set(['balanced', 'motion', 'detail']);
 
 function isPlainObject(obj) {
     return obj !== null && typeof obj === 'object' && !Array.isArray(obj);
+}
+
+function sanitizeStreamMaxQuality(raw) {
+    if (!isPlainObject(raw)) {
+        return { resolution: '1080p', fps: 60 };
+    }
+    const resolution = raw.resolution === '720p' ? '720p' : '1080p';
+    const fps = Number(raw.fps) === 30 ? 30 : 60;
+    return { resolution, fps };
 }
 
 function sanitizeControlChars(str) {
@@ -33,7 +44,11 @@ function isValidSignal(signal) {
     const sdpMLineOk = icePayload.sdpMLineIndex === undefined || icePayload.sdpMLineIndex === null || (Number.isInteger(icePayload.sdpMLineIndex) && icePayload.sdpMLineIndex >= 0);
     const isIce = hasIceField && candidateOk && sdpMidOk && sdpMLineOk && Boolean(icePayload.candidate || icePayload.sdpMid !== undefined || icePayload.sdpMLineIndex !== undefined);
     const isKeyframeReq = signal.type === 'request-keyframe';
-    return isSdp || isIce || isKeyframeReq;
+    const isQualityReq = signal.type === 'quality-request' &&
+        typeof signal.preset === 'string' &&
+        VALID_QUALITY_PRESETS.has(signal.preset) &&
+        (signal.mode === undefined || (typeof signal.mode === 'string' && VALID_OPTIMIZATION_MODES.has(signal.mode)));
+    return isSdp || isIce || isKeyframeReq || isQualityReq;
 }
 
 function registerSignalingHandlers(
@@ -62,6 +77,7 @@ function registerSignalingHandlers(
                 if (r.userNames) r.userNames.delete(sock.id);
                 const wasStreaming = r.activeStreams.has(sock.id);
                 r.activeStreams.delete(sock.id);
+                if (r.streamMeta) r.streamMeta.delete(sock.id);
 
                 if (r.members.size === 0) {
                     rooms.delete(rid);
@@ -171,7 +187,8 @@ function registerSignalingHandlers(
                             passwordSalt: salt,
                             members: new Map(),
                             userNames: new Map(),
-                            activeStreams: new Set()
+                            activeStreams: new Set(),
+                            streamMeta: new Map()
                         };
                         rooms.set(cleanRoomId, room);
                         loginAttempts.delete(attemptKey);
@@ -313,6 +330,7 @@ function registerSignalingHandlers(
                                 room.members.delete(existingSocketId);
                                 if (room.userNames) room.userNames.delete(existingSocketId);
                                 const hadStream = room.activeStreams.delete(existingSocketId);
+                                if (room.streamMeta) room.streamMeta.delete(existingSocketId);
                                 if (hadStream) {
                                     io.to(cleanRoomId).emit('stream-state', {
                                         senderId: existingSocketId,
@@ -344,6 +362,11 @@ function registerSignalingHandlers(
 
                 const otherUsers = Array.from(room.members.keys()).filter((id) => id !== socket.id);
                 const activeStreams = Array.from(room.activeStreams).filter((id) => id !== socket.id);
+                const streamQualities = {};
+                for (const streamPeerId of activeStreams) {
+                    const meta = room.streamMeta && room.streamMeta.get(streamPeerId);
+                    streamQualities[streamPeerId] = meta || { resolution: '1080p', fps: 60 };
+                }
 
                 console.log(`[->] Socket ${socket.id} joined room "${cleanRoomId}" as "${displayName}" (Members: ${room.members.size})`);
 
@@ -351,6 +374,7 @@ function registerSignalingHandlers(
                     users: otherUsers,
                     userNames: Object.fromEntries(room.userNames),
                     activeStreams,
+                    streamQualities,
                     socketId: socket.id,
                     memberCount: room.members.size,
                     hasPassword: Boolean(room.passwordHash)
@@ -433,15 +457,23 @@ function registerSignalingHandlers(
             if (!room) return;
 
             if (data.state === 'started') {
+                const maxQuality = sanitizeStreamMaxQuality(data.maxQuality);
                 room.activeStreams.add(socket.id);
+                if (!room.streamMeta) room.streamMeta = new Map();
+                room.streamMeta.set(socket.id, maxQuality);
+                socket.to(senderRoom).emit('stream-state', {
+                    senderId: socket.id,
+                    state: 'started',
+                    maxQuality
+                });
             } else {
                 room.activeStreams.delete(socket.id);
+                if (room.streamMeta) room.streamMeta.delete(socket.id);
+                socket.to(senderRoom).emit('stream-state', {
+                    senderId: socket.id,
+                    state: 'stopped'
+                });
             }
-
-            socket.to(senderRoom).emit('stream-state', {
-                senderId: socket.id,
-                state: data.state
-            });
         }));
 
         socket.on('disconnect', () => {
@@ -455,7 +487,10 @@ module.exports = {
     ROOM_ID_REGEX,
     MAX_ROOMS,
     MAX_MEMBERS_PER_ROOM,
+    VALID_QUALITY_PRESETS,
+    VALID_OPTIMIZATION_MODES,
     isPlainObject,
+    sanitizeStreamMaxQuality,
     sanitizeControlChars,
     isValidSignal,
     registerSignalingHandlers

@@ -1,5 +1,11 @@
 import { optimizeSDP } from './sdp.js';
 import {
+    isValidViewerOptimizationMode,
+    isValidViewerQualityPreset,
+    isPresetWithinMaxQuality,
+    normalizeStreamMaxQuality
+} from './qos.js';
+import {
     rtcConfig as defaultRtcConfig,
     refreshIceServers as defaultRefreshIceServers,
     scheduleIceRefreshTimer as defaultScheduleIceRefreshTimer
@@ -89,6 +95,7 @@ export function createWebRtcMesh({
     const activeRoomPeers = new Set();
     const recentlyRemovedPeers = new Map();
     const remoteActiveStreams = new Set();
+    const remoteStreamQualities = new Map();
     const membership = {
         hasRoomMembershipSnapshot: false,
         lastJoinedSocketId: '',
@@ -191,7 +198,56 @@ export function createWebRtcMesh({
         }
     }
 
-    function addLocalTracksToPC(pc) {
+    function syncPeerTileQualityUi(peerId) {
+        const peerObj = peers.get(peerId);
+        if (!peerObj || !peerObj.tileEl) return;
+        const maxQuality = peerObj.remoteMaxQuality || remoteStreamQualities.get(peerId) || { resolution: '1080p', height: 1080, fps: 60 };
+        if (!isPresetWithinMaxQuality(peerObj.selectedReceiveQuality, maxQuality)) {
+            peerObj.selectedReceiveQuality = 'auto';
+        }
+        const selectedMode = isValidViewerOptimizationMode(peerObj.selectedReceiveMode)
+            ? peerObj.selectedReceiveMode
+            : 'balanced';
+        peerObj.selectedReceiveMode = selectedMode;
+        const grid = getGrid();
+        if (grid && typeof grid.updateTileQualityOptions === 'function') {
+            grid.updateTileQualityOptions(peerObj.tileEl, {
+                maxQuality,
+                selectedPreset: peerObj.selectedReceiveQuality || 'auto',
+                selectedMode
+            });
+        }
+    }
+
+    function requestPeerVideoQuality(peerId, preset, mode) {
+        if (!peerId) return false;
+        const peerObj = peers.get(peerId);
+        if (!peerObj) return false;
+        const targetPreset = preset !== undefined && preset !== null ? preset : (peerObj.selectedReceiveQuality || 'auto');
+        if (!isValidViewerQualityPreset(targetPreset)) return false;
+        const targetMode = mode !== undefined && mode !== null ? mode : (peerObj.selectedReceiveMode || 'balanced');
+        if (!isValidViewerOptimizationMode(targetMode)) return false;
+
+        const maxQuality = peerObj.remoteMaxQuality || remoteStreamQualities.get(peerId) || { resolution: '1080p', height: 1080, fps: 60 };
+        const effectivePreset = isPresetWithinMaxQuality(targetPreset, maxQuality) ? targetPreset : 'auto';
+        peerObj.selectedReceiveQuality = effectivePreset;
+        peerObj.selectedReceiveMode = targetMode;
+        syncPeerTileQualityUi(peerId);
+        const socket = getSocket();
+        if (socket && typeof socket.emit === 'function') {
+            socket.emit('signal', {
+                targetId: peerId,
+                signal: {
+                    type: 'quality-request',
+                    preset: effectivePreset,
+                    mode: targetMode
+                }
+            });
+        }
+        return true;
+    }
+
+    function addLocalTracksToPC(pc, explicitPeerObj = null) {
         if (!pc || !state.localStream) return Promise.resolve([]);
         const qm = getQosMonitor();
         const targetPeerObj = explicitPeerObj || Array.from(peers.values()).find((p) => p && p.pc === pc) || null;
@@ -199,6 +255,13 @@ export function createWebRtcMesh({
         const transceivers = typeof pc.getTransceivers === 'function' ? pc.getTransceivers() : null;
         const replacePromises = [];
         state.localStream.getTracks().forEach((track) => {
+            const outboundTrack = (
+                track.kind === 'video' &&
+                qm &&
+                typeof qm.resolveSenderVideoTrack === 'function'
+            )
+                ? (qm.resolveSenderVideoTrack(track, targetPeerObj) || track)
+                : track;
             let existingSender = null;
             const matchedTransceiver = transceivers
                 ? (transceivers.find((t) => {
@@ -300,6 +363,11 @@ export function createWebRtcMesh({
             makingOffer: false,
             pendingOffer: false,
             ignoreOffer: false,
+            viewerQualityPreset: 'auto',
+            viewerOptimizationMode: 'balanced',
+            selectedReceiveQuality: 'auto',
+            selectedReceiveMode: 'balanced',
+            remoteMaxQuality: remoteStreamQualities.get(peerId) || null,
             _iceRestartAttempts: 0,
             _signalChain: Promise.resolve()
         };
@@ -372,6 +440,17 @@ export function createWebRtcMesh({
                     }
                     if (grid) grid.startTilePlayback(peerObj.tileEl, videoEl);
                 }
+                syncPeerTileQualityUi(peerId);
+            }
+
+            if (
+                event.track.kind === 'video' &&
+                (
+                    (peerObj.selectedReceiveQuality && peerObj.selectedReceiveQuality !== 'auto') ||
+                    (peerObj.selectedReceiveMode && peerObj.selectedReceiveMode !== 'balanced')
+                )
+            ) {
+                requestPeerVideoQuality(peerId, peerObj.selectedReceiveQuality, peerObj.selectedReceiveMode);
             }
 
             event.track.onunmute = () => {
@@ -521,6 +600,7 @@ export function createWebRtcMesh({
                 }
                 if (grid) grid.startTilePlayback(peerObj.tileEl, videoEl);
             }
+            syncPeerTileQualityUi(peerId);
         }
         if (grid) grid.updateGridState();
     }
@@ -576,6 +656,7 @@ export function createWebRtcMesh({
         membership.lastJoinedSocketId = '';
         membership.isRoomMembershipConfirmed = false;
         remoteActiveStreams.clear();
+        remoteStreamQualities.clear();
 
         const grid = getGrid();
         if (grid) grid.updateEchoWarningVisibility();
@@ -603,7 +684,7 @@ export function createWebRtcMesh({
         if (membership.hasRoomMembershipSnapshot && !peers.has(senderId) && !activeRoomPeers.has(senderId)) {
             return;
         }
-        if (signal.type === 'request-keyframe' && !peers.has(senderId)) {
+        if ((signal.type === 'request-keyframe' || signal.type === 'quality-request') && !peers.has(senderId)) {
             return;
         }
 
@@ -730,7 +811,24 @@ export function createWebRtcMesh({
                     const activeTrack = (videoSender && videoSender.track) || videoTrack;
                     if (videoSender && activeTrack) {
                         console.log(`[WebRTC] Peer ${senderId} solicitou keyframe (tela preta). Forçando IDR frame via replaceTrack...`);
-                        try { Promise.resolve(videoSender.replaceTrack(videoTrack)).catch(() => {}); } catch (_) {}
+                        try { Promise.resolve(videoSender.replaceTrack(activeTrack)).catch(() => {}); } catch (_) {}
+                    }
+                }
+            } else if (signal.type === 'quality-request') {
+                if (
+                    isValidViewerQualityPreset(signal.preset) &&
+                    (signal.mode === undefined || isValidViewerOptimizationMode(signal.mode))
+                ) {
+                    peerObj.viewerQualityPreset = signal.preset;
+                    peerObj.viewerOptimizationMode = signal.mode !== undefined ? signal.mode : 'balanced';
+                    const qm = getQosMonitor();
+                    if (qm) {
+                        if (typeof qm.applyPeerViewerQuality === 'function') {
+                            qm.applyPeerViewerQuality(senderId, peerObj);
+                        } else if (typeof qm.configureSenderParams === 'function') {
+                            const videoSender = pc.getSenders().find((s) => s.track && s.track.kind === 'video');
+                            if (videoSender) qm.configureSenderParams(videoSender, 'video', peerObj);
+                        }
                     }
                 }
             }
@@ -744,7 +842,7 @@ export function createWebRtcMesh({
             });
     }
 
-    async function handleRoomUsers({ users, userNames, activeStreams, socketId, memberCount, hasPassword }) {
+    async function handleRoomUsers({ users, userNames, activeStreams, streamQualities, socketId, memberCount, hasPassword }) {
         const prevJoinedSocketId = membership.lastJoinedSocketId;
         const joinGen = ++membership.roomUsersGeneration;
         const roomModalCtrl = getRoomModal();
@@ -792,8 +890,15 @@ export function createWebRtcMesh({
 
         console.log('[Socket] Joined room. My ID:', state.myId, 'Other users:', users, 'Active streams:', activeStreams);
         remoteActiveStreams.clear();
+        remoteStreamQualities.clear();
         if (Array.isArray(activeStreams)) {
-            activeStreams.forEach((id) => { if (id !== state.myId) remoteActiveStreams.add(id); });
+            activeStreams.forEach((id) => {
+                if (id !== state.myId) {
+                    remoteActiveStreams.add(id);
+                    const rawQuality = streamQualities && typeof streamQualities === 'object' ? streamQualities[id] : null;
+                    remoteStreamQualities.set(id, normalizeStreamMaxQuality(rawQuality));
+                }
+            });
         }
         if (grid) grid.updateEchoWarningVisibility();
 
@@ -858,6 +963,11 @@ export function createWebRtcMesh({
         activeRoomPeers.forEach((peerId) => {
             if (!peerId || peerId === state.myId) return;
             getOrCreatePeerConnection(peerId);
+            const peerObj = peers.get(peerId);
+            if (peerObj && remoteStreamQualities.has(peerId)) {
+                peerObj.remoteMaxQuality = remoteStreamQualities.get(peerId);
+                syncPeerTileQualityUi(peerId);
+            }
             if (userNames && userNames[peerId] && grid) {
                 grid.updatePeerUserName(peerId, userNames[peerId]);
             }
@@ -877,7 +987,16 @@ export function createWebRtcMesh({
             await Promise.allSettled(trackPromises);
             if (qm) qm.updateSendersForActivePeers();
             if (state.roomId && socket && typeof socket.emit === 'function') {
-                socket.emit('stream-state', { roomId: state.roomId, state: 'started' });
+                const maxQuality = normalizeStreamMaxQuality(
+                    state.activeStreamMaxQuality,
+                    state.selectedVideoResolution || '1080p',
+                    state.selectedVideoFps || 60
+                );
+                socket.emit('stream-state', {
+                    roomId: state.roomId,
+                    state: 'started',
+                    maxQuality: { resolution: maxQuality.resolution, fps: maxQuality.fps }
+                });
             }
         }
     }
@@ -928,6 +1047,7 @@ export function createWebRtcMesh({
 
     function handleUserLeft({ socketId, memberCount }) {
         remoteActiveStreams.delete(socketId);
+        remoteStreamQualities.delete(socketId);
         const grid = getGrid();
         const qm = getQosMonitor();
         if (grid) grid.updateEchoWarningVisibility();
@@ -948,12 +1068,37 @@ export function createWebRtcMesh({
         }
     }
 
-    function handleStreamState({ senderId, state: streamState }) {
+    function handleStreamState({ senderId, state: streamState, maxQuality }) {
         if (streamState === 'started') {
+            const normalizedMax = normalizeStreamMaxQuality(maxQuality);
             remoteActiveStreams.add(senderId);
+            remoteStreamQualities.set(senderId, normalizedMax);
+            const peerObj = peers.get(senderId);
+            if (peerObj) {
+                peerObj.remoteMaxQuality = normalizedMax;
+                if (peerObj.selectedReceiveQuality && !isPresetWithinMaxQuality(peerObj.selectedReceiveQuality, normalizedMax)) {
+                    peerObj.selectedReceiveQuality = 'auto';
+                    const activeMode = isValidViewerOptimizationMode(peerObj.selectedReceiveMode)
+                        ? peerObj.selectedReceiveMode
+                        : 'balanced';
+                    const socket = getSocket();
+                    if (socket && typeof socket.emit === 'function') {
+                        socket.emit('signal', {
+                            targetId: senderId,
+                            signal: { type: 'quality-request', preset: 'auto', mode: activeMode }
+                        });
+                    }
+                }
+            }
             ensureRemoteStreamTile(senderId);
+            syncPeerTileQualityUi(senderId);
         } else {
             remoteActiveStreams.delete(senderId);
+            remoteStreamQualities.delete(senderId);
+            const peerObj = peers.get(senderId);
+            if (peerObj) {
+                peerObj.remoteMaxQuality = null;
+            }
             removeStreamTile(senderId);
         }
         const grid = getGrid();
@@ -991,6 +1136,7 @@ export function createWebRtcMesh({
         activeRoomPeers,
         recentlyRemovedPeers,
         remoteActiveStreams,
+        remoteStreamQualities,
         membership,
         isPeerConnectionActive,
         setPeerConnectionStatus,
@@ -999,6 +1145,8 @@ export function createWebRtcMesh({
         getOrCreatePeerConnection,
         addLocalTracksToPC,
         sendOffer,
+        requestPeerVideoQuality,
+        syncPeerTileQualityUi,
         removePeerConnection,
         ensureRemoteStreamTile,
         removeStreamTile,

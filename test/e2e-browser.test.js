@@ -319,8 +319,8 @@ async function runTests() {
         process.stdout.write('  [E2E] T4: F5 em Tab2 reconecta automaticamente via sessionStorage e preserva prefs ... ');
         await cdp.evalInSession(tab2.sessionId, `
             (() => {
-                document.getElementById('btnQualityToggle').click();
-                return document.getElementById('qualityModeLabel')?.textContent;
+                localStorage.setItem('streamgrid_video_resolution', '720p');
+                return localStorage.getItem('streamgrid_video_resolution');
             })()
         `);
 
@@ -332,16 +332,19 @@ async function runTests() {
                 const disp = document.getElementById('displayRoomId');
                 const count = document.getElementById('memberCountText');
                 const pill = document.getElementById('connectionStatusPill');
-                const qLabel = document.getElementById('qualityModeLabel');
                 const modalClosed = modal && (modal.hasAttribute('hidden') || modal.style.display === 'none');
                 if (!modalClosed || disp?.textContent !== 'e2e-sala-f' || count?.textContent !== '2 Participantes' || pill?.dataset?.status !== 'connected') {
                     return null;
                 }
-                return { quality: qLabel?.textContent?.trim() };
+                document.getElementById('btnStartShare')?.click();
+                const res720 = document.querySelector('input[name="videoResolution"][value="720p"]');
+                const checked = Boolean(res720?.checked);
+                document.getElementById('btnCloseShareConfig')?.click();
+                return { res720Checked: checked };
             })()
         `), { label: 'Tab2 reconectar após F5' });
 
-        assert.strictEqual(afterReload.quality, 'Nítido', 'Preferência de modo Nítido deve persistir após F5');
+        assert.strictEqual(afterReload.res720Checked, true, 'Preferência de resolução 720p deve persistir após F5');
         console.log('\x1b[32mPASSOU\x1b[0m');
 
         // Step 5: Modal de estatísticas exibe provedor ICE obtido via /ice-servers

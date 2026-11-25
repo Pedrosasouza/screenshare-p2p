@@ -285,7 +285,7 @@ describe('Seleção de resolução (720p/1080p) e FPS (30/60)', () => {
         assert.ok(html.includes('name="videoFps"') && html.includes('value="30"'));
     });
 
-    it('T4: alocação multi-peer e degradationPreference=maintain-framerate no modo fluent', async () => {
+    it('T4: alocação multi-peer e degradationPreference=balanced por padrão', async () => {
         const { getMaxBitrateForPeerCount, createQosMonitor } = await loadModules();
 
         const b2Peers = getMaxBitrateForPeerCount(2, '1080p', 60);
@@ -298,9 +298,7 @@ describe('Seleção de resolução (720p/1080p) e FPS (30/60)', () => {
 
         const state = {
             selectedVideoResolution: '1080p',
-            selectedVideoFps: 60,
-            qualityMode: 'fluent',
-            contentHintMode: 'motion'
+            selectedVideoFps: 60
         };
         const monitor = createQosMonitor({
             state,
@@ -315,9 +313,10 @@ describe('Seleção de resolução (720p/1080p) e FPS (30/60)', () => {
         monitor.configureSenderParams(mockSender, 'video');
         assert.strictEqual(
             mockSender.appliedParams.degradationPreference,
-            'maintain-framerate',
-            'degradationPreference no modo Fluido deve preservar FPS (maintain-framerate)'
+            'balanced',
+            'degradationPreference deve ser balanced por padrão'
         );
+        assert.strictEqual(mockSender.appliedParams.encodings[0].scaleResolutionDownBy, 1);
     });
 });
 
@@ -630,9 +629,10 @@ describe('Qualidade de áudio, Opus SDP & ScreenShare', () => {
 
         const videoSender = createMockSender(createMockTrack('video'));
         monitor.configureSenderParams(videoSender, 'video');
-        assert.strictEqual(videoSender.appliedParams[0].degradationPreference, 'maintain-framerate');
+        assert.strictEqual(videoSender.appliedParams[0].degradationPreference, 'balanced');
         assert.ok(videoSender.appliedParams[0].encodings[0].maxBitrate > 0);
         assert.strictEqual(videoSender.appliedParams[0].encodings[0].maxFramerate, 60);
+        assert.strictEqual(videoSender.appliedParams[0].encodings[0].scaleResolutionDownBy, 1);
     });
 
     it('T3: startScreenShare define contentHint=music, evita reentrância e avisa sem PID', async () => {
@@ -678,5 +678,151 @@ describe('Qualidade de áudio, Opus SDP & ScreenShare', () => {
         h.ctrl.stopScreenShare();
         assert.strictEqual(h.isLocalTileRemoved(), true);
         assert.strictEqual(h.getSrcObjectBeforeRemove(), null);
+    });
+});
+
+describe('Escolha de qualidade por espectador com teto máximo do transmissor', () => {
+    it('T1: getAvailableViewerPresets filtra opções estritamente até o limite do transmissor', async () => {
+        const { getAvailableViewerPresets } = await loadModules();
+
+        const p1080_60 = getAvailableViewerPresets({ resolution: '1080p', fps: 60 }).map((p) => p.id);
+        assert.deepStrictEqual(p1080_60, ['auto', '1080p60', '1080p30', '720p60', '720p30', '480p30']);
+
+        const p1080_30 = getAvailableViewerPresets({ resolution: '1080p', fps: 30 }).map((p) => p.id);
+        assert.deepStrictEqual(p1080_30, ['auto', '1080p30', '720p30', '480p30']);
+
+        const p720_60 = getAvailableViewerPresets({ resolution: '720p', fps: 60 }).map((p) => p.id);
+        assert.deepStrictEqual(p720_60, ['auto', '720p60', '720p30', '480p30']);
+
+        const p720_30 = getAvailableViewerPresets({ resolution: '720p', fps: 30 }).map((p) => p.id);
+        assert.deepStrictEqual(p720_30, ['auto', '720p30', '480p30']);
+    });
+
+    it('T2: resolveEffectiveEncodingProfile calcula scaleResolutionDownBy e faz clamp contra o teto do transmissor', async () => {
+        const { resolveEffectiveEncodingProfile } = await loadModules();
+
+        const from1080To720 = resolveEffectiveEncodingProfile({ resolution: '1080p', fps: 60 }, '720p30', 1);
+        assert.strictEqual(from1080To720.resolution, '720p');
+        assert.strictEqual(from1080To720.maxFramerate, 30);
+        assert.strictEqual(from1080To720.scaleResolutionDownBy, 1.5);
+        assert.strictEqual(from1080To720.maxBitrate, 1800000);
+
+        const from1080To480 = resolveEffectiveEncodingProfile({ resolution: '1080p', fps: 60 }, '480p30', 1);
+        assert.strictEqual(from1080To480.resolution, '480p');
+        assert.strictEqual(from1080To480.maxFramerate, 30);
+        assert.strictEqual(from1080To480.scaleResolutionDownBy, 2.25);
+        assert.strictEqual(from1080To480.maxBitrate, 900000);
+
+        const from720To480 = resolveEffectiveEncodingProfile({ resolution: '720p', fps: 30 }, '480p30', 1);
+        assert.strictEqual(from720To480.scaleResolutionDownBy, 1.5);
+
+        // Pedido acima do limite do transmissor sofre clamp estrito
+        const clamped = resolveEffectiveEncodingProfile({ resolution: '720p', fps: 30 }, '1080p60', 1);
+        assert.strictEqual(clamped.resolution, '720p');
+        assert.strictEqual(clamped.maxFramerate, 30);
+        assert.strictEqual(clamped.scaleResolutionDownBy, 1);
+        assert.strictEqual(clamped.maxBitrate, 1800000);
+    });
+
+    it('T3: applyPeerViewerQuality e evaluatePeerQoS isolam perfis e modos (balanced/motion/detail) com clone de track por espectador', async () => {
+        const { createQosMonitor } = await loadModules();
+
+        const baseTrack = createMockTrack('video', 'v-base');
+        const senderAuto = createMockSender(baseTrack, {
+            params: { encodings: [{ maxBitrate: 2500000, maxFramerate: 60 }] }
+        });
+        const senderMotion = createMockSender(baseTrack, {
+            params: { encodings: [{ maxBitrate: 2500000, maxFramerate: 60 }] }
+        });
+        const senderDetail = createMockSender(baseTrack, {
+            params: { encodings: [{ maxBitrate: 2500000, maxFramerate: 60 }] }
+        });
+
+        const peerAuto = {
+            viewerQualityPreset: 'auto',
+            viewerOptimizationMode: 'balanced',
+            pc: {
+                connectionState: 'connected',
+                getStats: async () => makeStatsMap(8000000),
+                getSenders: () => [senderAuto]
+            }
+        };
+        const peerMotion = {
+            viewerQualityPreset: '480p30',
+            viewerOptimizationMode: 'motion',
+            pc: {
+                connectionState: 'connected',
+                getStats: async () => makeStatsMap(8000000),
+                getSenders: () => [senderMotion]
+            }
+        };
+        const peerDetail = {
+            viewerQualityPreset: 'auto',
+            viewerOptimizationMode: 'detail',
+            pc: {
+                connectionState: 'connected',
+                getStats: async () => makeStatsMap(8000000),
+                getSenders: () => [senderDetail]
+            }
+        };
+
+        const peers = new Map([
+            ['peer-auto', peerAuto],
+            ['peer-motion', peerMotion],
+            ['peer-detail', peerDetail]
+        ]);
+        const localStream = new MockMediaStream([baseTrack]);
+        const state = {
+            localStream,
+            activeStreamMaxQuality: { resolution: '1080p', fps: 60 },
+            selectedVideoResolution: '1080p',
+            selectedVideoFps: 60
+        };
+
+        const monitor = createQosMonitor({ state, getPeers: () => peers });
+        monitor.applyPeerViewerQuality('peer-auto', peerAuto);
+        monitor.applyPeerViewerQuality('peer-motion', peerMotion);
+        monitor.applyPeerViewerQuality('peer-detail', peerDetail);
+
+        // Peer Auto (Equilibrado): usa baseTrack neutra e degradationPreference=balanced
+        assert.strictEqual(senderAuto.track, baseTrack);
+        assert.strictEqual(baseTrack.contentHint, '');
+        assert.strictEqual(senderAuto.getParameters().degradationPreference, 'balanced');
+        assert.strictEqual(senderAuto.getParameters().encodings[0].scaleResolutionDownBy, 1);
+        assert.strictEqual(senderAuto.getParameters().encodings[0].maxFramerate, 60);
+
+        // Peer Motion (Fluido + 480p30): usa clone com contentHint=motion e maintain-framerate
+        assert.notStrictEqual(senderMotion.track, baseTrack);
+        assert.strictEqual(senderMotion.track.contentHint, 'motion');
+        assert.strictEqual(senderMotion.getParameters().degradationPreference, 'maintain-framerate');
+        assert.strictEqual(senderMotion.getParameters().encodings[0].scaleResolutionDownBy, 2.25);
+        assert.strictEqual(senderMotion.getParameters().encodings[0].maxFramerate, 30);
+        const expectedLowCap = Math.round(900000 * 0.30);
+        assert.strictEqual(senderMotion.getParameters().encodings[0].maxBitrate, expectedLowCap);
+
+        // Peer Detail (Nítido + Auto): usa clone separado com contentHint=detail, maintain-resolution e 30 FPS
+        assert.notStrictEqual(senderDetail.track, baseTrack);
+        assert.notStrictEqual(senderDetail.track, senderMotion.track);
+        assert.strictEqual(senderDetail.track.contentHint, 'detail');
+        assert.strictEqual(senderDetail.getParameters().degradationPreference, 'maintain-resolution');
+        assert.strictEqual(senderDetail.getParameters().encodings[0].scaleResolutionDownBy, 1);
+        assert.strictEqual(senderDetail.getParameters().encodings[0].maxFramerate, 30);
+
+        // Mesmo com 8 Mbps disponíveis, evaluatePeerQoS preserva teto e modo individual de cada peer
+        for (let i = 0; i < 5; i++) {
+            await monitor.evaluatePeerQoS('peer-motion', peerMotion);
+        }
+        assert.strictEqual(senderMotion.getParameters().encodings[0].maxBitrate, expectedLowCap);
+        assert.strictEqual(senderMotion.getParameters().encodings[0].maxFramerate, 30);
+        assert.strictEqual(senderMotion.getParameters().encodings[0].scaleResolutionDownBy, 2.25);
+        assert.strictEqual(senderMotion.getParameters().degradationPreference, 'maintain-framerate');
+
+        // Limpeza de clones encerra trilhas clonadas sem parar prematuramente a trilha base
+        const motionClone = senderMotion.track;
+        const detailClone = senderDetail.track;
+        monitor.disposeVideoTrackClones(localStream);
+        assert.strictEqual(motionClone.stopped, true);
+        assert.strictEqual(detailClone.stopped, true);
+        assert.strictEqual(baseTrack.stopped, false);
     });
 });

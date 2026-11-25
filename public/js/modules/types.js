@@ -9,7 +9,7 @@
  * @property {string} [myId]
  * @property {MediaStream | null} [localStream]
  * @property {string} [currentRoomPassword]
- * @property {'motion' | 'detail' | string} [contentHintMode]
+ * @property {{ resolution: string, fps: number } | null} [activeStreamMaxQuality]
  * @property {'1080p' | '720p' | string} [selectedVideoResolution]
  * @property {number} [selectedVideoFps]
  * @property {string | null} [selectedAudioSource]

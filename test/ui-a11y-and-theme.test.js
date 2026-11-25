@@ -186,11 +186,11 @@ test('index.html has .btn-text wrappers, type="button", role="dialog" aria-modal
         'btnStartShareBig',
         'btnStartShare',
         'btnStopShare',
-        'btnQualityToggle',
         'btnCloseShareConfig',
         'btnConfirmStartShare',
         'btnCloseStatsModal'
     ];
+    assert.ok(!indexHtml.includes('id="btnQualityToggle"'), 'Legacy #btnQualityToggle must not be present');
     for (const id of buttonIdsRequiringType) {
         const tagMatch = indexHtml.match(new RegExp(`<button[^>]*id="${id}"[^>]*>`));
         assert(tagMatch, `Button #${id} not found`);

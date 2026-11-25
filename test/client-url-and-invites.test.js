@@ -605,10 +605,11 @@ test('T2 (Item B): Signaling status pill transitions across waking, connected, r
     }
 });
 
-test('T3 (Item C): AUDIO_SOURCE_KEY and CONTENT_HINT_KEY persist in localStorage and restore in UI & Share modal', async () => {
+test('T3 (Item C): AUDIO_SOURCE_KEY, VIDEO_RES_KEY and VIDEO_FPS_KEY persist in localStorage and configure balanced sender', async () => {
     const {
         AUDIO_SOURCE_KEY,
-        CONTENT_HINT_KEY,
+        VIDEO_RES_KEY,
+        VIDEO_FPS_KEY,
         loadSavedClientPreferences,
         createQosMonitor,
         createShareConfigModalController
@@ -616,10 +617,9 @@ test('T3 (Item C): AUDIO_SOURCE_KEY and CONTENT_HINT_KEY persist in localStorage
 
     const storage = createMockStorage({
         [AUDIO_SOURCE_KEY]: 'app',
-        [CONTENT_HINT_KEY]: 'detail'
+        [VIDEO_RES_KEY]: '720p',
+        [VIDEO_FPS_KEY]: '30'
     });
-    const qualityModeLabel = createMockElement('span', { id: 'qualityModeLabel' });
-    const btnQualityToggle = createMockElement('button', { id: 'btnQualityToggle' });
     const radios = {
         exclude_discord: createMockElement('input', { value: 'exclude_discord', checked: true }),
         app: createMockElement('input', { value: 'app', checked: false }),
@@ -627,14 +627,14 @@ test('T3 (Item C): AUDIO_SOURCE_KEY and CONTENT_HINT_KEY persist in localStorage
         none: createMockElement('input', { value: 'none', checked: false })
     };
     const radioList = Object.values(radios);
-    const appSelectorContainer = createMockElement('div', { style: { display: 'none' } });
-    const shareConfigModal = createMockElement('div', { style: { display: 'none' }, hidden: true });
-    const doc = createMockDocument({ qualityModeLabel, btnQualityToggle, appSelectorContainer, shareConfigModal });
+    const appSelectorContainer = createMockElement('div', { hidden: true });
+    const shareConfigModal = createMockElement('div', { hidden: true });
+    const doc = createMockDocument({ appSelectorContainer, shareConfigModal });
     doc.querySelector = (sel) => (sel === 'input[name="audioSourceType"]:checked' ? radioList.find((r) => r.checked) || null : null);
     doc.querySelectorAll = (sel) => (sel === 'input[name="audioSourceType"]' ? radioList : []);
 
     const state = {
-        contentHintMode: 'motion',
+        activeStreamMaxQuality: null,
         selectedVideoResolution: '1080p',
         selectedVideoFps: 60,
         selectedAudioSource: null,
@@ -642,22 +642,26 @@ test('T3 (Item C): AUDIO_SOURCE_KEY and CONTENT_HINT_KEY persist in localStorage
     };
     const qm = createQosMonitor({
         state,
-        dom: { qualityModeLabel, btnQualityToggle },
+        dom: {},
         getPeers: () => new Map(),
         storage
     });
 
     loadSavedClientPreferences({
         state,
-        storage,
-        onApplied: () => qm.applyQualityModeUI()
+        storage
     });
-    assert.equal(state.contentHintMode, 'detail');
-    assert.equal(qualityModeLabel.textContent, 'Nítido');
+    assert.equal(state.selectedVideoResolution, '720p');
+    assert.equal(state.selectedVideoFps, 30);
+    assert.equal(state.selectedAudioSource, 'app');
 
-    qm.toggleQualityMode();
-    assert.equal(state.contentHintMode, 'motion');
-    assert.equal(storage.getItem(CONTENT_HINT_KEY), 'motion');
+    const mockSender = {
+        getParameters: () => ({ encodings: [{}] }),
+        setParameters: async (p) => { mockSender.applied = p; }
+    };
+    qm.configureSenderParams(mockSender, 'video');
+    assert.equal(mockSender.applied.degradationPreference, 'balanced');
+    assert.equal(mockSender.applied.encodings[0].maxFramerate, 30);
 
     const shareModalCtrl = createShareConfigModalController({
         state,
@@ -675,5 +679,5 @@ test('T3 (Item C): AUDIO_SOURCE_KEY and CONTENT_HINT_KEY persist in localStorage
     });
     shareModalCtrl.openShareConfigModal();
     assert.equal(radios.app.checked, true);
-    assert.equal(appSelectorContainer.style.display, 'flex');
+    assert.equal(appSelectorContainer.hidden, false);
 });

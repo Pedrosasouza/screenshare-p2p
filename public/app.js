@@ -60,7 +60,7 @@ function collectDomReferences(doc) {
         'joinRoomStatusIndicator', 'joinPasswordHint', 'btnConfirmJoin', 'btnBackFromJoin',
         'btnChangeRoom', 'displayRoomId', 'memberCountText', 'btnCopyLink',
         'streamGrid', 'emptyGridPlaceholder', 'activeStreamsText',
-        'btnStartShare', 'btnStartShareBig', 'btnStopShare', 'btnQualityToggle', 'qualityModeLabel',
+        'btnStartShare', 'btnStartShareBig', 'btnStopShare',
         'btnThemeToggle',
         'shareConfigModal', 'btnCloseShareConfig', 'btnConfirmStartShare', 'btnRefreshAudioApps',
         'selectAudioApp', 'audioSourceExcludeDiscord', 'audioSourceApp', 'audioSourceSystem',
@@ -125,7 +125,7 @@ export function initApp({
         myId: '',
         localStream: null,
         currentRoomPassword: '',
-        contentHintMode: 'motion',
+        activeStreamMaxQuality: null,
         selectedVideoResolution: '1080p',
         selectedVideoFps: 60,
         selectedAudioSource: null,
@@ -196,6 +196,7 @@ export function initApp({
         isDesktopApp: () => isDesktopApp(windowObj),
         getServerUrl: () => serverUrl,
         showToast: boundShowToast,
+        onRequestPeerQuality: (peerId, preset, mode) => webrtc.requestPeerVideoQuality(peerId, preset, mode),
         documentObj,
         windowObj,
         navigatorObj
@@ -252,8 +253,7 @@ export function initApp({
         onThemeInit: () => initTheme({ windowObj, documentObj, storage }),
         onLoadPreferences: () => loadSavedClientPreferences({
             state,
-            storage,
-            onApplied: () => qosMonitor.applyQualityModeUI()
+            storage
         }),
         documentObj,
         storage,
@@ -290,8 +290,7 @@ export function initApp({
     initTheme({ windowObj, documentObj, storage });
     loadSavedClientPreferences({
         state,
-        storage,
-        onApplied: () => qosMonitor.applyQualityModeUI()
+        storage
     });
 
     boundSetSignalingStatus(socket && socket.connected ? 'connected' : 'connecting');
@@ -485,6 +484,10 @@ export function initApp({
                     } else if (state.roomId) {
                         roomModalCtrl.closeRoomModal();
                     }
+                    return;
+                }
+                if (grid && typeof grid.isAnyQualityMenuOpen === 'function' && grid.isAnyQualityMenuOpen()) {
+                    grid.closeAllQualityMenus();
                     return;
                 }
                 if (grid && typeof grid.isSpotlightActive === 'function' && grid.isSpotlightActive()) {

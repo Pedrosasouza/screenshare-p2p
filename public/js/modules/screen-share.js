@@ -56,13 +56,28 @@ export function createScreenShareController({
         shareMeta._generation = (shareMeta._generation || 0) + 1;
 
         const qm = getQosMonitor();
-        if (qm) qm.stopQualityMonitor();
+        if (qm) {
+            qm.stopQualityMonitor();
+            if (typeof qm.disposeVideoTrackClones === 'function') {
+                qm.disposeVideoTrackClones(state.localStream);
+            }
+        }
         stopAppAudioCapture();
 
         if (state.localStream) {
-            state.localStream.getTracks().forEach((track) => track.stop());
+            state.localStream.getTracks().forEach((track) => {
+                const trackAny = /** @type {any} */ (track);
+                if (trackAny && trackAny._modeClones instanceof Map) {
+                    for (const cloned of trackAny._modeClones.values()) {
+                        try { if (cloned && typeof cloned.stop === 'function') cloned.stop(); } catch (_) {}
+                    }
+                    trackAny._modeClones.clear();
+                }
+                track.stop();
+            });
             state.localStream = null;
         }
+        state.activeStreamMaxQuality = null;
 
         const peers = getPeers();
         const webrtc = getWebRtc();
@@ -118,7 +133,6 @@ export function createScreenShareController({
 
         if (dom.btnStartShare) dom.btnStartShare.hidden = false;
         if (dom.btnStopShare) dom.btnStopShare.hidden = true;
-        if (dom.btnQualityToggle) dom.btnQualityToggle.hidden = true;
 
         const grid = getGrid();
         if (grid) grid.updateGridState();
@@ -299,10 +313,6 @@ export function createScreenShareController({
             if (!videoTrack) {
                 throw new Error('Nenhuma trilha de vídeo foi capturada.');
             }
-            if ('contentHint' in videoTrack) {
-                videoTrack.contentHint = state.contentHintMode;
-                console.log(`[WebRTC] videoTrack contentHint set to "${state.contentHintMode}"`);
-            }
 
             const effectiveAudioTrack = audioTrack || (typeof screenStream.getAudioTracks === 'function' ? screenStream.getAudioTracks()[0] : null);
             if (effectiveAudioTrack && 'contentHint' in effectiveAudioTrack) {
@@ -314,6 +324,10 @@ export function createScreenShareController({
             } else {
                 state.localStream = screenStream;
             }
+            state.activeStreamMaxQuality = {
+                resolution: idealWidth === 1280 ? '720p' : '1080p',
+                fps: idealFps === 30 ? 30 : 60
+            };
 
             const grid = getGrid();
             if (grid) {
@@ -326,7 +340,6 @@ export function createScreenShareController({
 
             if (dom.btnStartShare) dom.btnStartShare.hidden = true;
             if (dom.btnStopShare) dom.btnStopShare.hidden = false;
-            if (dom.btnQualityToggle) dom.btnQualityToggle.hidden = false;
             if (grid) grid.updateGridState();
 
             state.localStream.getVideoTracks()[0].onended = () => {
@@ -351,7 +364,11 @@ export function createScreenShareController({
 
             const socket = getSocket();
             if (socket && typeof socket.emit === 'function') {
-                socket.emit('stream-state', { roomId: state.roomId, state: 'started' });
+                socket.emit('stream-state', {
+                    roomId: state.roomId,
+                    state: 'started',
+                    maxQuality: state.activeStreamMaxQuality
+                });
             }
             const qm = getQosMonitor();
             if (qm) qm.startQualityMonitor();
@@ -371,6 +388,7 @@ export function createScreenShareController({
                         state.localStream.getTracks().forEach((t) => { try { t.stop(); } catch (_) {} });
                     } catch (_) {}
                     state.localStream = null;
+                    state.activeStreamMaxQuality = null;
                 }
                 if (screenStream) {
                     try {

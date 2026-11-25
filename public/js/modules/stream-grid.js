@@ -1,5 +1,14 @@
 import { toggleTileFullscreen, showTapToUnmuteBadge, toggleVideoPictureInPicture } from './tile-dom.js';
 import { buildInviteUrl } from './signaling-url.js';
+import {
+    VIEWER_OPTIMIZATION_MODES,
+    getAvailableViewerPresets,
+    getViewerOptimizationModeMeta,
+    getViewerPresetMeta,
+    isPresetWithinMaxQuality,
+    isValidViewerOptimizationMode,
+    normalizeStreamMaxQuality
+} from './qos.js';
 
 /**
  * @typedef {import('./types.js').AppState} AppState
@@ -24,7 +33,8 @@ import { buildInviteUrl } from './signaling-url.js';
  *   navigatorObj?: Navigator | null,
  *   onToggleTileFullscreen?: typeof toggleTileFullscreen,
  *   onShowTapToUnmuteBadge?: typeof showTapToUnmuteBadge,
- *   onToggleVideoPictureInPicture?: typeof toggleVideoPictureInPicture
+ *   onToggleVideoPictureInPicture?: typeof toggleVideoPictureInPicture,
+ *   onRequestPeerQuality?: (peerId: string, preset: string, mode?: string) => any
  * }} options
  */
 export function createStreamGridController({
@@ -41,9 +51,56 @@ export function createStreamGridController({
     navigatorObj = (typeof navigator !== 'undefined' ? navigator : null),
     onToggleTileFullscreen = toggleTileFullscreen,
     onShowTapToUnmuteBadge = showTapToUnmuteBadge,
-    onToggleVideoPictureInPicture = toggleVideoPictureInPicture
+    onToggleVideoPictureInPicture = toggleVideoPictureInPicture,
+    onRequestPeerQuality = () => {}
 } = /** @type {any} */ ({})) {
     let copyLinkResetTimer = null;
+    const openQualityTiles = new Set();
+
+    function closeAllQualityMenus(exceptTile = null) {
+        let closedAny = false;
+        for (const tile of Array.from(openQualityTiles)) {
+            if (tile === exceptTile) continue;
+            if (typeof tile._closeQualityMenu === 'function') {
+                tile._closeQualityMenu();
+                closedAny = true;
+            } else {
+                openQualityTiles.delete(tile);
+            }
+        }
+        return closedAny;
+    }
+
+    function isAnyQualityMenuOpen() {
+        for (const tile of Array.from(openQualityTiles)) {
+            const menu = typeof tile.querySelector === 'function' ? tile.querySelector('.tile-quality-menu') : null;
+            if (menu && !menu.hidden) return true;
+            openQualityTiles.delete(tile);
+        }
+        return false;
+    }
+
+    const onDocumentClickCloseMenus = (e) => {
+        if (openQualityTiles.size === 0) return;
+        const target = e && e.target;
+        for (const tile of Array.from(openQualityTiles)) {
+            const controlWrap = typeof tile.querySelector === 'function'
+                ? tile.querySelector('.tile-quality-control')
+                : null;
+            if (controlWrap && target && typeof controlWrap.contains === 'function' && controlWrap.contains(target)) {
+                continue;
+            }
+            if (typeof tile._closeQualityMenu === 'function') {
+                tile._closeQualityMenu();
+            } else {
+                openQualityTiles.delete(tile);
+            }
+        }
+    };
+
+    if (documentObj && typeof documentObj.addEventListener === 'function') {
+        documentObj.addEventListener('click', onDocumentClickCloseMenus);
+    }
 
     function clearSpotlight() {
         const { streamGrid } = dom;
@@ -202,7 +259,7 @@ export function createStreamGridController({
                     ? '<i class="fa-solid fa-volume-xmark"></i>'
                     : '<i class="fa-solid fa-volume-high"></i>';
             };
-            const tileAny = /** @type {HTMLDivElement & { _syncAudioUi?: () => void, _cleanupTapUnmute?: () => void }} */ (tile);
+            const tileAny = /** @type {HTMLDivElement & { _syncAudioUi?: () => void, _cleanupTapUnmute?: () => void, _closeQualityMenu?: () => void, _cleanupQualityMenu?: () => void, _updateQualityUi?: (maxQuality?: any, selectedPreset?: string, selectedMode?: string) => void }} */ (tile);
             tileAny._syncAudioUi = syncAudioUi;
             syncAudioUi();
 
@@ -260,6 +317,252 @@ export function createStreamGridController({
 
             controlsOverlay.appendChild(muteBtn);
             controlsOverlay.appendChild(slider);
+
+            const qualityWrap = doc.createElement('div');
+            qualityWrap.className = 'tile-quality-control';
+
+            const qualityBtn = doc.createElement('button');
+            qualityBtn.type = 'button';
+            qualityBtn.className = 'btn-tile-quality';
+            qualityBtn.title = 'Qualidade do vídeo';
+            if (typeof qualityBtn.setAttribute === 'function') {
+                qualityBtn.setAttribute('aria-label', 'Qualidade do vídeo');
+                qualityBtn.setAttribute('aria-haspopup', 'menu');
+                qualityBtn.setAttribute('aria-expanded', 'false');
+            }
+            const qualityIcon = doc.createElement('i');
+            qualityIcon.className = 'fa-solid fa-sliders';
+            if (typeof qualityIcon.setAttribute === 'function') {
+                qualityIcon.setAttribute('aria-hidden', 'true');
+            }
+            const qualityBtnLabel = doc.createElement('span');
+            qualityBtnLabel.className = 'tile-quality-btn-label';
+            qualityBtnLabel.textContent = 'Auto';
+            qualityBtn.appendChild(qualityIcon);
+            qualityBtn.appendChild(qualityBtnLabel);
+
+            const qualityMenu = doc.createElement('div');
+            if (qualityMenu.classList && typeof qualityMenu.classList.add === 'function') {
+                qualityMenu.classList.add('tile-quality-menu');
+            } else {
+                qualityMenu.className = 'tile-quality-menu';
+            }
+            qualityMenu.hidden = true;
+            if (typeof qualityMenu.setAttribute === 'function') {
+                qualityMenu.setAttribute('hidden', '');
+                qualityMenu.setAttribute('role', 'menu');
+                qualityMenu.setAttribute('aria-label', 'Selecionar qualidade do vídeo');
+            }
+
+            const modeSection = doc.createElement('div');
+            modeSection.className = 'tile-quality-mode-section';
+            const modeLabel = doc.createElement('div');
+            modeLabel.className = 'tile-quality-section-label';
+            modeLabel.textContent = 'Modo';
+            const modeGroup = doc.createElement('div');
+            modeGroup.className = 'tile-quality-mode-group';
+            if (typeof modeGroup.setAttribute === 'function') {
+                modeGroup.setAttribute('role', 'group');
+                modeGroup.setAttribute('aria-label', 'Modo de otimização');
+            }
+            modeSection.appendChild(modeLabel);
+            modeSection.appendChild(modeGroup);
+
+            const menuHeader = doc.createElement('div');
+            menuHeader.className = 'tile-quality-menu-header';
+            const menuList = doc.createElement('div');
+            menuList.className = 'tile-quality-menu-list';
+            qualityMenu.appendChild(modeSection);
+            qualityMenu.appendChild(menuHeader);
+            qualityMenu.appendChild(menuList);
+
+            const clearContainerChildren = (container) => {
+                if (typeof container.replaceChildren === 'function') {
+                    container.replaceChildren();
+                } else if (Array.isArray(container.children)) {
+                    while (container.children.length > 0) {
+                        container.children[0].remove();
+                    }
+                } else {
+                    container.textContent = '';
+                }
+            };
+
+            const closeQualityMenu = () => {
+                qualityMenu.hidden = true;
+                if (typeof qualityMenu.setAttribute === 'function') {
+                    qualityMenu.setAttribute('hidden', '');
+                }
+                if (qualityMenu.classList) {
+                    qualityMenu.classList.remove('is-open');
+                }
+                if (typeof qualityBtn.setAttribute === 'function') {
+                    qualityBtn.setAttribute('aria-expanded', 'false');
+                }
+                openQualityTiles.delete(tile);
+            };
+
+            const openQualityMenu = () => {
+                closeAllQualityMenus(tile);
+                qualityMenu.hidden = false;
+                if (typeof qualityMenu.removeAttribute === 'function') {
+                    qualityMenu.removeAttribute('hidden');
+                }
+                if (qualityMenu.classList) {
+                    qualityMenu.classList.add('is-open');
+                }
+                if (typeof qualityBtn.setAttribute === 'function') {
+                    qualityBtn.setAttribute('aria-expanded', 'true');
+                }
+                openQualityTiles.add(tile);
+            };
+
+            const modeTooltips = {
+                balanced: 'Equilibrado: ajusta FPS e nitidez automaticamente',
+                motion: 'Fluido: prioriza fluidez de quadros (ideal p/ ação e jogos rápidos)',
+                detail: 'Nítido: prioriza nitidez de texto e interface (ideal p/ leitura, código, RPGs)'
+            };
+
+            const renderQualityOptions = (rawMaxQuality, rawSelectedPreset, rawSelectedMode) => {
+                const maxQ = normalizeStreamMaxQuality(rawMaxQuality);
+                const effectivePreset = isPresetWithinMaxQuality(rawSelectedPreset, maxQ)
+                    ? (rawSelectedPreset || 'auto')
+                    : 'auto';
+                const fallbackMode = tile.dataset && tile.dataset.selectedMode ? tile.dataset.selectedMode : 'balanced';
+                const effectiveMode = isValidViewerOptimizationMode(rawSelectedMode)
+                    ? rawSelectedMode
+                    : (isValidViewerOptimizationMode(fallbackMode) ? fallbackMode : 'balanced');
+
+                if (tile.dataset) {
+                    tile.dataset.selectedQuality = effectivePreset;
+                    tile.dataset.selectedMode = effectiveMode;
+                    tile.dataset.maxResolution = maxQ.resolution;
+                    tile.dataset.maxFps = String(maxQ.fps);
+                }
+                menuHeader.textContent = `Qualidade (Máx: ${maxQ.resolution} ${maxQ.fps} FPS)`;
+                const activeMeta = getViewerPresetMeta(effectivePreset);
+                const activeModeMeta = getViewerOptimizationModeMeta(effectiveMode);
+                qualityBtnLabel.textContent = effectiveMode === 'balanced'
+                    ? activeMeta.shortLabel
+                    : `${activeMeta.shortLabel} • ${activeModeMeta.shortLabel}`;
+
+                clearContainerChildren(modeGroup);
+                VIEWER_OPTIMIZATION_MODES.forEach((modeItem) => {
+                    const modeBtn = doc.createElement('button');
+                    modeBtn.type = 'button';
+                    if (modeBtn.classList && typeof modeBtn.classList.add === 'function') {
+                        modeBtn.classList.add('tile-quality-mode-btn');
+                    } else {
+                        modeBtn.className = 'tile-quality-mode-btn';
+                    }
+                    if (modeBtn.dataset) {
+                        modeBtn.dataset.mode = modeItem.id;
+                    }
+                    modeBtn.title = modeTooltips[modeItem.id] || modeItem.label;
+                    modeBtn.textContent = modeItem.label;
+                    const isModeSelected = modeItem.id === effectiveMode;
+                    if (typeof modeBtn.setAttribute === 'function') {
+                        modeBtn.setAttribute('role', 'menuitemradio');
+                        modeBtn.setAttribute('aria-checked', isModeSelected ? 'true' : 'false');
+                    }
+                    if (isModeSelected) {
+                        if (modeBtn.classList && typeof modeBtn.classList.add === 'function') {
+                            modeBtn.classList.add('is-active');
+                        } else {
+                            modeBtn.className += ' is-active';
+                        }
+                    }
+                    modeBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        closeQualityMenu();
+                        renderQualityOptions(maxQ, effectivePreset, modeItem.id);
+                        onRequestPeerQuality(id, effectivePreset, modeItem.id);
+                    });
+                    modeGroup.appendChild(modeBtn);
+                });
+
+                clearContainerChildren(menuList);
+                const availablePresets = getAvailableViewerPresets(maxQ);
+                availablePresets.forEach((preset) => {
+                    const optBtn = doc.createElement('button');
+                    optBtn.type = 'button';
+                    if (optBtn.classList && typeof optBtn.classList.add === 'function') {
+                        optBtn.classList.add('tile-quality-option');
+                    } else {
+                        optBtn.className = 'tile-quality-option';
+                    }
+                    if (optBtn.dataset) {
+                        optBtn.dataset.preset = preset.id;
+                    }
+                    const isSelected = preset.id === effectivePreset;
+                    if (typeof optBtn.setAttribute === 'function') {
+                        optBtn.setAttribute('role', 'menuitemradio');
+                        optBtn.setAttribute('aria-checked', isSelected ? 'true' : 'false');
+                    }
+                    if (isSelected) {
+                        if (optBtn.classList && typeof optBtn.classList.add === 'function') {
+                            optBtn.classList.add('is-active');
+                        } else {
+                            optBtn.className += ' is-active';
+                        }
+                    }
+
+                    const optLabel = doc.createElement('span');
+                    optLabel.className = 'quality-opt-label';
+                    optLabel.textContent = preset.id === 'auto'
+                        ? `Automático (até ${maxQ.resolution} ${maxQ.fps})`
+                        : preset.label;
+
+                    const checkIcon = doc.createElement('i');
+                    checkIcon.className = 'fa-solid fa-check quality-opt-check';
+                    if (typeof checkIcon.setAttribute === 'function') {
+                        checkIcon.setAttribute('aria-hidden', 'true');
+                    }
+
+                    optBtn.appendChild(optLabel);
+                    optBtn.appendChild(checkIcon);
+                    optBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        closeQualityMenu();
+                        renderQualityOptions(maxQ, preset.id, effectiveMode);
+                        onRequestPeerQuality(id, preset.id, effectiveMode);
+                    });
+                    menuList.appendChild(optBtn);
+                });
+            };
+
+            qualityBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (qualityMenu.hidden) {
+                    openQualityMenu();
+                } else {
+                    closeQualityMenu();
+                }
+            });
+            qualityBtn.addEventListener('dblclick', (e) => {
+                e.stopPropagation();
+            });
+            qualityMenu.addEventListener('click', (e) => {
+                e.stopPropagation();
+            });
+            qualityMenu.addEventListener('dblclick', (e) => {
+                e.stopPropagation();
+            });
+
+            const peerRef = getPeers().get(id);
+            renderQualityOptions(
+                peerRef && peerRef.remoteMaxQuality ? peerRef.remoteMaxQuality : null,
+                peerRef && peerRef.selectedReceiveQuality ? peerRef.selectedReceiveQuality : 'auto',
+                peerRef && peerRef.selectedReceiveMode ? peerRef.selectedReceiveMode : 'balanced'
+            );
+
+            tileAny._closeQualityMenu = closeQualityMenu;
+            tileAny._cleanupQualityMenu = closeQualityMenu;
+            tileAny._updateQualityUi = renderQualityOptions;
+
+            qualityWrap.appendChild(qualityBtn);
+            qualityWrap.appendChild(qualityMenu);
+            controlsOverlay.appendChild(qualityWrap);
         }
 
         const pipBtn = doc.createElement('button');
@@ -424,7 +727,20 @@ export function createStreamGridController({
         });
     }
 
+    /**
+     * @param {any} tileEl
+     * @param {{ maxQuality?: any, selectedPreset?: string, selectedMode?: string }} [opts]
+     */
+    function updateTileQualityOptions(tileEl, { maxQuality, selectedPreset, selectedMode } = {}) {
+        if (!tileEl || typeof tileEl._updateQualityUi !== 'function') return;
+        tileEl._updateQualityUi(maxQuality, selectedPreset, selectedMode);
+    }
+
     function cleanup() {
+        closeAllQualityMenus();
+        if (documentObj && typeof documentObj.removeEventListener === 'function') {
+            documentObj.removeEventListener('click', onDocumentClickCloseMenus);
+        }
         if (copyLinkResetTimer) {
             clearTimeout(copyLinkResetTimer);
             copyLinkResetTimer = null;
@@ -434,6 +750,9 @@ export function createStreamGridController({
     return {
         startTilePlayback,
         createStreamTile,
+        updateTileQualityOptions,
+        closeAllQualityMenus,
+        isAnyQualityMenuOpen,
         toggleTileSpotlight,
         clearSpotlight,
         isSpotlightActive,

@@ -72,7 +72,9 @@ export function attachFullscreenAutoHide(tile, documentObj = (typeof document !=
             let isInteractingWithControls = false;
             try {
                 if (typeof tile.querySelector === 'function') {
-                    isInteractingWithControls = Boolean(
+                    const qualityMenu = tile.querySelector('.tile-quality-menu');
+                    const isQualityMenuOpen = Boolean(qualityMenu && !qualityMenu.hidden);
+                    isInteractingWithControls = isQualityMenuOpen || Boolean(
                         tile.querySelector('.tile-controls-overlay:hover, .tile-controls-overlay:focus-within, .btn-exit-pseudo-fs:hover')
                     );
                 }
@@ -183,6 +185,9 @@ export function disposeTileElement(tileEl, documentObj = /** @type {import('./ty
     if (!tileEl) return;
     if (typeof tileEl._cleanupFullscreenAutoHide === 'function') {
         tileEl._cleanupFullscreenAutoHide();
+    }
+    if (typeof tileEl._cleanupQualityMenu === 'function') {
+        tileEl._cleanupQualityMenu();
     }
     if (typeof tileEl._cleanupTapUnmute === 'function') {
         tileEl._cleanupTapUnmute();

@@ -1,5 +1,9 @@
-import { getMaxBitrateForPeerCount, collectPeerTelemetry } from './qos.js';
-import { CONTENT_HINT_KEY, saveClientPreference } from './preferences.js';
+import {
+    collectPeerTelemetry,
+    getViewerOptimizationModeMeta,
+    normalizeStreamMaxQuality,
+    resolveEffectiveEncodingProfile
+} from './qos.js';
 
 const MIN_VIDEO_BITRATE = 350000;
 
@@ -21,29 +25,87 @@ export function clampBitrate(value, peerCap, minBitrate = MIN_VIDEO_BITRATE) {
  */
 export function createQosMonitor({
     state = /** @type {import('./types.js').AppState} */ ({}),
-    dom = /** @type {import('./types.js').DomRefs} */ ({}),
-    getPeers = () => new Map(),
-    storage = (typeof localStorage !== 'undefined' ? localStorage : null)
+    getPeers = () => new Map()
 } = {}) {
     let qualityMonitorInterval = null;
     let isQualityMonitorRunning = false;
 
-    function configureSenderParams(sender, kind) {
+    function getBroadcasterMaxQuality() {
+        return normalizeStreamMaxQuality(
+            state.activeStreamMaxQuality,
+            state.selectedVideoResolution || '1080p',
+            state.selectedVideoFps || 60
+        );
+    }
+
+    function resolveSenderVideoTrack(baseVideoTrack, peerObj = null) {
+        if (!baseVideoTrack) return null;
+        const viewerMode = peerObj && peerObj.viewerOptimizationMode ? peerObj.viewerOptimizationMode : 'balanced';
+        const modeMeta = getViewerOptimizationModeMeta(viewerMode);
+        if (!modeMeta.contentHint) {
+            if ('contentHint' in baseVideoTrack && baseVideoTrack.contentHint !== '') {
+                try { baseVideoTrack.contentHint = ''; } catch (_) {}
+            }
+            return baseVideoTrack;
+        }
+        const trackAny = /** @type {any} */ (baseVideoTrack);
+        if (typeof trackAny.clone === 'function') {
+            if (!(trackAny._modeClones instanceof Map)) {
+                trackAny._modeClones = new Map();
+            }
+            const existing = trackAny._modeClones.get(modeMeta.id);
+            if (existing && existing.readyState !== 'ended') {
+                return existing;
+            }
+            const cloned = trackAny.clone();
+            if (cloned && 'contentHint' in cloned) {
+                try { cloned.contentHint = modeMeta.contentHint; } catch (_) {}
+            }
+            trackAny._modeClones.set(modeMeta.id, cloned);
+            return cloned;
+        }
+        const peers = getPeers();
+        if ((!peers || peers.size <= 1) && 'contentHint' in baseVideoTrack) {
+            try { baseVideoTrack.contentHint = modeMeta.contentHint; } catch (_) {}
+        }
+        return baseVideoTrack;
+    }
+
+    function disposeVideoTrackClones(stream = state.localStream) {
+        if (!stream || typeof stream.getVideoTracks !== 'function') return;
+        stream.getVideoTracks().forEach((track) => {
+            const trackAny = /** @type {any} */ (track);
+            if (trackAny && trackAny._modeClones instanceof Map) {
+                for (const cloned of trackAny._modeClones.values()) {
+                    try {
+                        if (cloned && typeof cloned.stop === 'function') cloned.stop();
+                    } catch (_) {}
+                }
+                trackAny._modeClones.clear();
+            }
+        });
+    }
+
+    function configureSenderParams(sender, kind, peerObj = null) {
         if (!sender || typeof sender.getParameters !== 'function') return;
         const peers = getPeers();
         if (kind === 'video') {
             try {
                 const params = sender.getParameters();
-                const isDetailMode = state.contentHintMode === 'detail';
-                params.degradationPreference = isDetailMode ? 'maintain-resolution' : 'maintain-framerate';
-                const baseFps = Number(state.selectedVideoFps) === 30 ? 30 : 60;
+                const peerCount = peers && peers.size > 0 ? peers.size : 1;
+                const viewerPreset = peerObj && peerObj.viewerQualityPreset ? peerObj.viewerQualityPreset : 'auto';
+                const viewerMode = peerObj && peerObj.viewerOptimizationMode ? peerObj.viewerOptimizationMode : 'balanced';
+                const profile = resolveEffectiveEncodingProfile(
+                    getBroadcasterMaxQuality(),
+                    viewerPreset,
+                    peerCount,
+                    viewerMode
+                );
+                params.degradationPreference = profile.degradationPreference;
                 if (params.encodings && params.encodings[0]) {
-                    params.encodings[0].maxBitrate = getMaxBitrateForPeerCount(
-                        peers ? peers.size : 1,
-                        state.selectedVideoResolution,
-                        state.selectedVideoFps
-                    );
-                    params.encodings[0].maxFramerate = isDetailMode ? Math.min(30, baseFps) : baseFps;
+                    params.encodings[0].maxBitrate = profile.maxBitrate;
+                    params.encodings[0].maxFramerate = profile.maxFramerate;
+                    params.encodings[0].scaleResolutionDownBy = profile.scaleResolutionDownBy;
                 }
                 sender.setParameters(params).catch(() => {});
             } catch (_) {}
@@ -58,6 +120,28 @@ export function createQosMonitor({
         }
     }
 
+    function applyPeerViewerQuality(peerId, peerObj = null) {
+        if (!state.localStream) return false;
+        const peers = getPeers();
+        const targetPeer = peerObj || (peers && typeof peers.get === 'function' ? peers.get(peerId) : null);
+        if (!targetPeer || !targetPeer.pc) return false;
+        const sender = targetPeer.pc.getSenders().find((s) => (s.track && s.track.kind === 'video') || s._kind === 'video');
+        if (!sender) return false;
+        if (typeof state.localStream.getVideoTracks === 'function') {
+            const baseVideoTrack = state.localStream.getVideoTracks()[0] || null;
+            if (baseVideoTrack) {
+                const desiredTrack = resolveSenderVideoTrack(baseVideoTrack, targetPeer);
+                if (desiredTrack && sender.track !== desiredTrack && typeof sender.replaceTrack === 'function') {
+                    try {
+                        Promise.resolve(sender.replaceTrack(desiredTrack)).catch(() => {});
+                    } catch (_) {}
+                }
+            }
+        }
+        configureSenderParams(sender, 'video', targetPeer);
+        return true;
+    }
+
     function updateSendersForActivePeers() {
         if (!state.localStream) return;
         const peers = getPeers();
@@ -65,7 +149,7 @@ export function createQosMonitor({
             if (peerObj && peerObj.pc) {
                 const sender = peerObj.pc.getSenders().find((s) => s.track && s.track.kind === 'video');
                 if (sender) {
-                    configureSenderParams(sender, 'video');
+                    configureSenderParams(sender, 'video', peerObj);
                 }
             }
         }
@@ -97,11 +181,17 @@ export function createQosMonitor({
             if (videoSender) {
                 const params = videoSender.getParameters();
                 if (params.encodings && params.encodings[0]) {
-                    const peerCap = getMaxBitrateForPeerCount(
-                        peers ? peers.size : 1,
-                        state.selectedVideoResolution || '1080p',
-                        state.selectedVideoFps || 60
+                    const peerCount = peers && peers.size > 0 ? peers.size : 1;
+                    const viewerPreset = peerObj.viewerQualityPreset || 'auto';
+                    const viewerMode = peerObj.viewerOptimizationMode || 'balanced';
+                    const profile = resolveEffectiveEncodingProfile(
+                        getBroadcasterMaxQuality(),
+                        viewerPreset,
+                        peerCount,
+                        viewerMode
                     );
+                    const peerCap = profile.maxBitrate;
+                    const targetFps = profile.maxFramerate;
                     const current = params.encodings[0].maxBitrate || peerCap;
                     let targetBitrate;
 
@@ -118,7 +208,6 @@ export function createQosMonitor({
                     }
 
                     let fpsChanged = false;
-                    const targetFps = Number(state.selectedVideoFps) === 30 ? 30 : 60;
                     const recoverThreshold = Math.min(2200000, Math.round(peerCap * 0.75));
                     if (availableBitrate < 1000000 || qualityLimitation === 'cpu') {
                         const throttledFps = Math.min(30, targetFps);
@@ -127,11 +216,29 @@ export function createQosMonitor({
                             fpsChanged = true;
                             console.log(`[QoS] ${peerId.slice(0, 6)}: Throttled to ${throttledFps} FPS due to ${qualityLimitation === 'cpu' ? 'CPU' : 'network'}`);
                         }
-                    } else if (availableBitrate >= recoverThreshold && state.contentHintMode === 'motion') {
+                    } else if (availableBitrate >= recoverThreshold || (params.encodings[0].maxFramerate && params.encodings[0].maxFramerate > targetFps)) {
                         if (params.encodings[0].maxFramerate !== targetFps) {
                             params.encodings[0].maxFramerate = targetFps;
                             fpsChanged = true;
                         }
+                    }
+
+                    let scaleChanged = false;
+                    if (
+                        params.encodings[0].scaleResolutionDownBy !== undefined &&
+                        params.encodings[0].scaleResolutionDownBy !== profile.scaleResolutionDownBy
+                    ) {
+                        params.encodings[0].scaleResolutionDownBy = profile.scaleResolutionDownBy;
+                        scaleChanged = true;
+                    } else if (params.encodings[0].scaleResolutionDownBy === undefined && profile.scaleResolutionDownBy > 1) {
+                        params.encodings[0].scaleResolutionDownBy = profile.scaleResolutionDownBy;
+                        scaleChanged = true;
+                    }
+
+                    let degChanged = false;
+                    if (params.degradationPreference && params.degradationPreference !== profile.degradationPreference) {
+                        params.degradationPreference = profile.degradationPreference;
+                        degChanged = true;
                     }
 
                     const boundedTarget = clampBitrate(targetBitrate, peerCap);
@@ -147,7 +254,7 @@ export function createQosMonitor({
                     }
                     const bitrateChanged = nextBitrate !== current;
 
-                    if (bitrateChanged || fpsChanged) {
+                    if (bitrateChanged || fpsChanged || scaleChanged || degChanged) {
                         if (bitrateChanged) {
                             params.encodings[0].maxBitrate = nextBitrate;
                         }
@@ -155,7 +262,7 @@ export function createQosMonitor({
                         console.log(
                             `[QoS] Outbound ${peerId.slice(0, 6)}: ` +
                             `bitrate ${(current / 1e6).toFixed(1)}→${(params.encodings[0].maxBitrate / 1e6).toFixed(1)} Mbps | ` +
-                            `maxFps: ${params.encodings[0].maxFramerate} | fps: ${outboundFps} | limit: ${qualityLimitation} | rtt: ${(rtt * 1000).toFixed(0)}ms`
+                            `maxFps: ${params.encodings[0].maxFramerate} | scale: ${profile.scaleResolutionDownBy}x | fps: ${outboundFps} | limit: ${qualityLimitation} | rtt: ${(rtt * 1000).toFixed(0)}ms`
                         );
                     }
                 }
@@ -241,64 +348,17 @@ export function createQosMonitor({
         isQualityMonitorRunning = false;
     }
 
-    function applyQualityModeUI() {
-        const isMotion = state.contentHintMode !== 'detail';
-        if (dom.qualityModeLabel) {
-            dom.qualityModeLabel.textContent = isMotion ? 'Fluido' : 'Nítido';
-        }
-        if (dom.btnQualityToggle) {
-            dom.btnQualityToggle.title = isMotion
-                ? 'Modo Fluido: prioriza 60fps (ideal para jogos de ação)'
-                : 'Modo Nítido: prioriza nitidez de texto/UI (ideal para Tibia, documentos)';
-        }
-    }
-
-    function toggleQualityMode() {
-        state.contentHintMode = state.contentHintMode === 'motion' ? 'detail' : 'motion';
-        const isMotion = state.contentHintMode === 'motion';
-        saveClientPreference(CONTENT_HINT_KEY, state.contentHintMode, storage);
-        applyQualityModeUI();
-
-        if (state.localStream) {
-            const videoTrack = state.localStream.getVideoTracks()[0];
-            if (videoTrack && 'contentHint' in videoTrack) {
-                videoTrack.contentHint = state.contentHintMode;
-                console.log(`[Quality] contentHint → "${state.contentHintMode}"`);
-            }
-        }
-
-        const peers = getPeers();
-        const baseFps = Number(state.selectedVideoFps) === 30 ? 30 : 60;
-        for (const [, peerObj] of peers.entries()) {
-            if (!peerObj.pc) continue;
-            const videoSender = peerObj.pc.getSenders().find((s) => s.track && s.track.kind === 'video');
-            if (videoSender) {
-                try {
-                    const params = videoSender.getParameters();
-                    params.degradationPreference = isMotion ? 'maintain-framerate' : 'maintain-resolution';
-                    if (params.encodings && params.encodings[0]) {
-                        params.encodings[0].maxFramerate = isMotion ? baseFps : Math.min(30, baseFps);
-                    }
-                    videoSender.setParameters(params).catch(() => {});
-                } catch (_) {}
-            }
-        }
-    }
-
-    function bindEvents() {
-        if (dom.btnQualityToggle) {
-            dom.btnQualityToggle.addEventListener('click', toggleQualityMode);
-        }
-    }
+    function bindEvents() {}
 
     return {
+        resolveSenderVideoTrack,
+        disposeVideoTrackClones,
         configureSenderParams,
+        applyPeerViewerQuality,
         updateSendersForActivePeers,
         evaluatePeerQoS,
         startQualityMonitor,
         stopQualityMonitor,
-        applyQualityModeUI,
-        toggleQualityMode,
         bindEvents
     };
 }

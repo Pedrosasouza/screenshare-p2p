@@ -729,4 +729,71 @@ describe('Hardening CORS produção, rate-limit de check-room, CSP estrita e blo
         const tauriConf = JSON.parse(fs.readFileSync(path.join(__dirname, '../src-tauri/tauri.conf.json'), 'utf8'));
         assert.strictEqual(tauriConf.app.windows[0].devtools, false, 'Production Tauri config must disable devtools');
     });
+
+    it('T16: stream-state propaga maxQuality sanitizado, room-users expõe streamQualities e signal valida quality-request', async () => {
+        const { isValidSignal, sanitizeStreamMaxQuality } = require('../src/server/signaling');
+
+        assert.strictEqual(isValidSignal({ type: 'quality-request', preset: 'auto' }), true);
+        assert.strictEqual(isValidSignal({ type: 'quality-request', preset: '720p30', mode: 'balanced' }), true);
+        assert.strictEqual(isValidSignal({ type: 'quality-request', preset: '480p30', mode: 'detail' }), true);
+        assert.strictEqual(isValidSignal({ type: 'quality-request', preset: '1080p60', mode: 'motion' }), true);
+        assert.strictEqual(isValidSignal({ type: 'quality-request', preset: '480p30', mode: 'turbo' }), false);
+        assert.strictEqual(isValidSignal({ type: 'quality-request', preset: '480p30', mode: 123 }), false);
+        assert.strictEqual(isValidSignal({ type: 'quality-request', preset: '4k120' }), false);
+        assert.strictEqual(isValidSignal({ type: 'quality-request', preset: 720 }), false);
+        assert.deepStrictEqual(sanitizeStreamMaxQuality({ resolution: '720p', fps: 30 }), { resolution: '720p', fps: 30 });
+        assert.deepStrictEqual(sanitizeStreamMaxQuality({ resolution: '8k', fps: 999 }), { resolution: '1080p', fps: 60 });
+
+        const srv = await startTestServer();
+        let broadcaster = null;
+        let viewer1 = null;
+        let viewer2 = null;
+        try {
+            broadcaster = await srv.connectClient();
+            viewer1 = await srv.connectClient();
+
+            assert.strictEqual((await tryJoin(broadcaster, 'sala-quality-cap')).status, 'joined');
+            assert.strictEqual((await tryJoin(viewer1, 'sala-quality-cap')).status, 'joined');
+
+            const streamStartedPromise = waitForEvent(viewer1, 'stream-state', 3000);
+            broadcaster.emit('stream-state', {
+                roomId: 'sala-quality-cap',
+                state: 'started',
+                maxQuality: { resolution: '720p', fps: 30, extraField: 'ignored' }
+            });
+            const startedPayload = await streamStartedPromise;
+            assert.strictEqual(startedPayload.senderId, broadcaster.id);
+            assert.strictEqual(startedPayload.state, 'started');
+            assert.deepStrictEqual(startedPayload.maxQuality, { resolution: '720p', fps: 30 });
+
+            // Late joiner receives streamQualities in room-users
+            viewer2 = await srv.connectClient();
+            const joinRes = await tryJoin(viewer2, 'sala-quality-cap');
+            assert.strictEqual(joinRes.status, 'joined');
+            assert.deepStrictEqual(joinRes.data.streamQualities[broadcaster.id], { resolution: '720p', fps: 30 });
+
+            // Invalid quality-request preset is dropped; valid preset is relayed
+            const qualitySignalPromise = waitForEvent(broadcaster, 'signal', 3000);
+            viewer1.emit('signal', {
+                targetId: broadcaster.id,
+                signal: { type: 'quality-request', preset: 'invalid-preset' }
+            });
+            viewer1.emit('signal', {
+                targetId: broadcaster.id,
+                signal: { type: 'quality-request', preset: '480p30', mode: 'invalid-mode' }
+            });
+            viewer1.emit('signal', {
+                targetId: broadcaster.id,
+                signal: { type: 'quality-request', preset: '480p30', mode: 'detail' }
+            });
+            const relayedQuality = await qualitySignalPromise;
+            assert.strictEqual(relayedQuality.senderId, viewer1.id);
+            assert.deepStrictEqual(relayedQuality.signal, { type: 'quality-request', preset: '480p30', mode: 'detail' });
+        } finally {
+            if (broadcaster) broadcaster.disconnect();
+            if (viewer1) viewer1.disconnect();
+            if (viewer2) viewer2.disconnect();
+            await srv.close();
+        }
+    });
 });

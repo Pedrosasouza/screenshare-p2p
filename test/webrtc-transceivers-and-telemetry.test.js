@@ -277,41 +277,39 @@ describe('Transceivers WebRTC, Keyframes, Telemetria & Limpeza de Peers', () => 
         }
     });
 
-    it('toggleQualityMode toggles motion/detail, preserves 30fps cap, and updates contentHint', async () => {
+    it('applyPeerViewerQuality configures balanced mode, scales down per viewer, and respects broadcaster 30fps cap', async () => {
         const { createQosMonitor } = await loadModules();
         const vTrack = createMockTrack('video', 'v-fps');
         const videoSender = createMockSender(vTrack, {
             params: { encodings: [{ maxBitrate: 4000000, maxFramerate: 30 }], degradationPreference: '' }
         });
         const pc = createMockPeerConnection({ senders: [videoSender] });
-        const peers = new Map([['peer-b', { pc }]]);
+        const peerObj = { pc, viewerQualityPreset: '720p60' };
+        const peers = new Map([['peer-b', peerObj]]);
         const state = {
             localStream: new MockMediaStream([vTrack]),
+            activeStreamMaxQuality: { resolution: '1080p', fps: 30 },
+            selectedVideoResolution: '1080p',
             selectedVideoFps: 30,
-            contentHintMode: 'motion',
             roomId: 'room-1'
         };
-        const qualityIcon = createMockElement('span', { id: 'qualityIcon' });
-        const qualityLabel = createMockElement('span', { id: 'qualityLabel' });
-        const btnQualityToggle = createMockElement('button', { id: 'btnQualityToggle' });
 
         const qm = createQosMonitor({
             state,
-            dom: { qualityIcon, qualityLabel, btnQualityToggle },
+            dom: {},
             getPeers: () => peers,
             storage: createMockStorage()
         });
 
-        qm.toggleQualityMode();
-        assert.equal(state.contentHintMode, 'detail');
-        assert.equal(vTrack.contentHint, 'detail');
-        assert.equal(videoSender.getParameters().degradationPreference, 'maintain-resolution');
-        assert.equal(videoSender.getParameters().encodings[0].maxFramerate, 30);
+        qm.applyPeerViewerQuality('peer-b', peerObj);
+        assert.equal(videoSender.getParameters().degradationPreference, 'balanced');
+        assert.equal(videoSender.getParameters().encodings[0].scaleResolutionDownBy, 1.5);
+        assert.equal(videoSender.getParameters().encodings[0].maxFramerate, 30, 'Must clamp 720p60 request to broadcaster 30fps ceiling');
 
-        qm.toggleQualityMode();
-        assert.equal(state.contentHintMode, 'motion');
-        assert.equal(vTrack.contentHint, 'motion');
-        assert.equal(videoSender.getParameters().degradationPreference, 'maintain-framerate');
+        peerObj.viewerQualityPreset = 'auto';
+        qm.applyPeerViewerQuality('peer-b', peerObj);
+        assert.equal(videoSender.getParameters().degradationPreference, 'balanced');
+        assert.equal(videoSender.getParameters().encodings[0].scaleResolutionDownBy, 1);
         assert.equal(videoSender.getParameters().encodings[0].maxFramerate, 30);
     });
 

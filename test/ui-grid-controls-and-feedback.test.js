@@ -675,3 +675,178 @@ test('T4 (Item E): disposeTileElement unifies cleanup', async () => {
     assert.equal(exitFsCalls, 1);
     assert.equal(removedCount, 1);
 });
+
+test('Remote tile quality selector: filters by broadcaster maxQuality, emits quality-request, clamps on cap drop, and closes on Escape', async () => {
+    const { createStreamGridController, createWebRtcMesh, createQosMonitor, disposeTileElement } = await loadClientModules([
+        'stream-grid',
+        'webrtc-mesh',
+        'qos-monitor',
+        'tile-dom'
+    ]);
+    const { initApp } = await import(
+        `${pathToFileURL(path.join(ROOT_DIR, 'public/app.js')).href}?tileq=${Date.now()}`
+    );
+
+    const doc = createMockDocument({}, { createElement: (tag) => createMockElement(tag) });
+    const streamGrid = createMockElement('div', { id: 'streamGrid', className: 'stream-grid' });
+    doc.body.appendChild(streamGrid);
+
+    const emittedSignals = [];
+    const state = {
+        myId: 'viewer-me',
+        roomId: 'sala-q',
+        localStream: null,
+        activeStreamMaxQuality: null,
+        selectedVideoResolution: '1080p',
+        selectedVideoFps: 60
+    };
+
+    let mesh;
+    let grid;
+    const qm = createQosMonitor({
+        state,
+        getPeers: () => mesh.peers
+    });
+    grid = createStreamGridController({
+        state,
+        dom: { streamGrid },
+        getPeers: () => mesh.peers,
+        getRemoteActiveStreams: () => mesh.remoteActiveStreams,
+        getQualityMonitor: () => qm,
+        onRequestPeerQuality: (peerId, preset, mode) => mesh.requestPeerVideoQuality(peerId, preset, mode),
+        documentObj: doc,
+        navigatorObj: { userAgent: 'Mozilla/5.0' }
+    });
+    mesh = createWebRtcMesh({
+        state,
+        dom: { streamGrid },
+        getSocket: () => ({
+            emit: (ev, payload) => {
+                if (ev === 'signal') emittedSignals.push(payload);
+            }
+        }),
+        getQosMonitor: () => qm,
+        getGrid: () => grid,
+        RTCPeerConnectionCtor: function () { return createMockPeerConnection(); },
+        RTCSessionDescriptionCtor: MockRTCSessionDescription,
+        RTCIceCandidateCtor: MockRTCIceCandidate,
+        MediaStreamCtor: MockMediaStream,
+        documentObj: doc,
+        windowObj: { addEventListener: () => {} },
+        storage: createMockStorage()
+    });
+
+    let app = null;
+    try {
+        // Local tile must NOT render viewer quality selector
+        const localTile = grid.createStreamTile('local', new MockMediaStream([createMockTrack('video', 'v-loc')]), 'Você', true);
+        assert.equal(localTile.querySelector('.tile-quality-control'), null);
+
+        // Broadcaster starts at 1080p60
+        const pcRemote = mesh.getOrCreatePeerConnection('host-1');
+        const remoteVideoTrack = createMockTrack('video', 'v-rem');
+        pcRemote.getReceivers = () => [{ track: remoteVideoTrack }];
+        mesh.handleStreamState({
+            senderId: 'host-1',
+            state: 'started',
+            maxQuality: { resolution: '1080p', fps: 60 }
+        });
+
+        const remoteTile = mesh.peers.get('host-1').tileEl;
+        assert.ok(remoteTile, 'Remote tile should be created');
+        const qualityBtn = remoteTile.querySelector('.btn-tile-quality');
+        const qualityMenu = remoteTile.querySelector('.tile-quality-menu');
+        assert.ok(qualityBtn && qualityMenu);
+        assert.equal(qualityMenu.hidden, true);
+        assert.equal(remoteTile.querySelector('.tile-quality-btn-label').textContent, 'Auto');
+
+        const initialModes = qualityMenu.querySelectorAll('.tile-quality-mode-btn').map((el) => el.dataset.mode);
+        assert.deepEqual(initialModes, ['balanced', 'motion', 'detail']);
+
+        const initialOptions = qualityMenu.querySelectorAll('.tile-quality-option').map((el) => el.dataset.preset);
+        assert.deepEqual(initialOptions, ['auto', '1080p60', '1080p30', '720p60', '720p30', '480p30']);
+
+        // Viewer opens menu and selects 1080p60
+        qualityBtn.click();
+        assert.equal(qualityMenu.hidden, false);
+        assert.equal(grid.isAnyQualityMenuOpen(), true);
+
+        const opt1080 = qualityMenu.querySelectorAll('.tile-quality-option').find((el) => el.dataset.preset === '1080p60');
+        opt1080.click();
+        assert.equal(qualityMenu.hidden, true);
+        assert.equal(remoteTile.querySelector('.tile-quality-btn-label').textContent, '1080p60');
+        assert.deepEqual(emittedSignals[emittedSignals.length - 1], {
+            targetId: 'host-1',
+            signal: { type: 'quality-request', preset: '1080p60', mode: 'balanced' }
+        });
+
+        // Viewer opens menu and switches mode to Nítido ('detail')
+        qualityBtn.click();
+        const modeDetailBtn = qualityMenu.querySelectorAll('.tile-quality-mode-btn').find((el) => el.dataset.mode === 'detail');
+        modeDetailBtn.click();
+        assert.equal(qualityMenu.hidden, true);
+        assert.equal(remoteTile.querySelector('.tile-quality-btn-label').textContent, '1080p60 • Nítido');
+        assert.deepEqual(emittedSignals[emittedSignals.length - 1], {
+            targetId: 'host-1',
+            signal: { type: 'quality-request', preset: '1080p60', mode: 'detail' }
+        });
+
+        // Broadcaster lowers cap to 720p30 -> viewer selection above cap resets to auto while keeping chosen mode ('detail')
+        mesh.handleStreamState({
+            senderId: 'host-1',
+            state: 'started',
+            maxQuality: { resolution: '720p', fps: 30 }
+        });
+        const cappedOptions = qualityMenu.querySelectorAll('.tile-quality-option').map((el) => el.dataset.preset);
+        assert.deepEqual(cappedOptions, ['auto', '720p30', '480p30']);
+        assert.equal(remoteTile.querySelector('.tile-quality-btn-label').textContent, 'Auto • Nítido');
+        assert.deepEqual(emittedSignals[emittedSignals.length - 1], {
+            targetId: 'host-1',
+            signal: { type: 'quality-request', preset: 'auto', mode: 'detail' }
+        });
+
+        // Escape in app.js closes open quality menu before clearing spotlight
+        const winListeners = new Map();
+        const appStreamGrid = createMockElement('div', { id: 'streamGrid', className: 'stream-grid' });
+        const appDoc = createMockDocument({ streamGrid: appStreamGrid }, { createElement: (tag) => createMockElement(tag) });
+        app = initApp({
+            windowObj: {
+                location: { origin: 'https://example.com', protocol: 'https:', hostname: 'example.com', pathname: '/', search: '' },
+                history: { replaceState: () => {} },
+                addEventListener: (ev, fn) => {
+                    if (!winListeners.has(ev)) winListeners.set(ev, new Set());
+                    winListeners.get(ev).add(fn);
+                },
+                removeEventListener: (ev, fn) => { winListeners.get(ev)?.delete(fn); }
+            },
+            documentObj: appDoc,
+            navigatorObj: { userAgent: 'Mozilla/5.0' },
+            storage: createMockStorage(),
+            ioFactory: () => ({ connected: false, on: () => {}, emit: () => {}, disconnect: () => {} }),
+            fetchImpl: async () => ({ ok: false, status: 503 }),
+            serverUrl: 'https://example.com'
+        });
+
+        const t = app.grid.createStreamTile('peer-esc', { id: 's-esc' }, 'Diana', false);
+        appStreamGrid.appendChild(t);
+        app.grid.toggleTileSpotlight(t);
+        t.querySelector('.btn-tile-quality').click();
+        assert.equal(app.grid.isAnyQualityMenuOpen(), true);
+        assert.equal(app.grid.isSpotlightActive(), true);
+
+        for (const fn of winListeners.get('keydown') || []) {
+            fn({ key: 'Escape' });
+        }
+        assert.equal(app.grid.isAnyQualityMenuOpen(), false, 'First Escape closes quality menu');
+        assert.equal(app.grid.isSpotlightActive(), true, 'Spotlight remains active on first Escape');
+
+        t.querySelector('.btn-tile-quality').click();
+        disposeTileElement(t, appDoc);
+        assert.equal(app.grid.isAnyQualityMenuOpen(), false, 'disposeTileElement cleans up open quality menu');
+    } finally {
+        if (app) app.teardownClientSession();
+        qm.stopQualityMonitor();
+        grid.cleanup();
+        mesh.cleanupRoomState({ silent: true });
+    }
+});

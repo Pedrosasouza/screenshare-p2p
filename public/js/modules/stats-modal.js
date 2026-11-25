@@ -84,9 +84,32 @@ export function createStatsModalController({
             }
 
             if (elContentHint) {
-                elContentHint.textContent = state.contentHintMode === 'motion'
-                    ? `Fluido (Priorizar ${state.selectedVideoFps} FPS)`
-                    : 'Detalhado (Nitidez / Texto)';
+                const modeLabels = {
+                    balanced: 'Equilibrado (Automático)',
+                    motion: 'Fluido (Priorizar FPS)',
+                    detail: 'Nítido (Nitidez / Texto)'
+                };
+                if (state.localStream && state.localStream.active && peers && peers.size > 0) {
+                    const outboundModes = new Set();
+                    peers.forEach((p) => {
+                        outboundModes.add((p && p.viewerOptimizationMode) || 'balanced');
+                    });
+                    const summary = Array.from(outboundModes).map((m) => (
+                        m === 'motion' ? 'Fluido' : (m === 'detail' ? 'Nítido' : 'Equilibrado')
+                    )).join(', ');
+                    elContentHint.textContent = `Por espectador (${summary})`;
+                } else if (peers && peers.size > 0) {
+                    let activeViewerMode = 'balanced';
+                    for (const [, p] of peers.entries()) {
+                        if (p && p.tileEl && p.selectedReceiveMode) {
+                            activeViewerMode = p.selectedReceiveMode;
+                            break;
+                        }
+                    }
+                    elContentHint.textContent = modeLabels[activeViewerMode] || modeLabels.balanced;
+                } else {
+                    elContentHint.textContent = 'Equilibrado (Escolha por espectador)';
+                }
             }
 
             let minRtt = null;

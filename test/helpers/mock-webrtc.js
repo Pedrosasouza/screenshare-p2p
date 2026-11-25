@@ -43,6 +43,12 @@ function createMockTrack(kind = 'video', id = `track-${Math.random().toString(36
             this.stopped = true;
             this.readyState = 'ended';
         },
+        clone() {
+            return createMockTrack(this.kind, `${this.id}-clone-${Math.random().toString(36).slice(2, 6)}`, {
+                contentHint: this.contentHint,
+                getSettings: this.getSettings
+            });
+        },
         ...extra
     };
     return track;
