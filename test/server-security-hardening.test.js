@@ -530,13 +530,24 @@ describe('Hardening CORS produção, rate-limit de check-room, CSP estrita e blo
         collectJs(jsDir);
 
         for (const filePath of jsFiles) {
+            const baseName = path.basename(filePath);
+            if (baseName === 'socket.io.min.js') continue;
             const content = fs.readFileSync(filePath, 'utf8');
             assert.strictEqual(
                 /cssText|setAttribute\(\s*['"]style['"]/i.test(content),
                 false,
                 `${path.relative(path.join(__dirname, '..'), filePath)} não deve usar cssText ou setAttribute('style', ...)`
             );
+            assert.strictEqual(
+                /\.style\.[a-zA-Z]+\s*=(?!=)|\.style\.(?:setProperty|removeProperty)\s*\(/.test(content),
+                false,
+                `${path.relative(path.join(__dirname, '..'), filePath)} não deve mutar element.style.* diretamente`
+            );
         }
+
+        const iconStat = fs.statSync(path.join(__dirname, '../public/icon.png'));
+        assert.ok(iconStat.size > 1024, 'public/icon.png deve ser o ícone real em alta resolução (não o placeholder de 82 bytes)');
+        assert.ok(fs.existsSync(path.join(__dirname, '../public/favicon.ico')), 'public/favicon.ico deve existir para versão Web');
     });
 
     it('T12: requisições HTTP a qualquer package.json estático retornam 404 antes do express.static', async () => {

@@ -26,14 +26,14 @@ function createRoomJoinHarness(mods) {
     let cleanupCalls = 0;
 
     const dom = {
-        roomModal: createMockElement('div', { id: 'roomModal', hidden: false, style: { display: 'flex' } }),
-        roomErrorBanner: createMockElement('div', { id: 'roomErrorBanner', hidden: true, style: { display: 'none' } }),
-        btnCloseRoomModal: createMockElement('button', { id: 'btnCloseRoomModal', style: { display: 'none' } }),
-        btnCancelRoomModal: createMockElement('button', { id: 'btnCancelRoomModal', style: { display: 'none' } }),
-        roomChoiceCancelContainer: createMockElement('div', { id: 'roomChoiceCancelContainer', style: { display: 'none' } }),
-        roomViewChoice: createMockElement('div', { id: 'roomViewChoice', style: { display: 'block' } }),
-        roomViewCreate: createMockElement('div', { id: 'roomViewCreate', style: { display: 'none' } }),
-        roomViewJoin: createMockElement('div', { id: 'roomViewJoin', style: { display: 'none' } }),
+        roomModal: createMockElement('div', { id: 'roomModal', hidden: false }),
+        roomErrorBanner: createMockElement('div', { id: 'roomErrorBanner', hidden: true }),
+        btnCloseRoomModal: createMockElement('button', { id: 'btnCloseRoomModal', hidden: true }),
+        btnCancelRoomModal: createMockElement('button', { id: 'btnCancelRoomModal', hidden: true }),
+        roomChoiceCancelContainer: createMockElement('div', { id: 'roomChoiceCancelContainer', hidden: true }),
+        roomViewChoice: createMockElement('div', { id: 'roomViewChoice', hidden: false }),
+        roomViewCreate: createMockElement('div', { id: 'roomViewCreate', hidden: true }),
+        roomViewJoin: createMockElement('div', { id: 'roomViewJoin', hidden: true }),
         inputCreateUserName: createMockElement('input', { id: 'inputCreateUserName' }),
         inputJoinUserName: createMockElement('input', { id: 'inputJoinUserName' }),
         inputCreateRoomId: createMockElement('input', { id: 'inputCreateRoomId' }),
@@ -159,12 +159,11 @@ test('T1: Initial failed join keeps roomId empty, omits STORAGE_KEY, and blocks 
     assert.equal(h.state.roomId, '');
     assert.equal(h.state.pendingRoomJoin, null);
     assert.equal(h.storage.getItem(h.STORAGE_KEY), null);
-    assert.equal(h.dom.btnCloseRoomModal.style.display, 'none');
+    assert.equal(h.dom.btnCloseRoomModal.hidden, true);
     assert.equal(h.dom.inputJoinRoomId.value, 'sala-secreta');
 
     h.roomModalCtrl.closeRoomModal();
     assert.equal(h.dom.roomModal.hidden, false);
-    assert.equal(h.dom.roomModal.style.display, 'flex');
 });
 
 test('T2: Failed room switch preserves active room-a, STORAGE_KEY, and active peers across error types', async () => {
@@ -662,10 +661,14 @@ test('T7 (instance): saveCustomSignalingServerUrl validates URLs and stats-modal
     };
     const webStorage = createMockStorage();
 
-    // Non-desktop rejects external HTTPS/HTTP URLs
-    const webExternal = saveCustomSignalingServerUrl('https://outro.example.com', { windowObj: webWin, storage: webStorage });
-    assert.equal(webExternal.ok, false);
+    // Web mode allows explicit external HTTPS URLs saved by the user, while still rejecting insecure remote HTTP
+    const webHttpBlocked = saveCustomSignalingServerUrl('http://outro.example.com', { windowObj: webWin, storage: webStorage });
+    assert.equal(webHttpBlocked.ok, false);
     assert.equal(webStorage.getItem(SERVER_URL_STORAGE_KEY), null);
+
+    const webHttpsOk = saveCustomSignalingServerUrl('https://outro.example.com/subpath?x=1', { windowObj: webWin, storage: webStorage });
+    assert.deepEqual(webHttpsOk, { ok: true, url: 'https://outro.example.com' });
+    assert.equal(webStorage.getItem(SERVER_URL_STORAGE_KEY), 'https://outro.example.com');
 
     // Loopback HTTP is allowed even in web mode; credentials are rejected
     const badCreds = saveCustomSignalingServerUrl('https://user:pass@localhost:3000', { windowObj: webWin, storage: webStorage });
@@ -682,7 +685,6 @@ test('T7 (instance): saveCustomSignalingServerUrl validates URLs and stats-modal
     };
     const desktopStorage = createMockStorage({ [SERVER_URL_STORAGE_KEY]: 'https://initial.example.com' });
     const statsModal = createMockElement('div', { id: 'statsModal', hidden: true });
-    statsModal.style.display = 'none';
     const inputCustomServerUrl = createMockElement('input', { id: 'inputCustomServerUrl', value: '' });
     const btnSaveServerUrl = createMockElement('button', { id: 'btnSaveServerUrl' });
     const doc = createMockDocument({

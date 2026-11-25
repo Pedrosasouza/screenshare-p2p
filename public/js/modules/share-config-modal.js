@@ -2,7 +2,6 @@ import {
     VIDEO_RES_KEY,
     VIDEO_FPS_KEY,
     AUDIO_SOURCE_KEY,
-    USE_VB_CABLE_KEY,
     EXCLUDE_SELECTED_APP_KEY,
     saveClientPreference
 } from './preferences.js';
@@ -42,10 +41,8 @@ export function createShareConfigModalController({
     function syncAudioOptionContainers() {
         const {
             audioSourceApp,
-            audioSourceSystem,
             appSelectorContainer,
-            appExcludeOptionContainer,
-            vbCableOptionContainer
+            appExcludeOptionContainer
         } = dom;
 
         const checkedAudioRadio = documentObj && typeof documentObj.querySelector === 'function'
@@ -53,16 +50,12 @@ export function createShareConfigModalController({
             : null;
         const selectedMode = checkedAudioRadio ? checkedAudioRadio.value : null;
         const isAppMode = selectedMode ? selectedMode === 'app' : Boolean(audioSourceApp && audioSourceApp.checked);
-        const isSystemMode = selectedMode ? selectedMode === 'system' : Boolean(audioSourceSystem && audioSourceSystem.checked);
 
         if (appSelectorContainer) {
-            appSelectorContainer.style.display = isAppMode ? 'flex' : 'none';
+            appSelectorContainer.hidden = !isAppMode;
         }
         if (appExcludeOptionContainer) {
-            appExcludeOptionContainer.style.display = (isDesktopApp() && isAppMode) ? 'flex' : 'none';
-        }
-        if (vbCableOptionContainer) {
-            vbCableOptionContainer.style.display = isSystemMode ? 'block' : 'none';
+            appExcludeOptionContainer.hidden = !(isDesktopApp() && isAppMode);
         }
     }
 
@@ -75,7 +68,6 @@ export function createShareConfigModalController({
             audioSourceApp,
             audioSourceSystem,
             audioSourceNone,
-            chkUseVbCable,
             chkExcludeSelectedApp
         } = dom;
 
@@ -90,16 +82,16 @@ export function createShareConfigModalController({
             : null;
 
         if (!isDesktop) {
-            if (desktopOnlyCard1) desktopOnlyCard1.style.display = 'none';
-            if (desktopOnlyCard2) desktopOnlyCard2.style.display = 'none';
+            if (desktopOnlyCard1) desktopOnlyCard1.hidden = true;
+            if (desktopOnlyCard2) desktopOnlyCard2.hidden = true;
             if (audioSourceExcludeDiscord) audioSourceExcludeDiscord.checked = false;
             if (audioSourceApp) audioSourceApp.checked = false;
             const webSource = preferredAudioSource === 'none' && audioSourceNone ? 'none' : 'system';
             if (audioSourceNone) audioSourceNone.checked = webSource === 'none';
             if (audioSourceSystem) audioSourceSystem.checked = webSource === 'system';
         } else {
-            if (desktopOnlyCard1) desktopOnlyCard1.style.display = 'flex';
-            if (desktopOnlyCard2) desktopOnlyCard2.style.display = 'flex';
+            if (desktopOnlyCard1) desktopOnlyCard1.hidden = false;
+            if (desktopOnlyCard2) desktopOnlyCard2.hidden = false;
             const desktopRadioMap = {
                 exclude_discord: audioSourceExcludeDiscord || null,
                 app: audioSourceApp || null,
@@ -116,9 +108,6 @@ export function createShareConfigModalController({
             fetchWindowList();
         }
 
-        if (chkUseVbCable) {
-            chkUseVbCable.checked = Boolean(state.useVbCableAudio);
-        }
         if (chkExcludeSelectedApp) {
             chkExcludeSelectedApp.checked = Boolean(state.excludeSelectedApp);
         }
@@ -134,9 +123,6 @@ export function createShareConfigModalController({
             if (card.classList && typeof card.classList.toggle === 'function') {
                 card.classList.toggle('is-selected', Boolean(radio.checked));
             }
-            if (!radio.checked && card.style && card.style.border) {
-                card.style.border = '';
-            }
         });
 
         if (documentObj && typeof documentObj.querySelector === 'function') {
@@ -149,7 +135,7 @@ export function createShareConfigModalController({
         if (shareConfigModal) {
             const wasOpen = isShareConfigModalOpen();
             shareConfigModal.removeAttribute('hidden');
-            shareConfigModal.style.display = 'flex';
+            shareConfigModal.hidden = false;
             if (!wasOpen) {
                 previousFocusEl = activateModalFocus(shareConfigModal, documentObj);
             }
@@ -160,7 +146,7 @@ export function createShareConfigModalController({
         const { shareConfigModal } = dom;
         if (shareConfigModal) {
             shareConfigModal.setAttribute('hidden', '');
-            shareConfigModal.style.display = 'none';
+            shareConfigModal.hidden = true;
             restoreModalFocus(previousFocusEl, documentObj);
             previousFocusEl = null;
         }
@@ -168,7 +154,7 @@ export function createShareConfigModalController({
 
     function isShareConfigModalOpen() {
         const { shareConfigModal } = dom;
-        return Boolean(shareConfigModal && !shareConfigModal.hidden && shareConfigModal.style.display !== 'none');
+        return Boolean(shareConfigModal && !shareConfigModal.hidden);
     }
 
     function bindEvents() {
@@ -184,7 +170,6 @@ export function createShareConfigModalController({
             audioSourceApp,
             audioSourceSystem,
             audioSourceNone,
-            chkUseVbCable,
             chkExcludeSelectedApp
         } = dom;
 
@@ -194,13 +179,6 @@ export function createShareConfigModalController({
 
         if (btnRefreshAudioApps) {
             btnRefreshAudioApps.addEventListener('click', () => fetchWindowList());
-        }
-
-        if (chkUseVbCable) {
-            chkUseVbCable.addEventListener('change', () => {
-                state.useVbCableAudio = Boolean(chkUseVbCable.checked);
-                saveClientPreference(USE_VB_CABLE_KEY, String(state.useVbCableAudio), storage);
-            });
         }
 
         if (chkExcludeSelectedApp) {
@@ -226,9 +204,6 @@ export function createShareConfigModalController({
                     if (!card) return;
                     if (card.classList && typeof card.classList.toggle === 'function') {
                         card.classList.toggle('is-selected', Boolean(r.checked));
-                    }
-                    if (card.style) {
-                        card.style.border = '';
                     }
                 });
             });
@@ -267,15 +242,10 @@ export function createShareConfigModalController({
                     }
                 }
 
-                if (chkUseVbCable) {
-                    state.useVbCableAudio = Boolean(chkUseVbCable.checked);
-                    saveClientPreference(USE_VB_CABLE_KEY, String(state.useVbCableAudio), storage);
-                }
                 if (chkExcludeSelectedApp) {
                     state.excludeSelectedApp = Boolean(chkExcludeSelectedApp.checked);
                     saveClientPreference(EXCLUDE_SELECTED_APP_KEY, String(state.excludeSelectedApp), storage);
                 }
-                const useVbCable = Boolean(chkUseVbCable ? chkUseVbCable.checked : state.useVbCableAudio);
                 const excludeApp = Boolean(chkExcludeSelectedApp ? chkExcludeSelectedApp.checked : state.excludeSelectedApp);
 
                 await onStartScreenShare(
@@ -283,7 +253,7 @@ export function createShareConfigModalController({
                     targetPid,
                     state.selectedVideoResolution,
                     state.selectedVideoFps,
-                    { useVbCable, excludeApp }
+                    { excludeApp }
                 );
             });
         }

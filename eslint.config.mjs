@@ -58,6 +58,14 @@ export default [
                 {
                     selector: 'CallExpression[callee.property.name="setAttribute"][arguments.0.value="style"]',
                     message: 'Uso de setAttribute("style", ...) proibido pela CSP style-src estrita; use classes CSS em style.css.'
+                },
+                {
+                    selector: 'AssignmentExpression[left.object.property.name="style"]',
+                    message: 'Mutação direta de element.style.* proibida; use o atributo hidden ou classes CSS em style.css.'
+                },
+                {
+                    selector: 'CallExpression[callee.object.property.name="style"]',
+                    message: 'Mutação direta via element.style.*() proibida; use o atributo hidden ou classes CSS em style.css.'
                 }
             ]
         }

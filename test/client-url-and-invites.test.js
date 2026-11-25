@@ -134,6 +134,16 @@ describe('buildInviteUrl, pure module imports & initApp #btnCopyLink integration
             pathname: '/app/'
         });
         assert.equal(subpathUrl, 'https://example.org/app/?room=team');
+
+        const customWebServerUrl = buildInviteUrl({
+            roomId: 'team-custom',
+            password: 'pw',
+            isDesktop: false,
+            serverUrl: 'https://meu-servidor.example.org/',
+            origin: 'https://screenshare-p2p.onrender.com',
+            pathname: '/'
+        });
+        assert.equal(customWebServerUrl, 'https://meu-servidor.example.org/?room=team-custom#pass=pw');
     });
 
     it('imports all client modules cleanly in Node without undeclared globals', async () => {
@@ -367,6 +377,27 @@ describe('Segurança de URL de sinalização & ?pass=', () => {
             assert.strictEqual(signalingUrl.resolveSignalingServerUrl(), 'https://screenshare-p2p.onrender.com');
             assert.strictEqual(envCredStorage.removeItemCalls.includes('streamgrid_server_url'), true);
             assert.strictEqual(envCredStorage.storageMap.has('streamgrid_server_url'), false);
+        });
+
+        // 4e. Web aceita override HTTPS salvo explicitamente em localStorage, mas continua bloqueando http:// remoto
+        const envWebSavedHttps = createWindowAndStorage({
+            locationHref: 'https://screenshare-p2p.onrender.com/',
+            initialStorage: { streamgrid_server_url: 'https://meu-servidor.example.com/custom/' },
+            isDesktop: false
+        });
+        await withMockedGlobals(envWebSavedHttps.windowObj, envWebSavedHttps.storage, () => {
+            assert.strictEqual(signalingUrl.resolveSignalingServerUrl(), 'https://meu-servidor.example.com');
+            assert.strictEqual(envWebSavedHttps.removeItemCalls.length, 0);
+        });
+
+        const envWebSavedHttp = createWindowAndStorage({
+            locationHref: 'https://screenshare-p2p.onrender.com/',
+            initialStorage: { streamgrid_server_url: 'http://meu-servidor-inseguro.example.com' },
+            isDesktop: false
+        });
+        await withMockedGlobals(envWebSavedHttp.windowObj, envWebSavedHttp.storage, () => {
+            assert.strictEqual(signalingUrl.resolveSignalingServerUrl(), 'https://screenshare-p2p.onrender.com');
+            assert.strictEqual(envWebSavedHttp.removeItemCalls.includes('streamgrid_server_url'), true);
         });
     });
 

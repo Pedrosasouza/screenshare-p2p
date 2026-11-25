@@ -63,7 +63,6 @@ export function createRoomModalController({
         roomErrorBanner.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> <span></span>';
         const span = roomErrorBanner.querySelector('span');
         if (span) span.textContent = msg || '';
-        roomErrorBanner.style.display = 'flex';
         roomErrorBanner.hidden = false;
     }
 
@@ -71,20 +70,19 @@ export function createRoomModalController({
         const { roomErrorBanner } = dom;
         if (!roomErrorBanner) return;
         roomErrorBanner.innerHTML = '';
-        roomErrorBanner.style.display = 'none';
         roomErrorBanner.hidden = true;
     }
 
     function updateRoomModalCloseButton() {
         const canClose = Boolean(state.roomId);
         if (dom.btnCloseRoomModal) {
-            dom.btnCloseRoomModal.style.display = canClose ? 'flex' : 'none';
+            dom.btnCloseRoomModal.hidden = !canClose;
         }
         if (dom.btnCancelRoomModal) {
-            dom.btnCancelRoomModal.style.display = canClose ? 'inline-flex' : 'none';
+            dom.btnCancelRoomModal.hidden = !canClose;
         }
         if (dom.roomChoiceCancelContainer) {
-            dom.roomChoiceCancelContainer.style.display = canClose ? 'block' : 'none';
+            dom.roomChoiceCancelContainer.hidden = !canClose;
         }
     }
 
@@ -190,7 +188,6 @@ export function createRoomModalController({
         if (!rooms.length) {
             clearElementChildren(list);
             section.hidden = false;
-            section.style.removeProperty('display');
             if (dom.btnClearRecentRooms) {
                 dom.btnClearRecentRooms.hidden = true;
             }
@@ -202,7 +199,6 @@ export function createRoomModalController({
         }
 
         section.hidden = false;
-        section.style.removeProperty('display');
         if (dom.btnClearRecentRooms) {
             dom.btnClearRecentRooms.hidden = false;
         }
@@ -324,15 +320,12 @@ export function createRoomModalController({
     function switchRoomView(viewName) {
         clearRoomError();
         if (dom.roomViewChoice) {
-            dom.roomViewChoice.style.display = (viewName === 'choice') ? 'block' : 'none';
             dom.roomViewChoice.hidden = (viewName !== 'choice');
         }
         if (dom.roomViewCreate) {
-            dom.roomViewCreate.style.display = (viewName === 'create') ? 'block' : 'none';
             dom.roomViewCreate.hidden = (viewName !== 'create');
         }
         if (dom.roomViewJoin) {
-            dom.roomViewJoin.style.display = (viewName === 'join') ? 'block' : 'none';
             dom.roomViewJoin.hidden = (viewName !== 'join');
         }
 
@@ -370,10 +363,11 @@ export function createRoomModalController({
         updateRoomModalCloseButton();
         switchRoomView(initialView);
         if (dom.roomModal) {
-            dom.roomModal.style.removeProperty('display');
-            dom.roomModal.style.display = 'flex';
             dom.roomModal.classList.remove('hidden');
             dom.roomModal.hidden = false;
+            if (typeof dom.roomModal.removeAttribute === 'function') {
+                dom.roomModal.removeAttribute('hidden');
+            }
             if (!wasOpen) {
                 previousFocusEl = activateModalFocus(dom.roomModal, documentObj);
             }
@@ -386,17 +380,26 @@ export function createRoomModalController({
             state.pendingRoomJoin = null;
         }
         clearRoomError();
+        if (dom.inputQuickRoomId) {
+            dom.inputQuickRoomId.value = '';
+        }
         if (dom.roomModal) {
-            dom.roomModal.style.display = 'none';
             dom.roomModal.classList.add('hidden');
             dom.roomModal.hidden = true;
+            if (typeof dom.roomModal.setAttribute === 'function') {
+                dom.roomModal.setAttribute('hidden', '');
+            }
         }
         restoreModalFocus(previousFocusEl, documentObj);
         previousFocusEl = null;
     }
 
     function isRoomModalOpen() {
-        return Boolean(dom.roomModal && !dom.roomModal.hidden && dom.roomModal.style.display !== 'none');
+        return Boolean(
+            dom.roomModal &&
+            !dom.roomModal.hidden &&
+            !(dom.roomModal.classList && typeof dom.roomModal.classList.contains === 'function' && dom.roomModal.classList.contains('hidden'))
+        );
     }
 
     function joinRoom(targetRoomId, targetPass = '', targetUserName = '') {

@@ -218,7 +218,7 @@ export function createStatsModalController({
         if (statsModal) {
             const wasOpen = isStatsModalOpen();
             statsModal.removeAttribute('hidden');
-            statsModal.style.display = 'flex';
+            statsModal.hidden = false;
             const inputCustom = dom.inputCustomServerUrl || getEl('inputCustomServerUrl');
             if (inputCustom) {
                 let savedOverride = '';
@@ -242,7 +242,7 @@ export function createStatsModalController({
         const { statsModal } = dom;
         if (statsModal) {
             statsModal.setAttribute('hidden', '');
-            statsModal.style.display = 'none';
+            statsModal.hidden = true;
             stop();
             statsUpdateGeneration += 1;
             isStatsUpdateRunning = false;
@@ -253,7 +253,7 @@ export function createStatsModalController({
 
     function isStatsModalOpen() {
         const { statsModal } = dom;
-        return Boolean(statsModal && !statsModal.hidden && statsModal.style.display !== 'none');
+        return Boolean(statsModal && !statsModal.hidden);
     }
 
     function stop() {

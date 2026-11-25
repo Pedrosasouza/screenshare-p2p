@@ -22,6 +22,9 @@ const MAX_SILENCE_BURST_FRAMES: usize = 4_800; // Max 100ms burst to prevent run
 const MAX_QUEUED_FRAMES: usize = (SAMPLE_RATE as usize) / 2; // 500ms cap = 24_000 frames
 const PROCESS_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 const DISCORD_REACQUIRE_INTERVAL: Duration = Duration::from_millis(1500);
+const DEVICE_REOPEN_MAX_ATTEMPTS: u32 = 3;
+const DEVICE_REOPEN_BACKOFF: Duration = Duration::from_millis(200);
+const STOP_POLL_SLICE: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureTargetKind {
@@ -85,6 +88,99 @@ fn target_exited_reason(pid: u32, include_tree: bool) -> String {
     } else {
         format!("O processo excluído (PID {}) foi encerrado", pid)
     }
+}
+
+fn active_mode_label(kind: CaptureTargetKind, in_fallback: bool) -> &'static str {
+    match kind {
+        CaptureTargetKind::IncludeApp => "include",
+        CaptureTargetKind::ExcludeApp => {
+            if in_fallback {
+                "system_fallback"
+            } else {
+                "exclude_app"
+            }
+        }
+        CaptureTargetKind::ExcludeDiscord => {
+            if in_fallback {
+                "system_fallback"
+            } else {
+                "exclude_discord"
+            }
+        }
+    }
+}
+
+fn truncate_unaligned_tail(sample_queue: &mut VecDeque<u8>, blockalign: usize) {
+    if blockalign == 0 {
+        return;
+    }
+    let rem = sample_queue.len() % blockalign;
+    if rem > 0 {
+        sample_queue.truncate(sample_queue.len() - rem);
+    }
+}
+
+fn sleep_interruptible(duration: Duration, stop_signal: &AtomicBool) -> bool {
+    let deadline = Instant::now() + duration;
+    while !stop_signal.load(Ordering::Acquire) {
+        let now = Instant::now();
+        if now >= deadline {
+            return true;
+        }
+        let slice = (deadline - now).min(STOP_POLL_SLICE);
+        std::thread::sleep(slice);
+    }
+    false
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ReopenStep<T> {
+    Opened(T),
+    Retry(String),
+    TargetExited(String),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ReopenOutcome<T> {
+    Reopened { stream: T, attempts: u32 },
+    Cancelled,
+    TargetExited(String),
+    Exhausted(String),
+}
+
+fn retry_reopen_stream<T, F>(
+    max_attempts: u32,
+    backoff: Duration,
+    stop_signal: &AtomicBool,
+    mut step_fn: F,
+) -> ReopenOutcome<T>
+where
+    F: FnMut(u32) -> ReopenStep<T>,
+{
+    let mut last_err = String::from("Dispositivo de áudio desconectado ou invalidado");
+    for attempt in 1..=max_attempts {
+        if !sleep_interruptible(backoff, stop_signal) {
+            return ReopenOutcome::Cancelled;
+        }
+        match step_fn(attempt) {
+            ReopenStep::Opened(stream) => {
+                return ReopenOutcome::Reopened {
+                    stream,
+                    attempts: attempt,
+                };
+            }
+            ReopenStep::TargetExited(reason) => {
+                return ReopenOutcome::TargetExited(reason);
+            }
+            ReopenStep::Retry(err) => {
+                if stop_signal.load(Ordering::Acquire) {
+                    return ReopenOutcome::Cancelled;
+                }
+                last_err = err;
+            }
+        }
+    }
+    ReopenOutcome::Exhausted(last_err)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -470,7 +566,7 @@ where
         let mut last_discord_probe = Instant::now();
 
         while !stop_signal.load(Ordering::Acquire) {
-            let mut read_error = false;
+            let mut read_error_reason: Option<&'static str> = None;
             if let Some(stream) = active_stream.as_ref() {
                 while !stop_signal.load(Ordering::Acquire) {
                     match stream.capture_client.get_next_packet_size() {
@@ -483,26 +579,127 @@ where
                                 .is_err()
                             {
                                 eprintln!("[WASAPI] Read device error");
-                                unexpected_reason =
-                                    Some("Dispositivo ou processo de áudio indisponível".into());
-                                read_error = true;
+                                read_error_reason =
+                                    Some("Dispositivo ou processo de áudio indisponível");
                                 break;
                             }
                         }
                         Ok(_) => break,
                         Err(_) => {
                             eprintln!("[WASAPI] get_next_packet_size error");
-                            unexpected_reason =
-                                Some("Dispositivo de áudio desconectado ou invalidado".into());
-                            read_error = true;
+                            read_error_reason =
+                                Some("Dispositivo de áudio desconectado ou invalidado");
                             break;
                         }
                     }
                 }
             }
 
-            if read_error || stop_signal.load(Ordering::Acquire) {
+            if stop_signal.load(Ordering::Acquire) {
                 break;
+            }
+
+            if let Some(err_reason) = read_error_reason {
+                if let Some(prev) = active_stream.take() {
+                    prev.stop_and_drop();
+                }
+                truncate_unaligned_tail(&mut sample_queue, blockalign);
+
+                // Se o processo-alvo em modo inclusão já encerrou, não gasta backoff tentando reabrir.
+                if target_kind == CaptureTargetKind::IncludeApp
+                    && process_watcher.as_ref().is_some_and(|w| w.has_exited())
+                {
+                    unexpected_reason = Some(target_exited_reason(current_pid, true));
+                    break;
+                }
+
+                let mut rebound_from_exit: Option<String> = None;
+                let reopen_outcome = retry_reopen_stream(
+                    DEVICE_REOPEN_MAX_ATTEMPTS,
+                    DEVICE_REOPEN_BACKOFF,
+                    &stop_signal,
+                    |attempt| {
+                        if process_watcher.as_ref().is_some_and(|w| w.has_exited()) {
+                            let resolved_discord =
+                                if target_kind == CaptureTargetKind::ExcludeDiscord {
+                                    find_discord_root_pid()
+                                } else {
+                                    None
+                                };
+                            match decide_after_target_exit(
+                                target_kind,
+                                current_pid,
+                                self_pid,
+                                resolved_discord,
+                            ) {
+                                TargetExitAction::StopUnexpected(reason) => {
+                                    return ReopenStep::TargetExited(reason);
+                                }
+                                TargetExitAction::RebindExclude {
+                                    new_pid,
+                                    watch_target,
+                                    in_fallback,
+                                    reason,
+                                    ..
+                                } => {
+                                    current_pid = new_pid;
+                                    in_discord_fallback = in_fallback;
+                                    last_discord_probe = Instant::now();
+                                    process_watcher = if watch_target {
+                                        TargetProcessWatcher::open(new_pid, Instant::now())
+                                    } else {
+                                        None
+                                    };
+                                    rebound_from_exit = Some(reason);
+                                }
+                            }
+                        }
+
+                        eprintln!(
+                            "[WASAPI] Tentando reabrir stream de áudio após invalidação ({}/{}) para PID {}...",
+                            attempt, DEVICE_REOPEN_MAX_ATTEMPTS, current_pid
+                        );
+                        match open_loopback_stream(
+                            current_pid,
+                            include_tree,
+                            &desired_format,
+                            &stop_signal,
+                        ) {
+                            Ok(stream) => ReopenStep::Opened(stream),
+                            Err(err) => ReopenStep::Retry(err),
+                        }
+                    },
+                );
+
+                match reopen_outcome {
+                    ReopenOutcome::Reopened { stream, attempts } => {
+                        eprintln!(
+                            "[WASAPI] Stream de áudio recuperado na tentativa {} para PID {}",
+                            attempts, current_pid
+                        );
+                        active_stream = Some(stream);
+                        let queued = (sample_queue.len() / blockalign) as u64;
+                        silence_sync.resync(Instant::now(), total_frames_sent, queued);
+                        let reason = rebound_from_exit.unwrap_or_else(|| {
+                            "Dispositivo de áudio alterado; captura reconectada automaticamente."
+                                .into()
+                        });
+                        on_target_rebound(CaptureReboundInfo {
+                            pid: current_pid,
+                            mode: active_mode_label(target_kind, in_discord_fallback).to_string(),
+                            reason,
+                        });
+                    }
+                    ReopenOutcome::Cancelled => break,
+                    ReopenOutcome::TargetExited(reason) => {
+                        unexpected_reason = Some(reason);
+                        break;
+                    }
+                    ReopenOutcome::Exhausted(_) => {
+                        unexpected_reason = Some(err_reason.into());
+                        break;
+                    }
+                }
             }
 
             let now = Instant::now();
@@ -659,10 +856,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_missing_silence_frames, decide_after_target_exit, flush_sample_chunks,
-        should_poll_process, target_exited_reason, trim_sample_queue_excess, CaptureTargetKind,
-        SilenceSyncTracker, TargetExitAction, TargetProcessWatcher, CHUNK_FRAMES,
-        MAX_SILENCE_BURST_FRAMES, PROCESS_CHECK_INTERVAL,
+        active_mode_label, compute_missing_silence_frames, decide_after_target_exit,
+        flush_sample_chunks, retry_reopen_stream, should_poll_process, sleep_interruptible,
+        target_exited_reason, trim_sample_queue_excess, truncate_unaligned_tail, CaptureTargetKind,
+        ReopenOutcome, ReopenStep, SilenceSyncTracker, TargetExitAction, TargetProcessWatcher,
+        CHUNK_FRAMES, MAX_SILENCE_BURST_FRAMES, PROCESS_CHECK_INTERVAL,
     };
     use std::collections::VecDeque;
     use std::process::Command;
@@ -902,6 +1100,101 @@ mod tests {
         assert_eq!(
             tracker.compute_missing_or_resync(t_rebind + Duration::from_millis(10), 10_480, 0),
             480
+        );
+    }
+
+    #[test]
+    fn retry_reopen_stream_recovers_after_transient_failures_and_reports_attempt_count() {
+        let stop = AtomicBool::new(false);
+        let mut calls = 0u32;
+        let outcome = retry_reopen_stream(3, Duration::from_millis(5), &stop, |attempt| {
+            calls += 1;
+            if attempt < 2 {
+                ReopenStep::Retry(format!("transient failure #{}", attempt))
+            } else {
+                ReopenStep::Opened("recovered-stream")
+            }
+        });
+        assert_eq!(calls, 2);
+        assert_eq!(
+            outcome,
+            ReopenOutcome::Reopened {
+                stream: "recovered-stream",
+                attempts: 2
+            }
+        );
+    }
+
+    #[test]
+    fn retry_reopen_stream_aborts_on_stop_signal_or_target_exit_and_exhausts_cleanly() {
+        // 1. Exhaustion after all attempts fail
+        let stop_none = AtomicBool::new(false);
+        let mut attempts_seen = Vec::new();
+        let exhausted: ReopenOutcome<()> =
+            retry_reopen_stream(3, Duration::from_millis(2), &stop_none, |attempt| {
+                attempts_seen.push(attempt);
+                ReopenStep::Retry(format!("fail-{}", attempt))
+            });
+        assert_eq!(attempts_seen, vec![1, 2, 3]);
+        assert_eq!(exhausted, ReopenOutcome::Exhausted("fail-3".into()));
+
+        // 2. Immediate cancellation when stop_signal is already set
+        let stop_active = AtomicBool::new(true);
+        assert!(!sleep_interruptible(
+            Duration::from_millis(100),
+            &stop_active
+        ));
+        let mut called_after_stop = false;
+        let cancelled: ReopenOutcome<()> =
+            retry_reopen_stream(3, Duration::from_millis(50), &stop_active, |_| {
+                called_after_stop = true;
+                ReopenStep::Opened(())
+            });
+        assert!(!called_after_stop);
+        assert_eq!(cancelled, ReopenOutcome::Cancelled);
+
+        // 3. Target exit detected mid-retry aborts remaining attempts
+        let mut exit_calls = 0u32;
+        let target_exited: ReopenOutcome<()> =
+            retry_reopen_stream(3, Duration::from_millis(2), &stop_none, |_| {
+                exit_calls += 1;
+                ReopenStep::TargetExited("process gone".into())
+            });
+        assert_eq!(exit_calls, 1);
+        assert_eq!(
+            target_exited,
+            ReopenOutcome::TargetExited("process gone".into())
+        );
+    }
+
+    #[test]
+    fn truncate_unaligned_tail_and_active_mode_label_preserve_frame_alignment_and_modes() {
+        let mut queue: VecDeque<u8> = (0u8..19).collect();
+        truncate_unaligned_tail(&mut queue, 8);
+        assert_eq!(queue.len(), 16);
+
+        truncate_unaligned_tail(&mut queue, 0);
+        assert_eq!(queue.len(), 16);
+
+        assert_eq!(
+            active_mode_label(CaptureTargetKind::IncludeApp, false),
+            "include"
+        );
+        assert_eq!(
+            active_mode_label(CaptureTargetKind::ExcludeApp, false),
+            "exclude_app"
+        );
+        assert_eq!(
+            active_mode_label(CaptureTargetKind::ExcludeApp, true),
+            "system_fallback"
+        );
+        assert_eq!(
+            active_mode_label(CaptureTargetKind::ExcludeDiscord, false),
+            "exclude_discord"
+        );
+        assert_eq!(
+            active_mode_label(CaptureTargetKind::ExcludeDiscord, true),
+            "system_fallback"
         );
     }
 }

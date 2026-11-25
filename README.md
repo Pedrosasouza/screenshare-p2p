@@ -71,7 +71,7 @@ Devido às restrições de segurança e sandbox dos navegadores (`getDisplayMedi
 ### 2. Motor de Áudio Dedicado (Exclusivo Desktop / Rust)
 * **WASAPI Loopback com Filtro por Processo (Inclusão e Exclusão):** Captura direta da sessão de áudio do Windows (`IAudioClient`), permitindo tanto isolar um aplicativo específico (PID) quanto excluir a chamada do Discord ou qualquer outro aplicativo selecionado (`exclude_discord` / `exclude_app`).
 * **Monitoramento de Processo-Alvo & Fallback Limpo:** Detecção automática de encerramento do processo monitorado no motor WASAPI (com notificação na interface e remoção limpa da faixa de áudio encerrada) e fallback com único prompt de captura (`getDisplayMedia`) caso o isolamento por processo falhe.
-* **Sem Dependência de Drivers Externos (VB-Cable Opcional):** Não requer instalação de cabos virtuais; caso o usuário já utilize VB-Cable, há opção explícita e opcional no modo de áudio completo do sistema (`system`).
+* **Sem Dependência de Drivers Externos:** Não requer instalação de cabos de áudio virtuais de terceiros; a captura e o filtro de áudio ocorrem nativamente via WASAPI.
 * **Ciclo de Vida Unificado:** O módulo WASAPI em Rust é compilado diretamente no executável principal do Tauri v2, com encerramento imediato da captura ao parar a transmissão ou fechar a janela (sem processos externos ou portas locais abertas).
 
 ### 3. Gerenciamento de Salas, Servidor & Segurança
@@ -158,7 +158,9 @@ Se preferir compilar localmente em vez de baixar o executável pré-compilado:
 npm run build-windows
 ```
 
-O pacote portátil estará em `dist/StreamGrid-Windows.zip` e os instaladores em `src-tauri/target/release/bundle/`.
+O pacote portátil estará em `dist/StreamGrid-Windows.zip` (contendo `StreamGrid/StreamGrid.exe`), acompanhado dos instaladores e dos arquivos de verificação `.sha256` / `SHA256SUMS.txt` em `dist/`.
+
+> 💡 **Dica para Windows + OneDrive:** Caso o repositório esteja dentro de uma pasta sincronizada pelo OneDrive, defina `CARGO_TARGET_DIR` para um diretório fora do OneDrive (ex.: `$env:CARGO_TARGET_DIR = "$env:LOCALAPPDATA\streamgrid-cargo-target"`) ao compilar manualmente com `cargo` ou `tauri build`. Isso evita avisos de *hard link* no cache incremental do Rust e impede a sincronização de artefatos intermediários na nuvem (`npm run test:rust` já realiza esse redirecionamento automaticamente).
 
 ---
 
@@ -183,9 +185,9 @@ npm run test:rust
 
 A suíte automatizada cobre:
 * **Fuzzing & Resiliência:** Avalia a estabilidade do servidor diante de mensagens WebSocket com formatos inesperados ou incompletos (`test/fuzz-crash-test.js`).
-* **Otimização de SDP & QoS:** Valida parâmetros SDP e adaptação de bitrate P2P (`test/sdp-optimization.test.js`, `test/qos-adaptation-and-modal.test.js`).
-* **Hardening & Rate Limiting:** Testa bloqueios de tentativas de senha e enumeração por IP (`check-room`, `join-room`, `/ice-servers`), CSP `style-src 'self'`, `ALLOWED_ORIGINS` em produção e bloqueio de arquivos internos (`test/ip-rate-limit.test.js`, `test/server-security-hardening.test.js`).
-* **Ciclo de Vida de Interface & Desktop:** Valida o fluxo multi-tela, Spotlight, PiP, acessibilidade de modais e integração da ponte Desktop (`test/screen-share-lifecycle.test.js`, `test/e2e-browser.test.js`).
+* **Otimização de SDP & QoS:** Valida parâmetros SDP, seleção de codecs e adaptação dinâmica de bitrate/FPS P2P (`test/media-qos-and-sdp.test.js`, `test/webrtc-transceivers-and-telemetry.test.js`).
+* **Hardening & Rate Limiting:** Testa bloqueios de tentativas de senha, criação de salas, conexões simultâneas e enumeração por IP (`check-room`, `join-room`, `/ice-servers`), CSP `style-src 'self'`, `ALLOWED_ORIGINS` em produção e bloqueio de arquivos internos (`test/server-auth-and-rate-limit.test.js`, `test/server-security-hardening.test.js`).
+* **Ciclo de Vida de Interface, Áudio & Desktop:** Valida o fluxo multi-tela, renegociação WebRTC/ICE, Ring Buffer do AudioWorklet, Spotlight, PiP, acessibilidade de modais e integração da ponte Desktop (`test/screen-share-lifecycle.test.js`, `test/webrtc-renegotiation-and-ice-lifecycle.test.js`, `test/audio-worklet-ring-buffer.test.js`, `test/desktop-bridge-and-audio.test.js`, `test/ui-a11y-and-theme.test.js`, `test/e2e-browser.test.js`).
 
 ---
 

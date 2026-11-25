@@ -29,10 +29,10 @@ pub struct DiscordStatus {
     pub name: String,
 }
 
-/// Determina se um executável deve ser omitido da lista de captura (StreamGrid / WebView2 / shell).
+/// Determina se um executável deve ser omitido da lista de captura (StreamGrid / WebView2).
 pub fn should_exclude_process_exe(exe_name: &str) -> bool {
     let lower = exe_name.trim().to_lowercase();
-    lower.contains("streamgrid") || lower.contains("msedgewebview2") || lower.contains("neutralino")
+    lower.contains("streamgrid") || lower.contains("msedgewebview2")
 }
 
 /// Seleciona o processo raiz do Discord cujo processo pai não é outro processo do Discord,
@@ -300,7 +300,6 @@ mod tests {
     fn excludes_streamgrid_and_webview2_processes() {
         assert!(should_exclude_process_exe("StreamGrid.exe"));
         assert!(should_exclude_process_exe("msedgewebview2.exe"));
-        assert!(should_exclude_process_exe("neutralino-win_x64.exe"));
         assert!(!should_exclude_process_exe("spotify.exe"));
         assert!(!should_exclude_process_exe("Discord.exe"));
     }

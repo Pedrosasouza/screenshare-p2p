@@ -31,6 +31,7 @@ export function parseSafeServerUrl(raw, options = {}) {
     const desktopMode = options && options.isDesktop !== undefined
         ? Boolean(options.isDesktop)
         : isDesktopApp(win);
+    const allowExternalHttps = Boolean(options && options.allowExternalHttps);
     const hasWindow = Boolean(win && win.location);
     const pageProtocol = hasWindow ? (win.location.protocol || '') : '';
     const pageOrigin = hasWindow ? (win.location.origin || '') : '';
@@ -60,14 +61,19 @@ export function parseSafeServerUrl(raw, options = {}) {
     }
 
     if (!desktopMode && !isSameOrigin && !isLoopback) {
-        return null;
+        if (!allowExternalHttps || parsed.protocol !== 'https:') {
+            return null;
+        }
     }
 
     return parsed.origin.replace(/\/+$/, '');
 }
 
 export function saveCustomSignalingServerUrl(rawUrl, options = {}) {
-    const validUrl = parseSafeServerUrl(rawUrl, options);
+    const allowExternalHttps = options && options.allowExternalHttps !== undefined
+        ? Boolean(options.allowExternalHttps)
+        : true;
+    const validUrl = parseSafeServerUrl(rawUrl, { ...options, allowExternalHttps });
     if (!validUrl) {
         return {
             ok: false,
@@ -107,13 +113,14 @@ export function resolveSignalingServerUrl(options = {}) {
     const pageOrigin = hasWindow ? (win.location.origin || '') : '';
     const pageHostname = hasWindow ? (win.location.hostname || '') : '';
     const pageSearch = hasWindow ? (win.location.search || '') : '';
-    const parseOpts = { windowObj: win, isDesktop: desktopMode };
+    const queryParseOpts = { windowObj: win, isDesktop: desktopMode, allowExternalHttps: false };
+    const savedParseOpts = { windowObj: win, isDesktop: desktopMode, allowExternalHttps: true };
 
     try {
         const params = new URLSearchParams(pageSearch);
         const paramServer = params.get('server');
         if (paramServer) {
-            const validParam = parseSafeServerUrl(paramServer, parseOpts);
+            const validParam = parseSafeServerUrl(paramServer, queryParseOpts);
             if (validParam) {
                 return validParam;
             }
@@ -122,7 +129,7 @@ export function resolveSignalingServerUrl(options = {}) {
         if (store && typeof store.getItem === 'function') {
             const savedServer = store.getItem(SERVER_URL_STORAGE_KEY);
             if (savedServer) {
-                const validSaved = parseSafeServerUrl(savedServer, parseOpts);
+                const validSaved = parseSafeServerUrl(savedServer, savedParseOpts);
                 if (validSaved) {
                     return validSaved;
                 }
@@ -206,13 +213,21 @@ export function buildInviteUrl({
     pathname = (typeof window !== 'undefined' && window.location ? window.location.pathname : '/')
 } = {}) {
     const normalizedOrigin = typeof origin === 'string' ? origin : '';
+    const cleanOrigin = normalizedOrigin.replace(/\/+$/, '');
+    const cleanServerUrl = typeof serverUrl === 'string' ? serverUrl.trim().replace(/\/+$/, '') : '';
     const isTauriOrigin = normalizedOrigin.startsWith('tauri://')
         || normalizedOrigin.startsWith('http://tauri.localhost')
         || normalizedOrigin.startsWith('https://tauri.localhost');
+    const hasCustomRemoteHttpsServer = Boolean(
+        cleanServerUrl &&
+        cleanServerUrl.startsWith('https://') &&
+        cleanOrigin &&
+        cleanServerUrl !== cleanOrigin
+    );
 
     let baseUrl;
-    if ((isDesktop || isTauriOrigin) && serverUrl) {
-        baseUrl = `${String(serverUrl).replace(/\/+$/, '')}/`;
+    if ((isDesktop || isTauriOrigin || hasCustomRemoteHttpsServer) && cleanServerUrl) {
+        baseUrl = `${cleanServerUrl}/`;
     } else {
         baseUrl = `${normalizedOrigin}${pathname || '/'}`;
     }

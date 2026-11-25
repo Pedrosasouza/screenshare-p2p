@@ -65,7 +65,6 @@ function collectDomReferences(doc) {
         'shareConfigModal', 'btnCloseShareConfig', 'btnConfirmStartShare', 'btnRefreshAudioApps',
         'selectAudioApp', 'audioSourceExcludeDiscord', 'audioSourceApp', 'audioSourceSystem',
         'audioSourceNone', 'appSelectorContainer', 'appExcludeOptionContainer', 'chkExcludeSelectedApp',
-        'vbCableOptionContainer', 'chkUseVbCable',
         'btnTogglePip', 'btnToggleStats', 'statsModal', 'btnCloseStatsModal',
         'btnResetServerUrl', 'inputCustomServerUrl', 'btnSaveServerUrl'
     ];
@@ -130,7 +129,6 @@ export function initApp({
         selectedVideoResolution: '1080p',
         selectedVideoFps: 60,
         selectedAudioSource: null,
-        useVbCableAudio: false,
         excludeSelectedApp: false
     };
 
@@ -482,7 +480,7 @@ export function initApp({
                     return;
                 }
                 if (roomModalCtrl.isRoomModalOpen()) {
-                    if (dom.roomViewChoice && dom.roomViewChoice.style.display === 'none') {
+                    if (dom.roomViewChoice && dom.roomViewChoice.hidden) {
                         roomModalCtrl.switchRoomView('choice');
                     } else if (state.roomId) {
                         roomModalCtrl.closeRoomModal();

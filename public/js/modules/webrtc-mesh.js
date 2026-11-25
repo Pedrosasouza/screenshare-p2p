@@ -125,19 +125,6 @@ export function createWebRtcMesh({
             if (!warningEl && documentObj) {
                 warningEl = documentObj.createElement('div');
                 warningEl.className = 'peer-connection-warning';
-                warningEl.style.position = 'absolute';
-                warningEl.style.top = '10px';
-                warningEl.style.left = '10px';
-                warningEl.style.right = '10px';
-                warningEl.style.zIndex = '5';
-                warningEl.style.background = 'rgba(239, 68, 68, 0.9)';
-                warningEl.style.color = '#fff';
-                warningEl.style.padding = '6px 10px';
-                warningEl.style.borderRadius = '6px';
-                warningEl.style.fontSize = '0.75rem';
-                warningEl.style.display = 'flex';
-                warningEl.style.alignItems = 'center';
-                warningEl.style.gap = '6px';
                 const warnIcon = documentObj.createElement('i');
                 warnIcon.className = 'fa-solid fa-triangle-exclamation';
                 const warnText = documentObj.createElement('span');
@@ -207,6 +194,7 @@ export function createWebRtcMesh({
     function addLocalTracksToPC(pc) {
         if (!pc || !state.localStream) return Promise.resolve([]);
         const qm = getQosMonitor();
+        const targetPeerObj = explicitPeerObj || Array.from(peers.values()).find((p) => p && p.pc === pc) || null;
         const senders = pc.getSenders();
         const transceivers = typeof pc.getTransceivers === 'function' ? pc.getTransceivers() : null;
         const replacePromises = [];
@@ -216,7 +204,7 @@ export function createWebRtcMesh({
                 ? (transceivers.find((t) => {
                     const s = t && t.sender;
                     if (!s) return false;
-                    if (s.track) return s.track.id === track.id || s.track.kind === track.kind;
+                    if (s.track) return s.track.id === outboundTrack.id || s.track.id === track.id || s.track.kind === track.kind;
                     const receiverKind = t.receiver && t.receiver.track && t.receiver.track.kind;
                     return (s._kind && s._kind === track.kind) || (receiverKind === track.kind);
                 }) || null)
@@ -231,22 +219,22 @@ export function createWebRtcMesh({
             }
             if (!existingSender) {
                 existingSender = senders.find((s) =>
-                    (s.track && (s.track.id === track.id || s.track.kind === track.kind)) ||
+                    (s.track && (s.track.id === outboundTrack.id || s.track.id === track.id || s.track.kind === track.kind)) ||
                     (!s.track && (s._kind === track.kind || (!transceivers && s._kind === undefined && s.dtlsTransport)))
                 );
             }
             if (existingSender) {
                 existingSender._kind = track.kind;
-                if (existingSender.track !== track) {
+                if (existingSender.track !== outboundTrack) {
                     try {
-                        replacePromises.push(Promise.resolve(existingSender.replaceTrack(track)).catch(() => {}));
+                        replacePromises.push(Promise.resolve(existingSender.replaceTrack(outboundTrack)).catch(() => {}));
                     } catch (_) {}
                 }
-                if (qm) qm.configureSenderParams(existingSender, track.kind);
+                if (qm) qm.configureSenderParams(existingSender, track.kind, targetPeerObj);
             } else {
-                const sender = pc.addTrack(track, state.localStream);
+                const sender = pc.addTrack(outboundTrack, state.localStream);
                 sender._kind = track.kind;
-                if (qm) qm.configureSenderParams(sender, track.kind);
+                if (qm) qm.configureSenderParams(sender, track.kind, targetPeerObj);
             }
         });
         return Promise.allSettled(replacePromises);
@@ -685,7 +673,7 @@ export function createWebRtcMesh({
                 if (!isPeerConnectionActive(senderId, peerObj, pc)) return;
 
                 if (state.localStream) {
-                    await addLocalTracksToPC(pc);
+                    await addLocalTracksToPC(pc, peerObj);
                     if (!isPeerConnectionActive(senderId, peerObj, pc)) return;
                 }
 
@@ -739,7 +727,8 @@ export function createWebRtcMesh({
                 if (state.localStream) {
                     const videoTrack = state.localStream.getVideoTracks()[0];
                     const videoSender = pc.getSenders().find((s) => s.track && s.track.kind === 'video');
-                    if (videoSender && videoTrack) {
+                    const activeTrack = (videoSender && videoSender.track) || videoTrack;
+                    if (videoSender && activeTrack) {
                         console.log(`[WebRTC] Peer ${senderId} solicitou keyframe (tela preta). Forçando IDR frame via replaceTrack...`);
                         try { Promise.resolve(videoSender.replaceTrack(videoTrack)).catch(() => {}); } catch (_) {}
                     }
@@ -827,9 +816,7 @@ export function createWebRtcMesh({
             dom.displayRoomId.textContent = state.roomId;
             if (hasPassword && documentObj) {
                 const icon = documentObj.createElement('i');
-                icon.className = 'fa-solid fa-lock';
-                icon.style.fontSize = '0.75rem';
-                icon.style.marginLeft = '4px';
+                icon.className = 'fa-solid fa-lock room-lock-icon';
                 icon.title = 'Sala protegida por senha';
                 dom.displayRoomId.appendChild(icon);
             }
@@ -881,7 +868,7 @@ export function createWebRtcMesh({
             for (const [peerId, peerObj] of peers.entries()) {
                 if (offeredDuringAwait.has(peerId)) continue;
                 trackPromises.push(
-                    Promise.resolve(addLocalTracksToPC(peerObj.pc)).then(() => {
+                    Promise.resolve(addLocalTracksToPC(peerObj.pc, peerObj)).then(() => {
                         if (!isPeerConnectionActive(peerId, peerObj, peerObj.pc)) return;
                         return sendOffer(peerId);
                     })
@@ -914,7 +901,7 @@ export function createWebRtcMesh({
         if (userName && grid) grid.updatePeerUserName(socketId, userName);
 
         if (state.localStream) {
-            await addLocalTracksToPC(pc);
+            await addLocalTracksToPC(pc, peerObj);
             if (!isPeerConnectionActive(socketId, peerObj, pc)) return;
             sendOffer(socketId);
             if (socket && socket._roomUsersOfferedPeers) {
@@ -931,7 +918,8 @@ export function createWebRtcMesh({
                     if (!vTrack) return;
                     const vSender = pc.getSenders().find((s) => s.track && s.track.kind === 'video');
                     if (vSender) {
-                        try { Promise.resolve(vSender.replaceTrack(vTrack)).catch(() => {}); } catch (_) {}
+                        const activeTrack = vSender.track || vTrack;
+                        try { Promise.resolve(vSender.replaceTrack(activeTrack)).catch(() => {}); } catch (_) {}
                     }
                 }, 400);
             }

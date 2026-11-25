@@ -13,7 +13,6 @@
  * @property {'1080p' | '720p' | string} [selectedVideoResolution]
  * @property {number} [selectedVideoFps]
  * @property {string | null} [selectedAudioSource]
- * @property {boolean} [useVbCableAudio]
  * @property {boolean} [excludeSelectedApp]
  *
  * @typedef {Record<string, any>} DomRefs

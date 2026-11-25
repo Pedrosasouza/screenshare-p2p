@@ -381,7 +381,7 @@ export function createStreamGridController({
             : null;
         if (!warningEl) return;
         const hasOtherStream = getRemoteActiveStreams().size > 0;
-        warningEl.style.display = hasOtherStream ? 'block' : 'none';
+        warningEl.hidden = !hasOtherStream;
     }
 
     function bindCopyInviteLink() {

@@ -7,7 +7,6 @@ export const VIDEO_RES_KEY = 'streamgrid_video_resolution';
 export const VIDEO_FPS_KEY = 'streamgrid_video_fps';
 export const AUDIO_SOURCE_KEY = 'streamgrid_audio_source';
 export const CONTENT_HINT_KEY = 'streamgrid_content_hint';
-export const USE_VB_CABLE_KEY = 'streamgrid_use_vb_cable';
 export const EXCLUDE_SELECTED_APP_KEY = 'streamgrid_exclude_selected_app';
 
 function resolveStorage(explicitStorage) {
@@ -152,10 +151,6 @@ export function loadSavedClientPreferences({ state, storage: explicitStorage, on
             const savedHint = storage.getItem(CONTENT_HINT_KEY);
             if (savedHint === 'motion' || savedHint === 'detail') {
                 state.contentHintMode = savedHint;
-            }
-            const savedVbCable = storage.getItem(USE_VB_CABLE_KEY);
-            if (savedVbCable === 'true' || savedVbCable === 'false') {
-                state.useVbCableAudio = savedVbCable === 'true';
             }
             const savedExcludeApp = storage.getItem(EXCLUDE_SELECTED_APP_KEY);
             if (savedExcludeApp === 'true' || savedExcludeApp === 'false') {

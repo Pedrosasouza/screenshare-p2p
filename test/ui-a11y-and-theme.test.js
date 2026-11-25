@@ -39,13 +39,11 @@ function createAudioCardHarness(createShareConfigModalController, { isDesktop = 
         radios[def.key] = radio;
     }
 
-    const appSelectorContainer = createMockElement('div', { id: 'appSelectorContainer', style: { display: 'none' } });
-    const appExcludeOptionContainer = createMockElement('div', { id: 'appExcludeOptionContainer', style: { display: 'none' } });
+    const appSelectorContainer = createMockElement('div', { id: 'appSelectorContainer', hidden: true });
+    const appExcludeOptionContainer = createMockElement('div', { id: 'appExcludeOptionContainer', hidden: true });
     const chkExcludeSelectedApp = createMockElement('input', { id: 'chkExcludeSelectedApp', type: 'checkbox', checked: false });
-    const vbCableOptionContainer = createMockElement('div', { id: 'vbCableOptionContainer', style: { display: 'none' } });
-    const chkUseVbCable = createMockElement('input', { id: 'chkUseVbCable', type: 'checkbox', checked: false });
     const btnConfirmStartShare = createMockElement('button', { id: 'btnConfirmStartShare' });
-    const shareConfigModal = createMockElement('div', { id: 'shareConfigModal', style: { display: 'none' }, hidden: true });
+    const shareConfigModal = createMockElement('div', { id: 'shareConfigModal', hidden: true });
     const radioList = [radios.exclude_discord, radios.app, radios.system, radios.none];
     const startedArgs = [];
 
@@ -53,8 +51,6 @@ function createAudioCardHarness(createShareConfigModalController, { isDesktop = 
         appSelectorContainer,
         appExcludeOptionContainer,
         chkExcludeSelectedApp,
-        vbCableOptionContainer,
-        chkUseVbCable,
         btnConfirmStartShare,
         shareConfigModal,
         audioSourceExcludeDiscord: radios.exclude_discord,
@@ -74,7 +70,6 @@ function createAudioCardHarness(createShareConfigModalController, { isDesktop = 
         selectedVideoFps: 60,
         selectedVideoResolution: '1080p',
         selectedAudioSource: null,
-        useVbCableAudio: false,
         excludeSelectedApp: false
     };
 
@@ -88,8 +83,6 @@ function createAudioCardHarness(createShareConfigModalController, { isDesktop = 
             appSelectorContainer,
             appExcludeOptionContainer,
             chkExcludeSelectedApp,
-            vbCableOptionContainer,
-            chkUseVbCable,
             btnConfirmStartShare,
             shareConfigModal
         },
@@ -111,8 +104,6 @@ function createAudioCardHarness(createShareConfigModalController, { isDesktop = 
         appSelectorContainer,
         appExcludeOptionContainer,
         chkExcludeSelectedApp,
-        vbCableOptionContainer,
-        chkUseVbCable,
         btnConfirmStartShare,
         startedArgs
     };
@@ -122,7 +113,6 @@ test('openShareConfigModal and change listener toggle .is-selected across cards 
     const { createShareConfigModalController } = await loadClientModules(['share-config-modal']);
 
     const hWeb = createAudioCardHarness(createShareConfigModalController, { isDesktop: false, initialSelected: 'exclude_discord' });
-    hWeb.cards.exclude_discord.style.border = '1px solid var(--primary)';
     hWeb.ctrl.openShareConfigModal();
 
     assert.equal(hWeb.radios.system.checked, true);
@@ -131,50 +121,58 @@ test('openShareConfigModal and change listener toggle .is-selected across cards 
     assert.equal(hWeb.cards.exclude_discord.classList.contains('is-selected'), false);
     assert.equal(hWeb.cards.app.classList.contains('is-selected'), false);
     assert.equal(hWeb.cards.none.classList.contains('is-selected'), false);
-    assert.equal(hWeb.cards.exclude_discord.style.border, '');
-    assert.equal(hWeb.vbCableOptionContainer.style.display, 'block');
-    assert.equal(hWeb.appExcludeOptionContainer.style.display, 'none');
-    assert.equal(hWeb.chkUseVbCable.checked, false);
+    assert.equal(hWeb.appExcludeOptionContainer.hidden, true);
 
     hWeb.radios.none.triggerChange();
     assert.equal(hWeb.cards.none.classList.contains('is-selected'), true);
     assert.equal(hWeb.cards.system.classList.contains('is-selected'), false);
-    assert.equal(hWeb.cards.system.style.border, '');
-    assert.equal(hWeb.vbCableOptionContainer.style.display, 'none');
 
     hWeb.radios.system.triggerChange();
-    assert.equal(hWeb.vbCableOptionContainer.style.display, 'block');
-    hWeb.chkUseVbCable.checked = true;
-    hWeb.chkUseVbCable.dispatchEvent({ type: 'change' });
     await hWeb.btnConfirmStartShare.dispatchEvent({ type: 'click' });
-    assert.equal(hWeb.state.useVbCableAudio, true);
-    assert.deepEqual(hWeb.startedArgs[0][4], { useVbCable: true, excludeApp: false });
+    assert.deepEqual(hWeb.startedArgs[0][4], { excludeApp: false });
 
     const hDesktop = createAudioCardHarness(createShareConfigModalController, { isDesktop: true, initialSelected: 'app' });
     hDesktop.ctrl.openShareConfigModal();
     assert.equal(hDesktop.cards.app.classList.contains('is-selected'), true);
     assert.equal(hDesktop.cards.exclude_discord.classList.contains('is-selected'), false);
-    assert.equal(hDesktop.appSelectorContainer.style.display, 'flex');
-    assert.equal(hDesktop.appExcludeOptionContainer.style.display, 'flex');
-    assert.equal(hDesktop.vbCableOptionContainer.style.display, 'none');
+    assert.equal(hDesktop.appSelectorContainer.hidden, false);
+    assert.equal(hDesktop.appExcludeOptionContainer.hidden, false);
     assert.equal(hDesktop.chkExcludeSelectedApp.checked, false);
 
     hDesktop.chkExcludeSelectedApp.checked = true;
     hDesktop.chkExcludeSelectedApp.dispatchEvent({ type: 'change' });
     await hDesktop.btnConfirmStartShare.dispatchEvent({ type: 'click' });
     assert.equal(hDesktop.state.excludeSelectedApp, true);
-    assert.deepEqual(hDesktop.startedArgs[0][4], { useVbCable: false, excludeApp: true });
+    assert.deepEqual(hDesktop.startedArgs[0][4], { excludeApp: true });
 
     hDesktop.radios.exclude_discord.triggerChange();
     assert.equal(hDesktop.cards.exclude_discord.classList.contains('is-selected'), true);
     assert.equal(hDesktop.cards.app.classList.contains('is-selected'), false);
-    assert.equal(hDesktop.appSelectorContainer.style.display, 'none');
-    assert.equal(hDesktop.appExcludeOptionContainer.style.display, 'none');
-    assert.equal(hDesktop.vbCableOptionContainer.style.display, 'none');
+    assert.equal(hDesktop.appSelectorContainer.hidden, true);
+    assert.equal(hDesktop.appExcludeOptionContainer.hidden, true);
 
     hDesktop.radios.system.triggerChange();
-    assert.equal(hDesktop.vbCableOptionContainer.style.display, 'block');
-    assert.equal(hDesktop.appExcludeOptionContainer.style.display, 'none');
+    assert.equal(hDesktop.appExcludeOptionContainer.hidden, true);
+});
+
+test('initTheme defaults to dark-first even on light OS preference, and respects saved light preference', async () => {
+    const { initTheme, toggleTheme, THEME_KEY } = await loadClientModules(['ui-feedback']);
+    const btnThemeToggle = createMockElement('button', { id: 'btnThemeToggle' });
+    const doc = createMockDocument({ btnThemeToggle });
+    const storage = createMockStorage();
+    const lightOsWin = { matchMedia: () => ({ matches: false }) };
+
+    initTheme({ windowObj: lightOsWin, documentObj: doc, storage });
+    assert.equal(doc.documentElement.getAttribute('data-theme'), 'dark');
+    assert.equal(storage.getItem(THEME_KEY), 'dark');
+
+    toggleTheme({ documentObj: doc, storage });
+    assert.equal(doc.documentElement.getAttribute('data-theme'), 'light');
+    assert.equal(storage.getItem(THEME_KEY), 'light');
+
+    const freshDoc = createMockDocument({ btnThemeToggle });
+    initTheme({ windowObj: lightOsWin, documentObj: freshDoc, storage });
+    assert.equal(freshDoc.documentElement.getAttribute('data-theme'), 'light');
 });
 
 test('index.html has .btn-text wrappers, type="button", role="dialog" aria-modal="true", and aria-label', () => {

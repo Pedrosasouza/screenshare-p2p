@@ -116,11 +116,13 @@ export async function checkDiscordStatus(windowObj, documentObj) {
             ? doc.getElementById('discordStatusBadge')
             : null;
         if (badge && msg) {
+            if (badge.classList && typeof badge.classList.toggle === 'function') {
+                badge.classList.toggle('is-detected', Boolean(msg.detected));
+                badge.classList.toggle('is-missing', !msg.detected);
+            }
             if (msg.detected) {
-                badge.style.color = '#3ba55d';
                 badge.innerHTML = `<i class="fa-solid fa-circle-check"></i> Discord detectado (PID ${Number(msg.pid) || 0}) — Chamadas serão excluídas do stream`;
             } else {
-                badge.style.color = '#faa81a';
                 badge.innerHTML = `<i class="fa-solid fa-circle-exclamation"></i> Discord Desktop não detectado (inicie-o para isolar a chamada)`;
             }
         }

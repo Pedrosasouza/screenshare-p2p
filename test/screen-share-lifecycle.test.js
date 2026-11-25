@@ -191,23 +191,16 @@ test('T2: Errors after getDisplayMedia roll back tracks, WASAPI capture, cable t
     assert.ok(envB.events.some((e) => e.type === 'stopAppAudioCapture'));
     assert.equal(envB.state.localStream, null);
 
-    // 2c: system mode with VB-Cable opt-in + extra cableStream tracks + tile error
+    // 2c: system mode with native audio + tile error stops all captured tracks
     const videoTrackC = createMockTrack('video', 'v-c');
-    const cableTrack1 = createMockTrack('audio', 'cab-1');
-    const cableTrackExtra = createMockTrack('audio', 'cab-2');
+    const systemAudioTrackC = createMockTrack('audio', 'sys-a');
     const envC = createScreenShareEnv(mods, {
-        createStreamTile: () => { throw new Error('Tile fail on cable'); }
+        createStreamTile: () => { throw new Error('Tile fail on system'); }
     });
-    envC.state.useVbCableAudio = true;
-    envC.navigatorObj.mediaDevices.enumerateDevices = async () => [
-        { kind: 'audioinput', deviceId: 'cable-id-1', label: 'CABLE Output (VB-Audio Virtual Cable)' }
-    ];
-    envC.navigatorObj.mediaDevices.getDisplayMedia = async () => new MockMediaStream([videoTrackC]);
-    envC.navigatorObj.mediaDevices.getUserMedia = async () => new MockMediaStream([cableTrack1, cableTrackExtra]);
+    envC.navigatorObj.mediaDevices.getDisplayMedia = async () => new MockMediaStream([videoTrackC, systemAudioTrackC]);
 
     await envC.controller.startScreenShare('system');
-    assert.equal(cableTrackExtra.stopped, true);
-    assert.equal(cableTrack1.stopped, true);
+    assert.equal(systemAudioTrackC.stopped, true);
     assert.equal(videoTrackC.stopped, true);
     assert.equal(envC.state.localStream, null);
 });
@@ -251,46 +244,9 @@ test('T3: Rejected/undefined replaceTrack never triggers unhandledRejection acro
     }
 });
 
-test('T4: system mode ignores VB-Cable by default and supports opt-in with mic permission guard', async () => {
+test('T4: system mode captures native audio directly via getDisplayMedia without enumerating mic devices', async () => {
     const mods = await loadModules();
 
-    // 4a: opt-in enabled + permission prompt + empty labels -> does NOT call getUserMedia({ audio: true })
-    let micPromptCalled = false;
-    let displayMediaAudioOpt = null;
-    const envA = createScreenShareEnv(mods);
-    envA.state.useVbCableAudio = true;
-    envA.navigatorObj.permissions = { query: async () => ({ state: 'prompt' }) };
-    envA.navigatorObj.mediaDevices.enumerateDevices = async () => [{ kind: 'audioinput', deviceId: 'dev-1', label: '' }];
-    envA.navigatorObj.mediaDevices.getUserMedia = async (constraints) => {
-        if (constraints && constraints.audio === true) micPromptCalled = true;
-        return new MockMediaStream([]);
-    };
-    envA.navigatorObj.mediaDevices.getDisplayMedia = async (opts) => {
-        displayMediaAudioOpt = opts && opts.audio;
-        return new MockMediaStream([createMockTrack('video', 'v-sys')]);
-    };
-
-    await envA.controller.startScreenShare('system');
-    assert.equal(micPromptCalled, false);
-    assert.ok(displayMediaAudioOpt && typeof displayMediaAudioOpt === 'object');
-    assert.ok(envA.events.some((e) => e.type === 'toast' && e.toastType === 'warning'));
-
-    // 4b: opt-in enabled + VB-Cable fails -> emits actionable warning toast
-    const envB = createScreenShareEnv(mods);
-    envB.state.useVbCableAudio = true;
-    envB.navigatorObj.permissions = { query: async () => ({ state: 'granted' }) };
-    envB.navigatorObj.mediaDevices.enumerateDevices = async () => [
-        { kind: 'audioinput', deviceId: 'cable-1', label: 'CABLE Output (VB-Audio Virtual Cable)' }
-    ];
-    envB.navigatorObj.mediaDevices.getDisplayMedia = async () => new MockMediaStream([createMockTrack('video', 'v-cable')]);
-    envB.navigatorObj.mediaDevices.getUserMedia = async () => {
-        throw new Error('NotReadableError: Device in use');
-    };
-
-    await envB.controller.startScreenShare('system');
-    assert.ok(envB.events.some((e) => e.type === 'toast' && e.toastType === 'warning'));
-
-    // 4c: default system mode (no opt-in) ignores VB-Cable even when present, skips enumerateDevices/getUserMedia, and uses native getDisplayMedia audio
     let enumerateCalled = false;
     let userMediaCalled = false;
     let nativeDisplayOpts = null;
@@ -299,11 +255,11 @@ test('T4: system mode ignores VB-Cable by default and supports opt-in with mic p
     const envC = createScreenShareEnv(mods);
     envC.navigatorObj.mediaDevices.enumerateDevices = async () => {
         enumerateCalled = true;
-        return [{ kind: 'audioinput', deviceId: 'cable-1', label: 'CABLE Output (VB-Audio Virtual Cable)' }];
+        return [];
     };
     envC.navigatorObj.mediaDevices.getUserMedia = async () => {
         userMediaCalled = true;
-        return new MockMediaStream([createMockTrack('audio', 'a-cable')]);
+        return new MockMediaStream([]);
     };
     envC.navigatorObj.mediaDevices.getDisplayMedia = async (opts) => {
         nativeDisplayOpts = opts;
@@ -311,8 +267,8 @@ test('T4: system mode ignores VB-Cable by default and supports opt-in with mic p
     };
 
     await envC.controller.startScreenShare('system');
-    assert.equal(enumerateCalled, false, 'Sem opt-in, não deve enumerar dispositivos');
-    assert.equal(userMediaCalled, false, 'Sem opt-in, não deve chamar getUserMedia para VB-Cable');
+    assert.equal(enumerateCalled, false, 'Não deve enumerar dispositivos de entrada');
+    assert.equal(userMediaCalled, false, 'Não deve chamar getUserMedia no modo system');
     assert.ok(nativeDisplayOpts && typeof nativeDisplayOpts.audio === 'object');
     assert.equal(envC.state.localStream.getAudioTracks()[0], nativeAudio);
 });

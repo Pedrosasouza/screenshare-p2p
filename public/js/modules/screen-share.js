@@ -140,44 +140,6 @@ export function createScreenShareController({
         }
     }
 
-    async function findVbCableDeviceId(isShareCancelled) {
-        try {
-            let devices = await navigatorObj.mediaDevices.enumerateDevices();
-            if (isShareCancelled()) return null;
-            const hasEmptyLabels = devices.some((d) => d.deviceId && d.label === '');
-            if (hasEmptyLabels) {
-                let canProbeMicLabels = false;
-                if (navigatorObj.permissions && typeof navigatorObj.permissions.query === 'function') {
-                    try {
-                        const micPerm = await navigatorObj.permissions.query({ name: 'microphone' });
-                        canProbeMicLabels = Boolean(micPerm && micPerm.state === 'granted');
-                    } catch (_) {}
-                    if (isShareCancelled()) return null;
-                }
-                if (canProbeMicLabels) {
-                    try {
-                        const tempStream = await navigatorObj.mediaDevices.getUserMedia({ audio: true });
-                        tempStream.getTracks().forEach((t) => t.stop());
-                        devices = await navigatorObj.mediaDevices.enumerateDevices();
-                    } catch (_) {}
-                    if (isShareCancelled()) return null;
-                }
-            }
-
-            const cableOutput = devices.find((d) => {
-                if (d.kind !== 'audioinput') return false;
-                const label = (d.label || '').toLowerCase();
-                return label.includes('cable output') ||
-                    (label.includes('vb-audio') && label.includes('cable')) ||
-                    (label.includes('virtual cable') && !label.includes('16ch'));
-            });
-
-            return cableOutput ? cableOutput.deviceId : null;
-        } catch (_) {
-            return null;
-        }
-    }
-
     async function startScreenShare(
         audioMode = 'exclude_discord',
         targetPid = null,
@@ -192,7 +154,6 @@ export function createScreenShareController({
 
         let screenStream = null;
         let audioTrack = null;
-        let cableStream = null;
         let captureSucceeded = false;
         let startedDesktopAudioThisAttempt = false;
         let shareGen = null;
@@ -307,63 +268,15 @@ export function createScreenShareController({
                 }
                 if (isShareCancelled()) return;
             } else if (audioMode === 'system') {
-                const useVbCable = Boolean(
-                    options && options.useVbCable !== undefined ? options.useVbCable : state.useVbCableAudio
-                );
-                let cableOutputId = null;
+                screenStream = await captureDisplayMedia({
+                    video: videoConstraints,
+                    audio: SYSTEM_AUDIO_CONSTRAINTS
+                });
+                if (!screenStream || isShareCancelled()) return;
 
-                if (useVbCable) {
-                    cableOutputId = await findVbCableDeviceId(isShareCancelled);
-                    if (isShareCancelled()) return;
-                }
-
-                if (useVbCable && cableOutputId) {
-                    screenStream = await captureDisplayMedia({
-                        video: videoConstraints,
-                        audio: false
-                    });
-                    if (!screenStream || isShareCancelled()) return;
-
-                    try {
-                        cableStream = await navigatorObj.mediaDevices.getUserMedia({
-                            audio: {
-                                deviceId: { exact: cableOutputId },
-                                ...SYSTEM_AUDIO_CONSTRAINTS,
-                                channelCount: 2,
-                                sampleRate: 48000
-                            }
-                        });
-                        const cableAudioTracks = cableStream.getAudioTracks();
-                        audioTrack = cableAudioTracks[0] || null;
-                        cableStream.getTracks().forEach((t) => {
-                            if (t !== audioTrack) {
-                                try { t.stop(); } catch (_) {}
-                            }
-                        });
-                        console.log('[Audio] ✅ Capturing isolated audio from VB-Cable');
-                    } catch (audioErr) {
-                        if (cableStream) {
-                            cableStream.getTracks().forEach((t) => { try { t.stop(); } catch (_) {} });
-                            cableStream = null;
-                        }
-                        console.warn('[Audio] VB-Cable capture failed:', audioErr.message);
-                        showToast('Aviso de Áudio: Falha ao capturar pelo VB-Cable (transmitindo apenas vídeo).', 'warning', 5000);
-                    }
-                    if (isShareCancelled()) return;
-                } else {
-                    if (useVbCable && !cableOutputId) {
-                        showToast('Aviso de Áudio: VB-Cable não encontrado — usando áudio nativo do sistema.', 'warning', 5000);
-                    }
-                    screenStream = await captureDisplayMedia({
-                        video: videoConstraints,
-                        audio: SYSTEM_AUDIO_CONSTRAINTS
-                    });
-                    if (!screenStream || isShareCancelled()) return;
-
-                    if (screenStream.getAudioTracks().length > 0) {
-                        audioTrack = screenStream.getAudioTracks()[0];
-                        console.log('[Audio] ✅ System audio captured directly via getDisplayMedia');
-                    }
+                if (screenStream.getAudioTracks().length > 0) {
+                    audioTrack = screenStream.getAudioTracks()[0];
+                    console.log('[Audio] ✅ System audio captured directly via getDisplayMedia');
                 }
             } else if (audioMode === 'app' || audioMode === 'exclude_app') {
                 showToast('Nenhum aplicativo selecionado para áudio isolado. Continuando apenas com vídeo.', 'warning');
@@ -426,7 +339,7 @@ export function createScreenShareController({
             for (const [peerId, peerObj] of peers.entries()) {
                 if (webrtc) {
                     trackSetupPromises.push(
-                        Promise.resolve(webrtc.addLocalTracksToPC(peerObj.pc)).then(() => {
+                        Promise.resolve(webrtc.addLocalTracksToPC(peerObj.pc, peerObj)).then(() => {
                             const current = peers.get(peerId);
                             if (!current || current.pc !== peerObj.pc) return;
                             return webrtc.sendOffer(peerId);
@@ -462,11 +375,6 @@ export function createScreenShareController({
                 if (screenStream) {
                     try {
                         screenStream.getTracks().forEach((t) => { try { t.stop(); } catch (_) {} });
-                    } catch (_) {}
-                }
-                if (cableStream) {
-                    try {
-                        cableStream.getTracks().forEach((t) => { try { t.stop(); } catch (_) {} });
                     } catch (_) {}
                 }
                 if (audioTrack) {

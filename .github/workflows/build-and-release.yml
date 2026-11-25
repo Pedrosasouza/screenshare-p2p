@@ -85,36 +85,7 @@ jobs:
 
       - name: Package Windows Bundle & Compute Checksums
         shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          # 1. Garantir diretório de distribuição
-          New-Item -ItemType Directory -Force -Path dist/StreamGrid | Out-Null
-
-          # 2. Copiar executável compilado pelo Tauri v2
-          $exe = if (Test-Path 'src-tauri/target/release/StreamGrid.exe') {
-            'src-tauri/target/release/StreamGrid.exe'
-          } else {
-            'src-tauri/target/release/streamgrid.exe'
-          }
-          Copy-Item $exe -Destination dist/StreamGrid/StreamGrid.exe -Force
-
-          # 3. Copiar instaladores gerados (NSIS / MSI), se presentes
-          Get-ChildItem -Path src-tauri/target/release/bundle -Include *.exe, *.msi -Recurse -ErrorAction SilentlyContinue |
-            ForEach-Object { Copy-Item $_.FullName -Destination dist/ -Force }
-
-          # 4. Compactar o pacote portátil para distribuição
-          Compress-Archive -Path dist/StreamGrid -DestinationPath dist/StreamGrid-Windows.zip -Force
-
-          # 5. Gerar hash SHA-256 para todos os artefatos distribuíveis (.zip, .exe, .msi)
-          $checksumLines = @()
-          Get-ChildItem -Path dist -File | Where-Object { $_.Extension -in '.zip', '.exe', '.msi' } | Sort-Object Name | ForEach-Object {
-            $hash = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash
-            $checksumLines += "$hash  $($_.Name)"
-            "$hash  $($_.Name)" | Out-File -FilePath "$($_.FullName).sha256" -Encoding ascii
-          }
-          $checksumLines | Out-File -FilePath dist/SHA256SUMS.txt -Encoding ascii
-          Write-Host ($checksumLines -join "`n")
+        run: ./scripts/package-windows.ps1
 
       - name: Upload Build Artifacts (CI Run)
         uses: actions/upload-artifact@v4

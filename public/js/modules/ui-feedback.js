@@ -168,18 +168,14 @@ export function playPresenceChime(type = 'join', windowObj = /** @type {import('
 }
 
 export function initTheme(options = {}) {
-    const win = options.windowObj || (typeof window !== 'undefined' ? window : null);
     const storageObj = options.storage || (typeof localStorage !== 'undefined' ? localStorage : null);
     let savedTheme = null;
     if (storageObj && typeof storageObj.getItem === 'function') {
         try { savedTheme = storageObj.getItem(THEME_KEY); } catch (_) {}
     }
 
-    if (!savedTheme) {
-        const prefersDark = Boolean(win && win.matchMedia && win.matchMedia('(prefers-color-scheme: dark)').matches);
-        savedTheme = prefersDark ? 'dark' : 'light';
-    }
-    applyTheme(savedTheme, null, options);
+    const initialTheme = savedTheme === 'light' ? 'light' : 'dark';
+    applyTheme(initialTheme, null, options);
 }
 
 export function applyTheme(theme, themeBtnEl = null, options = {}) {

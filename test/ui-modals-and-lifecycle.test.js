@@ -390,10 +390,10 @@ test('Salas Recentes: persistência e renderização no room-modal', async (t) =
         const btnClearRecentRooms = createMockElement('button', { id: 'btnClearRecentRooms' });
         const inputJoinRoomId = createMockElement('input', { id: 'inputJoinRoomId' });
         const inputJoinRoomPassword = createMockElement('input', { id: 'inputJoinRoomPassword' });
-        const roomViewChoice = createMockElement('div', { id: 'roomViewChoice', style: { display: 'block' } });
-        const roomViewCreate = createMockElement('div', { id: 'roomViewCreate', style: { display: 'none' } });
-        const roomViewJoin = createMockElement('div', { id: 'roomViewJoin', style: { display: 'none' } });
-        const roomModal = createMockElement('div', { id: 'roomModal', hidden: false, style: { display: 'flex' } });
+        const roomViewChoice = createMockElement('div', { id: 'roomViewChoice', hidden: false });
+        const roomViewCreate = createMockElement('div', { id: 'roomViewCreate', hidden: true });
+        const roomViewJoin = createMockElement('div', { id: 'roomViewJoin', hidden: true });
+        const roomModal = createMockElement('div', { id: 'roomModal', hidden: false });
 
         const dom = {
             roomModal,
@@ -535,9 +535,7 @@ describe('Utilitários da barra inferior (PiP e Stats)', () => {
         const { createStatsModalController } = await loadModules();
 
         const doc = createMockDocument();
-        const statsModal = createMockElement('div', { id: 'statsModal' });
-        statsModal.hidden = true;
-        statsModal.style.display = 'none';
+        const statsModal = createMockElement('div', { id: 'statsModal', hidden: true });
         const btnToggleStats = createMockElement('button', { id: 'btnToggleStats' });
         const btnCloseStatsModal = createMockElement('button', { id: 'btnCloseStatsModal' });
         doc.body.appendChild(statsModal);
@@ -560,7 +558,7 @@ describe('Utilitários da barra inferior (PiP e Stats)', () => {
             // Backdrop click fecha
             statsModal.dispatchEvent({ type: 'click', target: statsModal });
             assert.strictEqual(ctrl.isStatsModalOpen(), false);
-            assert.strictEqual(statsModal.style.display, 'none');
+            assert.strictEqual(statsModal.hidden, true);
 
             // Reabre e fecha via botão
             btnToggleStats.click();

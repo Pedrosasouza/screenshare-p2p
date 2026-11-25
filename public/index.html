@@ -1,10 +1,11 @@
 <!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="pt-BR" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="referrer" content="no-referrer">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>StreamGrid - Compartilhamento de Tela Multi-Transmissão</title>
+    <link rel="icon" type="image/png" href="icon.png">
     <link rel="stylesheet" href="vendor/inter/inter.css">
     <link rel="stylesheet" href="style.css">
     <!-- FontAwesome icons (local offline bundle) -->
@@ -28,7 +29,7 @@
                     <span id="connectionStatusText">Conectando...</span>
                 </div>
 
-                <div class="info-pill">
+                <div class="info-pill member-count-pill">
                     <i class="fa-solid fa-users"></i>
                     <span id="memberCountText">1 Participante</span>
                 </div>
@@ -46,8 +47,8 @@
                     <i class="fa-solid fa-arrow-right-from-bracket"></i> <span class="btn-text">Trocar Sala</span>
                 </button>
 
-                <button class="btn-icon" id="btnThemeToggle" title="Alternar Tema Claro / Escuro" aria-label="Alternar Tema Claro / Escuro" type="button">
-                    <i class="fa-solid fa-moon"></i>
+                <button class="btn-icon" id="btnThemeToggle" title="Mudar para Tema Claro" aria-label="Alternar Tema Claro / Escuro" type="button">
+                    <i class="fa-solid fa-sun"></i>
                 </button>
             </div>
         </header>
@@ -55,7 +56,7 @@
         <!-- Room Entry Modal (Two-Step Flow: Choice -> Create or Join) -->
         <div class="modal-overlay" id="roomModal" role="dialog" aria-modal="true" aria-labelledby="roomModalTitle">
             <div class="room-card">
-                <button class="room-card-close" id="btnCloseRoomModal" title="Fechar e voltar à sala (ESC)" aria-label="Fechar e voltar à sala (ESC)" type="button">
+                <button class="room-card-close" id="btnCloseRoomModal" title="Fechar e voltar à sala (ESC)" aria-label="Fechar e voltar à sala (ESC)" type="button" hidden>
                     <i class="fa-solid fa-xmark"></i>
                 </button>
 
@@ -75,7 +76,7 @@
                     <div class="quick-join-bar">
                         <div class="quick-join-input-wrap">
                             <i class="fa-solid fa-magnifying-glass quick-join-icon" aria-hidden="true"></i>
-                            <input type="search" id="inputQuickRoomId" name="quick-room-code" placeholder="Entrar rápido com código da sala..." maxlength="64" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-lpignore="true">
+                            <input type="search" id="inputQuickRoomId" name="quick-room-code" placeholder="Código da sala..." aria-label="Código da sala para entrada rápida" maxlength="64" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-lpignore="true">
                             <button type="button" class="btn btn-primary btn-pill btn-sm" id="btnQuickJoin">
                                 Entrar <i class="fa-solid fa-arrow-right"></i>
                             </button>
@@ -114,8 +115,8 @@
                         <div class="recent-rooms-list" id="recentRoomsList" role="list"></div>
                     </div>
 
-                    <div class="room-choice-footer" id="roomChoiceCancelContainer">
-                        <button class="btn btn-secondary btn-block" id="btnCancelRoomModal" type="button">
+                    <div class="room-choice-footer" id="roomChoiceCancelContainer" hidden>
+                        <button class="btn btn-secondary btn-block" id="btnCancelRoomModal" type="button" hidden>
                             <i class="fa-solid fa-arrow-left"></i> Cancelar e Voltar à Sala Atual
                         </button>
                     </div>
@@ -325,7 +326,7 @@
                             <div class="discord-status-row" id="discordStatusContainer">
                                 <span id="discordStatusBadge" class="discord-status-badge"><i class="fa-solid fa-circle-notch fa-spin"></i> Verificando Discord...</span>
                             </div>
-                            <div id="dualStreamEchoWarning" class="echo-warning-banner">
+                            <div id="dualStreamEchoWarning" class="echo-warning-banner" hidden>
                                 <i class="fa-solid fa-triangle-exclamation"></i> <strong>Aviso Anti-Eco:</strong> Outro participante já está transmitindo com áudio. Ao transmitir o PC inteiro simultaneamente, o áudio dele tocará no seu PC e pode voltar em eco. Recomendamos selecionar <em>"Apenas Um Aplicativo Específico"</em> ou mutar a tela recebida.
                             </div>
                         </label>
@@ -338,7 +339,7 @@
                             <span class="audio-option-desc">
                                 Captura isolada de um único jogo ou janela.
                             </span>
-                            <div id="appSelectorContainer" class="app-selector-row">
+                            <div id="appSelectorContainer" class="app-selector-row" hidden>
                                 <select id="selectAudioApp" class="form-input app-select-input">
                                     <option value="">Carregando aplicativos abertos...</option>
                                 </select>
@@ -348,7 +349,7 @@
                             </div>
                         </label>
 
-                        <div id="appExcludeOptionContainer" class="audio-sub-option">
+                        <div id="appExcludeOptionContainer" class="audio-sub-option" hidden>
                             <label class="audio-sub-checkbox-label" for="chkExcludeSelectedApp">
                                 <input type="checkbox" id="chkExcludeSelectedApp">
                                 <span>Excluir este aplicativo (capturar todo o resto do sistema)</span>
@@ -361,16 +362,9 @@
                                 <strong><i class="fa-solid fa-volume-high"></i> Áudio Geral do Sistema</strong>
                             </div>
                             <span class="audio-option-desc">
-                                Captura o áudio nativo do dispositivo de som do Windows.
+                                Captura o áudio nativo do sistema ou da aba selecionada.
                             </span>
                         </label>
-
-                        <div id="vbCableOptionContainer" class="audio-sub-option">
-                            <label class="audio-sub-checkbox-label" for="chkUseVbCable">
-                                <input type="checkbox" id="chkUseVbCable">
-                                <span>Usar VB-Cable (Virtual Audio Cable) como fonte do sistema</span>
-                            </label>
-                        </div>
 
                         <label class="audio-option-card audio-option-card--compact">
                             <div class="audio-option-title">

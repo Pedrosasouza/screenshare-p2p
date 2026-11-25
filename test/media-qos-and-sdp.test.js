@@ -442,9 +442,7 @@ describe('QoS adaptativo, Modal de Compartilhamento & Chime WebAudio', () => {
 
         function makeDom({ checkedValue = null, nullSystemCard = false } = {}) {
             const doc = createMockDocument();
-            const shareConfigModal = createMockElement('div', { id: 'shareConfigModal' });
-            shareConfigModal.hidden = true;
-            shareConfigModal.style.display = 'none';
+            const shareConfigModal = createMockElement('div', { id: 'shareConfigModal', hidden: true });
 
             const desktopCard1 = createMockElement('div', { className: 'audio-option-card' });
             const desktopCard2 = createMockElement('div', { className: 'audio-option-card' });
@@ -453,8 +451,7 @@ describe('QoS adaptativo, Modal de Compartilhamento & Chime WebAudio', () => {
             const audioSourceExcludeDiscord = createMockElement('input', { type: 'radio', name: 'audioSourceType', value: 'exclude_discord' });
             const audioSourceApp = createMockElement('input', { type: 'radio', name: 'audioSourceType', value: 'app' });
             const audioSourceSystem = createMockElement('input', { type: 'radio', name: 'audioSourceType', value: 'system' });
-            const appSelectorContainer = createMockElement('div', { id: 'appSelectorContainer' });
-            appSelectorContainer.style.display = 'block';
+            const appSelectorContainer = createMockElement('div', { id: 'appSelectorContainer', hidden: false });
 
             desktopCard1.appendChild(audioSourceExcludeDiscord);
             desktopCard2.appendChild(audioSourceApp);
@@ -490,12 +487,12 @@ describe('QoS adaptativo, Modal de Compartilhamento & Chime WebAudio', () => {
         });
         assert.doesNotThrow(() => webCtrl.openShareConfigModal());
         assert.strictEqual(webEnv.dom.audioSourceSystem.checked, true);
-        assert.strictEqual(webEnv.dom.appSelectorContainer.style.display, 'none');
-        assert.strictEqual(webEnv.desktopCard1.style.display, 'none');
-        assert.strictEqual(webEnv.desktopCard2.style.display, 'none');
+        assert.strictEqual(webEnv.dom.appSelectorContainer.hidden, true);
+        assert.strictEqual(webEnv.desktopCard1.hidden, true);
+        assert.strictEqual(webEnv.desktopCard2.hidden, true);
 
         const appEnv = makeDom({ checkedValue: 'app' });
-        appEnv.dom.appSelectorContainer.style.display = 'none';
+        appEnv.dom.appSelectorContainer.hidden = true;
         const appCtrl = createShareConfigModalController({
             state: { selectedAudioSource: 'app' },
             dom: appEnv.dom,
@@ -503,10 +500,10 @@ describe('QoS adaptativo, Modal de Compartilhamento & Chime WebAudio', () => {
             documentObj: appEnv.doc
         });
         appCtrl.openShareConfigModal();
-        assert.strictEqual(appEnv.dom.appSelectorContainer.style.display, 'flex');
+        assert.strictEqual(appEnv.dom.appSelectorContainer.hidden, false);
 
         const otherEnv = makeDom({ checkedValue: 'exclude_discord' });
-        otherEnv.dom.appSelectorContainer.style.display = 'block';
+        otherEnv.dom.appSelectorContainer.hidden = false;
         const otherCtrl = createShareConfigModalController({
             state: { selectedAudioSource: 'exclude_discord' },
             dom: otherEnv.dom,
@@ -514,7 +511,7 @@ describe('QoS adaptativo, Modal de Compartilhamento & Chime WebAudio', () => {
             documentObj: otherEnv.doc
         });
         otherCtrl.openShareConfigModal();
-        assert.strictEqual(otherEnv.dom.appSelectorContainer.style.display, 'none');
+        assert.strictEqual(otherEnv.dom.appSelectorContainer.hidden, true);
     });
 
     it('T3: playPresenceChime registra osc.onended e desconecta nós WebAudio', async () => {
