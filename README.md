@@ -1,4 +1,4 @@
-# 🖥️ StreamGrid — Multi-Screen Sharing over WebRTC
+# 🖥️ StreamGrid - Multi-Screen Sharing over WebRTC
 
 <p align="center">
   <a href="https://screenshare-p2p.onrender.com" target="_blank">
